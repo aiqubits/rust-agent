@@ -25,6 +25,7 @@ use crate::{
 };
 
 static STAGING_COUNTER: AtomicU64 = AtomicU64::new(1);
+const PINNED_RUST_VERSION: &str = env!("CARGO_PKG_RUST_VERSION");
 
 #[derive(Clone, Debug)]
 pub struct ComposeOptions {
@@ -690,7 +691,10 @@ fn normalize_snapshot_manifest(path: &Path) -> Result<Vec<u8>, ComposeError> {
         })?;
     package.insert("version".into(), toml::Value::String("0.1.0".into()));
     package.insert("edition".into(), toml::Value::String("2024".into()));
-    package.insert("rust-version".into(), toml::Value::String("1.85".into()));
+    package.insert(
+        "rust-version".into(),
+        toml::Value::String(PINNED_RUST_VERSION.into()),
+    );
     package.insert("license".into(), toml::Value::String("MIT".into()));
     package.remove("repository");
     table.remove("dev-dependencies");
@@ -719,8 +723,8 @@ fn generate_cargo_toml(
     resolution: &crate::resolver::Resolution,
     packages: &[PackageInput],
 ) -> String {
-    let mut output = String::from(
-        "[package]\nname = \"rust-agent-generated-composition\"\nversion = \"0.1.0\"\nedition = \"2024\"\nrust-version = \"1.85\"\nlicense = \"MIT\"\npublish = false\n\n[workspace]\nresolver = \"2\"\nexclude = [\n",
+    let mut output = format!(
+        "[package]\nname = \"rust-agent-generated-composition\"\nversion = \"0.1.0\"\nedition = \"2024\"\nrust-version = \"{PINNED_RUST_VERSION}\"\nlicense = \"MIT\"\npublish = false\n\n[workspace]\nresolver = \"2\"\nexclude = [\n",
     );
     for package in packages {
         output.push_str(&format!("    {:?},\n", format!("sources/{}", package.path)));
@@ -1062,7 +1066,9 @@ mod tests {
         fs::create_dir_all(package.join("wip")).unwrap();
         fs::write(
             package.join("Cargo.toml"),
-            "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\nedition = \"2024\"\nrust-version = \"1.85\"\nlicense = \"MIT\"\n",
+            format!(
+                "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\nedition = \"2024\"\nrust-version = \"{PINNED_RUST_VERSION}\"\nlicense = \"MIT\"\n"
+            ),
         )
         .unwrap();
         fs::write(package.join("src/lib.rs"), "pub fn fixture() {}\n").unwrap();

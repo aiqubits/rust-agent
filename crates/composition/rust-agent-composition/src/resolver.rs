@@ -503,15 +503,15 @@ impl Resolver<'_> {
                 .filter(|provide| provide.capability == capability && provide.key.as_deref() == key)
                 .map(|provide| provide.priority)
                 .max();
-            if let Some(priority) = priority {
-                if explicit.is_none_or(|value| value == &component.id) {
-                    candidates.push((
-                        explicit == Some(&component.id),
-                        preferred == Some(&component.id),
-                        priority,
-                        component.id.clone(),
-                    ));
-                }
+            if let Some(priority) = priority
+                && explicit.is_none_or(|value| value == &component.id)
+            {
+                candidates.push((
+                    explicit == Some(&component.id),
+                    preferred == Some(&component.id),
+                    priority,
+                    component.id.clone(),
+                ));
             }
         }
         if spec.binding == BindingKind::Registry && key.is_none() {

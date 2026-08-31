@@ -18,6 +18,11 @@ jobs:
           toolchain: 1.97.1
           components: rustfmt,clippy
           targets: wasm32-unknown-unknown,aarch64-linux-android,aarch64-apple-ios,x86_64-apple-darwin,x86_64-pc-windows-msvc
+      - name: Verify pinned Rust and Cargo versions
+        shell: bash
+        run: |
+          rustc --version | grep -E '^rustc 1\.97\.1 '
+          cargo --version | grep -E '^cargo 1\.97\.1 '
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all --check
       - run: cargo check --workspace --all-targets

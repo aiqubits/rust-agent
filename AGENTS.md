@@ -36,6 +36,18 @@ have been committed before implementation of the affected behavior begins.
 - Never copy an AINS directory wholesale. This repository must not depend on
   AINS, `client-api`, UI/application frameworks, or AINS product types.
 
+## Pinned Rust toolchain
+
+- Every repository command, generated Cargo package, and CI job uses exactly
+  Rust and Cargo 1.97.1. Do not use `+stable`, `+nightly`, an ambient default
+  toolchain, or a different patch release.
+- Keep `rust-toolchain.toml`, `[workspace.package].rust-version`, the CI toolchain
+  and target set, generated manifests/goldens, and the named architecture
+  toolchain synchronization test aligned in the same change.
+- The local pinned target set is the CI cross-compilation set. A missing pinned
+  component or target is a failed repository setup, not permission to skip a
+  check or use another toolchain.
+
 ## Architecture and security
 
 - Capability consumers depend only on API crates. Only generated composition

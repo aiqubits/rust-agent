@@ -7,6 +7,7 @@ implementation exists.
 
 | Contract | Automated evidence |
 |---|---|
+| Rust/Cargo 1.97.1, components, target set, workspace MSRV, generated manifests and CI remain synchronized | `architecture::rust_toolchain_version_is_pinned_and_synchronized`, `.github/workflows/ci.yml::quality::Verify pinned Rust and Cargo versions` |
 | Pinned formatting, compile, lint, test, documentation and dependency-policy gates | `.github/workflows/ci.yml::quality` |
 | Reference repositories and product crates are absent from the dependency graph | `architecture::workspace_has_no_product_dependency` |
 | Core/shared lifecycle APIs form an effect-free one-way dependency closure and do not import Agent/Session owners | `architecture::api_dependency_direction_is_acyclic`, `architecture::mandatory_api_crates_have_an_exact_effect_free_dependency_closure` |

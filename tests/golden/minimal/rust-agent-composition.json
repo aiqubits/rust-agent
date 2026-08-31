@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "algorithm": "sha256-rust-agent-composition-v1",
-  "composition-hash": "08922ff9ad9213abd7b206d4f295864e676247e8327c8b703aebbe0705945768",
+  "composition-hash": "073708170047d09fbe218f62ba203ef0051f5098a47ec88f9fe145932613a77b",
   "build-kind": "library",
   "profile-name": "fixture-minimal",
   "normalized-profile": {
@@ -190,12 +190,12 @@
       "id": "fixture-api",
       "package": "rust-agent-fixture-api",
       "logical-path": "tests/fixtures/api/fixture-api",
-      "tree-digest": "2d4191bb4812bad29842a934e25a531a7d4474bda0ba53428b36f5e848a0da9b",
+      "tree-digest": "92c3a91c00d95dddb72f8cf8b2e4861cbe3afca147eda0e987bc3d428195edf1",
       "files": [
         {
           "path": "Cargo.toml",
-          "digest": "30ed961ab894630b4f4352985f2af2d10bfce69762343c97a69d0d10b9051e0f",
-          "bytes": 492,
+          "digest": "c6d030d5208e9a6b7f19973f03a741fea138597d12711ee981456a584632f935",
+          "bytes": 494,
           "executable": false
         },
         {
@@ -210,12 +210,12 @@
       "id": "fixture-driver",
       "package": "rust-agent-fixture-driver",
       "logical-path": "tests/fixtures/components/fixture-driver",
-      "tree-digest": "be2c4b2a621c3fd0dd901b2eaf2c914d3b17730f1697ec8b0046ccac0c939c8f",
+      "tree-digest": "c17198e85c89d484e0ff66efd458bb0a0ebe704f952c36c9a10a6192e486d841",
       "files": [
         {
           "path": "Cargo.toml",
-          "digest": "c94a94049b4252a926c8b9240a48e307d4be37feb0e0a24851142ab2c394aa0a",
-          "bytes": 463,
+          "digest": "aafd15ea80f3472425371bc3116d262e3bb087a89a0a382a1ecbe4f1e2889fea",
+          "bytes": 465,
           "executable": false
         },
         {
@@ -230,12 +230,12 @@
       "id": "fixture-model",
       "package": "rust-agent-fixture-model",
       "logical-path": "tests/fixtures/components/fixture-model",
-      "tree-digest": "4b7ae4e352bdeeb7c717a397d629b848ea61b6e57adf8db9f2051d4a66a4d129",
+      "tree-digest": "0fdfff1d33f0614718890a701df5eef75166355378b3b7d50cf42d8e15600244",
       "files": [
         {
           "path": "Cargo.toml",
-          "digest": "bdc56e710d9e03e721d17bb463188636378d69a2bf367c339a8ef22d3c63959e",
-          "bytes": 463,
+          "digest": "e51b6086536fac7e0a12fa3946f378ffbe546eb464ae18f17aa91a64ebbf16de",
+          "bytes": 465,
           "executable": false
         },
         {
@@ -250,12 +250,12 @@
       "id": "fixture-runtime",
       "package": "rust-agent-fixture-runtime",
       "logical-path": "tests/fixtures/runtime/fixture-runtime",
-      "tree-digest": "02771f0a21e804d653c1c4f47f9d0e5706a00f71ed76d858d9316db875a87742",
+      "tree-digest": "9d0f2b94da39506bd3361a69996d9a92aea4795edb1abd54c7306c199ab13d11",
       "files": [
         {
           "path": "Cargo.toml",
-          "digest": "de3233aab369647546c28a194306d0cce1de26b13172945810a4b6ef8c2b7e56",
-          "bytes": 376,
+          "digest": "5280eebc75fee3fa1e3b52619563f594f3c07b925770ae89af1ed41d8ea6c507",
+          "bytes": 378,
           "executable": false
         },
         {
@@ -270,12 +270,12 @@
       "id": "rust-agent-core",
       "package": "rust-agent-core",
       "logical-path": "crates/api/rust-agent-core",
-      "tree-digest": "32a7d67a6013bd43ca39b27899262c4fe3d1fdffc05b67cb541ed7a744b5911c",
+      "tree-digest": "1fe202de215af703c58e07a75b175bc9e53e7d6e0a278fbead20248dcc19333c",
       "files": [
         {
           "path": "Cargo.toml",
-          "digest": "76d8001ec8035087a98b4f193e6afdaf18a3abe1eb482bfb4e3b261e7c4f5189",
-          "bytes": 322,
+          "digest": "dbb3b067274b11bd3a36fa0749a29cefc431ecfb4bfdf11708ac90c77a69fea0",
+          "bytes": 324,
           "executable": false
         },
         {
@@ -290,12 +290,12 @@
       "id": "rust-agent-runtime-api",
       "package": "rust-agent-runtime-api",
       "logical-path": "crates/api/rust-agent-runtime-api",
-      "tree-digest": "b3afd40e420e65a54215d4c8ce3ad466e703c637ba544a75acb96c3b1578cfba",
+      "tree-digest": "d6126accae138477bab154f4607ee21c17737dcf49c4fe4b744da1c4169dcc1d",
       "files": [
         {
           "path": "Cargo.toml",
-          "digest": "f4084ef68e20dec7015d325a870043f0ce11813646a80a10c067470d52fd7966",
-          "bytes": 440,
+          "digest": "e51d278f6bff808cf5bfc9dd14be2677dc7d5ae86484b61fd52543793f2848ae",
+          "bytes": 442,
           "executable": false
         },
         {
@@ -369,8 +369,8 @@
     },
     {
       "path": "Cargo.toml",
-      "digest": "b2d37356dc3459c0a6b64078bf6acf322aeac021a31722d1823b7a14e46fc6a4",
-      "bytes": 1286
+      "digest": "ea0d9d2d9a4a7c3cac26309845c1e14b58d73102b805b1d844292e42b46d0d14",
+      "bytes": 1288
     },
     {
       "path": "cargo-resolution.json",

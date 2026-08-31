@@ -12,7 +12,13 @@ are in [`AGENTS.md`](AGENTS.md).
 
 ## Development
 
+Development uses exactly Rust and Cargo 1.97.1. `rustup` reads the checked-in
+`rust-toolchain.toml` and selects the pinned compiler, formatter, Clippy, and CI
+cross-compilation target set; do not override it with `+stable` or `+nightly`.
+
 ```sh
+rustc --version
+cargo --version
 cargo fmt --all --check
 cargo check --workspace --all-targets
 cargo clippy --workspace --all-targets --all-features -- -D warnings
