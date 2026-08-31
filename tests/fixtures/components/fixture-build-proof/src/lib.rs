@@ -21,5 +21,6 @@ pub fn build(
     _dependencies: Dependencies,
     _runtime: RuntimePrimitiveBindings,
 ) -> Result<ComponentOutput<FixtureBuildProof>, ComponentBuildError> {
+    let _composition_path_uses_alloc = hex::encode([0x52_u8, 0x41]);
     Ok(ComponentOutput::stateless(FixtureBuildProof))
 }

@@ -139,7 +139,7 @@ fn javascript_wasm_bundle_is_closed_verified_and_executable_end_to_end() {
     no_cache.registry_cache_path = None;
     assert!(matches!(
         development_build(&no_cache),
-        Err(DevelopmentBuildError::WasmContract(_))
+        Err(DevelopmentBuildError::RegistryCacheRequired(_))
     ));
 
     let missing = development_build(&build_options(

@@ -53,6 +53,59 @@ fn registry_cache() -> PathBuf {
 }
 
 #[test]
+fn registry_backed_compose_requires_explicit_cache_end_to_end() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../..")
+        .canonicalize()
+        .unwrap();
+    let binary = PathBuf::from(env!("CARGO_BIN_EXE_rust-agent"));
+    let rustc = tool("rustc");
+    let cargo = tool("cargo");
+    let registry = registry_cache();
+    let temp = TempDir::new().unwrap();
+    let compositions = temp.path().join("compositions");
+    let base_args = [
+        "compose".into(),
+        "--workspace".into(),
+        root.as_os_str().into(),
+        "--catalog".into(),
+        root.join("tests/fixtures/catalog.toml").into_os_string(),
+        "--profile".into(),
+        root.join("tests/fixtures/profiles/controlled-build.toml")
+            .into_os_string(),
+        "--output".into(),
+        compositions.as_os_str().into(),
+        "--rustc".into(),
+        rustc.as_os_str().into(),
+        "--cargo".into(),
+        cargo.as_os_str().into(),
+    ];
+    let missing = run(&binary, &base_args);
+    assert!(!missing.status.success());
+    assert!(
+        String::from_utf8_lossy(&missing.stderr)
+            .contains("requires an explicit offline registry cache")
+    );
+
+    let mut allowed_args = base_args.to_vec();
+    allowed_args.extend(["--registry-cache".into(), registry.as_os_str().into()]);
+    assert_success(&run(&binary, &allowed_args));
+    let composition = fs::read_dir(&compositions)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(composition.join("rust-agent-composition.json")).unwrap())
+            .unwrap();
+    assert_eq!(
+        manifest["cargo-resolution"]["registries"]["crates-io"],
+        "registry+https://github.com/rust-lang/crates.io-index"
+    );
+}
+
+#[test]
 fn compose_build_inspect_emit_verify_end_to_end() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../..")

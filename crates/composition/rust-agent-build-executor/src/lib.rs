@@ -25,8 +25,11 @@ pub use cargo_unit_graph::{
     HostCargoUnitGraph, NormalizedCargoUnit, NormalizedHostCargoUnitGraph,
 };
 pub use host_feature::{
-    FeatureAccountingMode, FeatureDelta, FeatureSemanticsEvidence, HostFeaturePolicyEntry,
-    HostFeaturePolicyError, HostFeatureUnionPolicy, NormalizedHostFeaturePolicy,
+    DevelopmentHostFeatureReceipt, DevelopmentHostFeatureVerification, FeatureAccountingMode,
+    FeatureDelta, FeatureSemanticsEvidence, HostFeatureDeltaRecord, HostFeaturePolicyEntry,
+    HostFeaturePolicyError, HostFeaturePolicyStageDigests, HostFeatureUnionPolicy,
+    HostFeatureUnitObservation, NormalizedHostFeaturePolicy, ProductBuildContribution,
+    verify_development_host_feature_union,
 };
 pub use integration::{
     IntegrationError, emit_integration, verify_integration, verify_integration_topology,
@@ -67,6 +70,8 @@ pub enum DevelopmentBuildError {
     Artifact(#[from] ArtifactError),
     #[error("WASM build contract failed: {0}")]
     WasmContract(String),
+    #[error("build requires an explicit offline registry cache: {0}")]
+    RegistryCacheRequired(String),
     #[error("development Cargo {step} failed: {output}")]
     Cargo { step: &'static str, output: String },
     #[error("expected generated artifact is missing: {0}")]
@@ -82,9 +87,16 @@ pub fn development_build(
 ) -> Result<DevelopmentBuildManifest, DevelopmentBuildError> {
     validate_paths(options)?;
     let composition = verify_composition(&options.composition_path)?;
-    if composition.build_kind == BuildKind::Wasm && options.registry_cache_path.is_none() {
-        return Err(DevelopmentBuildError::WasmContract(
-            "WASM build requires an explicit offline registry cache".into(),
+    if !composition.cargo_resolution.registries.is_empty() && options.registry_cache_path.is_none()
+    {
+        return Err(DevelopmentBuildError::RegistryCacheRequired(
+            composition
+                .cargo_resolution
+                .registries
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(","),
         ));
     }
     let normalized_policy = options.policy.normalize()?;

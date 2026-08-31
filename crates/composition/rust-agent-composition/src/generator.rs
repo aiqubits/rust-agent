@@ -110,13 +110,15 @@ pub fn compose(options: &ComposeOptions) -> Result<GeneratedComposition, Compose
             profile.build_kind
         )));
     }
-    if profile.build_kind == BuildKind::Wasm && options.registry_cache_path.is_none() {
-        return Err(ComposeError::InvalidRegistryCache(
-            "WASM composition requires an explicit offline registry cache".into(),
-        ));
-    }
     let target = Target::query(&options.rustc_path, &profile.target, profile.environment)?;
     let resolution = resolve(&catalog, &profile, &target)?;
+    let requires_registry = profile.build_kind == BuildKind::Wasm
+        || selected_packages_require_registry(&options.workspace_root, &catalog, &resolution)?;
+    if requires_registry && options.registry_cache_path.is_none() {
+        return Err(ComposeError::InvalidRegistryCache(
+            "composition Cargo graph requires an explicit offline registry cache".into(),
+        ));
+    }
 
     fs::create_dir_all(&options.output_root)?;
     let staging = unique_staging(&options.output_root);
@@ -173,26 +175,6 @@ fn compose_in_staging(
         "pub const COMPOSITION_HASH: &str = \"pending\";\n",
     )?;
 
-    let registries = if profile.build_kind == BuildKind::Wasm {
-        BTreeMap::from([(
-            "crates-io".into(),
-            "registry+https://github.com/rust-lang/crates.io-index".into(),
-        )])
-    } else {
-        BTreeMap::new()
-    };
-    let cargo_resolution = CargoResolutionRecord {
-        schema: 1,
-        target: target.triple.clone(),
-        target_fact_digest: target.target_fact_digest.clone(),
-        resolver: "2".into(),
-        offline: true,
-        isolated_cargo_home: true,
-        ancestor_config: "forbidden".into(),
-        registries,
-        git_sources: BTreeSet::new(),
-    };
-    write_json(&staging.join("cargo-resolution.json"), &cargo_resolution)?;
     write_text(
         &staging.join(".cargo/config.toml"),
         &format!(
@@ -202,6 +184,19 @@ fn compose_in_staging(
     )?;
 
     generate_lockfile(options, staging)?;
+    let (registries, git_sources) = locked_cargo_sources(&staging.join("Cargo.lock"))?;
+    let cargo_resolution = CargoResolutionRecord {
+        schema: 1,
+        target: target.triple.clone(),
+        target_fact_digest: target.target_fact_digest.clone(),
+        resolver: "2".into(),
+        offline: true,
+        isolated_cargo_home: true,
+        ancestor_config: "forbidden".into(),
+        registries,
+        git_sources,
+    };
+    write_json(&staging.join("cargo-resolution.json"), &cargo_resolution)?;
     let cargo_lock_digest = file_digest(&staging.join("Cargo.lock"))?;
     let mut generated_paths = vec![
         "Cargo.toml",
@@ -698,6 +693,57 @@ fn selected_packages(
     Ok(packages.into_values().collect())
 }
 
+fn selected_packages_require_registry(
+    workspace_root: &Path,
+    catalog: &NormalizedCatalog,
+    resolution: &crate::resolver::Resolution,
+) -> Result<bool, ComposeError> {
+    for package in selected_packages(catalog, resolution)? {
+        let manifest_path = workspace_root.join(&package.path).join("Cargo.toml");
+        let input = fs::read_to_string(&manifest_path)?;
+        let document: toml::Value =
+            toml::from_str(&input).map_err(|error| ComposeError::ManifestNormalization {
+                path: manifest_path.display().to_string(),
+                message: error.to_string(),
+            })?;
+        if manifest_requires_registry(&document) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn manifest_requires_registry(document: &toml::Value) -> bool {
+    let Some(root) = document.as_table() else {
+        return false;
+    };
+    if dependency_sections_require_registry(root) {
+        return true;
+    }
+    root.get("target")
+        .and_then(toml::Value::as_table)
+        .is_some_and(|targets| {
+            targets.values().any(|target| {
+                target
+                    .as_table()
+                    .is_some_and(dependency_sections_require_registry)
+            })
+        })
+}
+
+fn dependency_sections_require_registry(table: &toml::Table) -> bool {
+    ["dependencies", "build-dependencies"]
+        .into_iter()
+        .filter_map(|section| table.get(section).and_then(toml::Value::as_table))
+        .flatten()
+        .any(|(_, dependency)| match dependency {
+            toml::Value::Table(specification) => {
+                !specification.contains_key("path") && !specification.contains_key("git")
+            }
+            _ => true,
+        })
+}
+
 fn snapshot_package(
     workspace_root: &Path,
     source_root: &Path,
@@ -1075,6 +1121,50 @@ fn generate_lockfile(options: &ComposeOptions, staging: &Path) -> Result<(), Com
         )));
     }
     Ok(())
+}
+
+fn locked_cargo_sources(
+    lockfile: &Path,
+) -> Result<(BTreeMap<String, String>, BTreeSet<String>), ComposeError> {
+    let input = fs::read_to_string(lockfile)?;
+    let document: toml::Value =
+        toml::from_str(&input).map_err(|error| ComposeError::ManifestNormalization {
+            path: lockfile.display().to_string(),
+            message: error.to_string(),
+        })?;
+    let mut registries = BTreeMap::new();
+    let mut git_sources = BTreeSet::new();
+    for package in document
+        .get("package")
+        .and_then(toml::Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let Some(source) = package.get("source").and_then(toml::Value::as_str) else {
+            continue;
+        };
+        if source.starts_with("registry+") {
+            let id = if source == "registry+https://github.com/rust-lang/crates.io-index" {
+                "crates-io".to_owned()
+            } else {
+                format!("registry-{}", &sha256_hex(source.as_bytes())[..16])
+            };
+            if let Some(previous) = registries.insert(id.clone(), source.to_owned())
+                && previous != source
+            {
+                return Err(ComposeError::CargoLock(format!(
+                    "registry source id `{id}` is ambiguous"
+                )));
+            }
+        } else if source.starts_with("git+") {
+            git_sources.insert(source.to_owned());
+        } else {
+            return Err(ComposeError::CargoLock(format!(
+                "unsupported locked package source `{source}`"
+            )));
+        }
+    }
+    Ok((registries, git_sources))
 }
 
 fn generated_file_records(

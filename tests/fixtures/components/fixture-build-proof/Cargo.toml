@@ -11,6 +11,7 @@ publish = false
 default = []
 
 [dependencies]
+hex = { version = "=0.4.3", default-features = false, features = ["alloc"] }
 rust-agent-fixture-api = { version = "0.1.0", path = "../../api/fixture-api", default-features = false }
 rust-agent-runtime-api = { version = "0.1.0", path = "../../../../crates/api/rust-agent-runtime-api", default-features = false }
 

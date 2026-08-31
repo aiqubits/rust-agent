@@ -35,11 +35,13 @@ cargo install wasm-bindgen-cli --version 0.2.127 --locked
 wasm-bindgen --version
 ```
 
-WASM `compose` and development `build` calls take `--registry-cache` explicitly.
-The directory is used only as an offline Cargo source cache; it does not enter
-composition identity, while `Cargo.lock` checksums and the canonical crates.io
-source identity do. The build policy must map `wasm-bindgen-cli` to its canonical
-absolute path, SHA-256 digest, and exact `wasm-bindgen 0.2.127` version output.
+Any `compose` or development `build` whose locked graph contains registry
+packages takes `--registry-cache` explicitly. The directory is used only as an
+offline Cargo source cache; it does not enter composition identity, while
+`Cargo.lock` checksums and the canonical locked registry identities do. For a
+JavaScript WASM build, the build policy must additionally map `wasm-bindgen-cli`
+to its canonical absolute path, SHA-256 digest, and exact
+`wasm-bindgen 0.2.127` version output.
 
 The checked-in `tests/fixtures` packages have no product semantics. They exist to
 prove that generated Cargo dependency graphs physically add and remove selected

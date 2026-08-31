@@ -27,6 +27,14 @@ fn tool(name: &str) -> PathBuf {
         .unwrap()
 }
 
+fn registry_cache() -> PathBuf {
+    let cargo_home = env::var_os("CARGO_HOME")
+        .map(PathBuf::from)
+        .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".cargo")))
+        .expect("Cargo home must be discoverable");
+    cargo_home.join("registry").canonicalize().unwrap()
+}
+
 #[test]
 fn build_requirements_need_exact_policy_kind_but_never_expand_runtime_effects() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -37,6 +45,7 @@ fn build_requirements_need_exact_policy_kind_but_never_expand_runtime_effects() 
     let rustc = tool("rustc");
     let cargo = tool("cargo");
     let linker = tool("cc");
+    let registry = registry_cache();
     let generated = compose(&ComposeOptions {
         workspace_root: root.clone(),
         catalog_path: root.join("tests/fixtures/catalog.toml"),
@@ -44,7 +53,7 @@ fn build_requirements_need_exact_policy_kind_but_never_expand_runtime_effects() 
         output_root: temp.path().join("compositions"),
         rustc_path: rustc.clone(),
         cargo_path: cargo.clone(),
-        registry_cache_path: None,
+        registry_cache_path: Some(registry.clone()),
     })
     .unwrap();
     assert!(generated.manifest.compiled_runtime_effects.is_empty());
@@ -62,7 +71,7 @@ fn build_requirements_need_exact_policy_kind_but_never_expand_runtime_effects() 
         cargo_path: cargo.clone(),
         rustc_path: rustc.clone(),
         linker_path: linker.clone(),
-        registry_cache_path: None,
+        registry_cache_path: Some(registry.clone()),
         policy: BuildExecutionPolicy::empty_development(),
         run_generated_tests: false,
     });
@@ -96,7 +105,7 @@ fn build_requirements_need_exact_policy_kind_but_never_expand_runtime_effects() 
         cargo_path: cargo,
         rustc_path: rustc,
         linker_path: linker,
-        registry_cache_path: None,
+        registry_cache_path: Some(registry),
         policy,
         run_generated_tests: true,
     })

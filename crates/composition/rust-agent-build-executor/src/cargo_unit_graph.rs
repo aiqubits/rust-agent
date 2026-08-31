@@ -155,6 +155,10 @@ pub struct HostCargoUnitGraph {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NormalizedHostCargoUnitGraph {
+    planner: CargoUnitGraphPlannerIdentity,
+    build_triple: String,
+    composition_target: String,
+    profile: String,
     nodes: BTreeMap<CargoUnitSelector, NormalizedCargoUnit>,
     edges: BTreeSet<CargoUnitEdge>,
     digest: String,
@@ -259,6 +263,10 @@ impl HostCargoUnitGraph {
             ),
         )?);
         Ok(NormalizedHostCargoUnitGraph {
+            planner: self.planner.clone(),
+            build_triple: self.build_triple.clone(),
+            composition_target: self.composition_target.clone(),
+            profile: self.profile.clone(),
             nodes,
             edges,
             digest,
@@ -267,6 +275,22 @@ impl HostCargoUnitGraph {
 }
 
 impl NormalizedHostCargoUnitGraph {
+    pub fn planner(&self) -> &CargoUnitGraphPlannerIdentity {
+        &self.planner
+    }
+
+    pub fn build_triple(&self) -> &str {
+        &self.build_triple
+    }
+
+    pub fn composition_target(&self) -> &str {
+        &self.composition_target
+    }
+
+    pub fn profile(&self) -> &str {
+        &self.profile
+    }
+
     pub fn digest(&self) -> &str {
         &self.digest
     }

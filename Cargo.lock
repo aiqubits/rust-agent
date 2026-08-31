@@ -539,6 +539,7 @@ dependencies = [
 name = "rust-agent-fixture-build-proof"
 version = "0.1.0"
 dependencies = [
+ "hex",
  "rust-agent-fixture-api",
  "rust-agent-runtime-api",
 ]
