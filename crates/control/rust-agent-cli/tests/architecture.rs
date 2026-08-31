@@ -4,6 +4,8 @@ use toml::Value;
 use walkdir::WalkDir;
 
 const PINNED_RUST_VERSION: &str = "1.97.1";
+const PINNED_WASM_BINDGEN_VERSION: &str = "0.2.127";
+const PINNED_WASM_BINDGEN_FUTURES_VERSION: &str = "0.4.77";
 const PINNED_TARGETS: [&str; 5] = [
     "wasm32-unknown-unknown",
     "aarch64-linux-android",
@@ -161,4 +163,60 @@ fn rust_toolchain_version_is_pinned_and_synchronized() {
         golden["package"]["rust-version"].as_str(),
         Some(PINNED_RUST_VERSION)
     );
+}
+
+#[test]
+fn wasm_bindgen_protocol_is_pinned_and_synchronized() {
+    let root = workspace_root();
+    let output = Command::new("wasm-bindgen")
+        .arg("--version")
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "wasm-bindgen --version failed");
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap().trim(),
+        format!("wasm-bindgen {PINNED_WASM_BINDGEN_VERSION}")
+    );
+
+    let workspace: Value =
+        toml::from_str(&fs::read_to_string(root.join("Cargo.toml")).unwrap()).unwrap();
+    assert_eq!(
+        workspace["workspace"]["dependencies"]["wasm-bindgen"]["version"].as_str(),
+        Some("=0.2.127")
+    );
+    assert_eq!(
+        workspace["workspace"]["dependencies"]["wasm-bindgen-futures"]["version"].as_str(),
+        Some("=0.4.77")
+    );
+
+    let golden: Value =
+        toml::from_str(&fs::read_to_string(root.join("tests/golden/wasm-js/Cargo.toml")).unwrap())
+            .unwrap();
+    assert_eq!(
+        golden["dependencies"]["wasm-bindgen"]["version"].as_str(),
+        Some("=0.2.127")
+    );
+    assert_eq!(
+        golden["dependencies"]["wasm-bindgen-futures"]["version"].as_str(),
+        Some("=0.4.77")
+    );
+
+    let lock: Value =
+        toml::from_str(&fs::read_to_string(root.join("Cargo.lock")).unwrap()).unwrap();
+    let packages = lock["package"].as_array().unwrap();
+    for (name, version) in [
+        ("wasm-bindgen", PINNED_WASM_BINDGEN_VERSION),
+        ("wasm-bindgen-futures", PINNED_WASM_BINDGEN_FUTURES_VERSION),
+    ] {
+        let versions: Vec<_> = packages
+            .iter()
+            .filter(|package| package["name"].as_str() == Some(name))
+            .map(|package| package["version"].as_str().unwrap())
+            .collect();
+        assert_eq!(versions, [version]);
+    }
+
+    let ci = fs::read_to_string(root.join(".github/workflows/ci.yml")).unwrap();
+    assert!(ci.contains("cargo install wasm-bindgen-cli --version 0.2.127 --locked"));
+    assert!(ci.contains("wasm-bindgen --version | grep -E '^wasm-bindgen 0\\.2\\.127$'"));
 }

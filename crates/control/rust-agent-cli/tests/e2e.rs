@@ -6,8 +6,11 @@ use std::{
     process::{Command, Output},
 };
 
+use sha2::{Digest as _, Sha256};
 use tempfile::TempDir;
 use walkdir::WalkDir;
+
+use rust_agent_build_executor::{BuildExecutable, BuildExecutionPolicy};
 
 fn tool(name: &str) -> PathBuf {
     let selected = Command::new("rustup")
@@ -39,6 +42,14 @@ fn assert_success(output: &Output) {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+fn registry_cache() -> PathBuf {
+    let cargo_home = env::var_os("CARGO_HOME")
+        .map(PathBuf::from)
+        .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".cargo")))
+        .expect("Cargo home must be discoverable");
+    cargo_home.join("registry").canonicalize().unwrap()
 }
 
 #[test]
@@ -168,6 +179,112 @@ fn compose_build_inspect_emit_verify_end_to_end() {
         ],
     );
     assert!(!mutated.status.success());
+}
+
+#[test]
+fn javascript_wasm_compose_build_and_inspect_end_to_end() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../..")
+        .canonicalize()
+        .unwrap();
+    let binary = PathBuf::from(env!("CARGO_BIN_EXE_rust-agent"));
+    let rustc = tool("rustc");
+    let cargo = tool("cargo");
+    let linker = tool("cc");
+    let wasm_bindgen = tool("wasm-bindgen");
+    let registry = registry_cache();
+    let temp = TempDir::new().unwrap();
+    let compositions = temp.path().join("compositions");
+
+    let compose_output = run(
+        &binary,
+        &[
+            "compose".into(),
+            "--workspace".into(),
+            root.as_os_str().into(),
+            "--catalog".into(),
+            root.join("tests/fixtures/catalog.toml").into_os_string(),
+            "--profile".into(),
+            root.join("tests/fixtures/profiles/wasm-js.toml")
+                .into_os_string(),
+            "--output".into(),
+            compositions.as_os_str().into(),
+            "--rustc".into(),
+            rustc.as_os_str().into(),
+            "--cargo".into(),
+            cargo.as_os_str().into(),
+            "--registry-cache".into(),
+            registry.as_os_str().into(),
+        ],
+    );
+    assert_success(&compose_output);
+    let composition = fs::read_dir(&compositions)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+
+    let policy = BuildExecutionPolicy {
+        schema: 1,
+        executables: vec![BuildExecutable {
+            id: "wasm-bindgen-cli".into(),
+            path: wasm_bindgen.clone(),
+            digest: hex::encode(Sha256::digest(fs::read(&wasm_bindgen).unwrap())),
+            version: "wasm-bindgen 0.2.127".into(),
+        }],
+        read_inputs: vec![],
+        environment: vec![],
+    };
+    let policy_path = temp.path().join("build-policy.toml");
+    fs::write(&policy_path, toml::to_string(&policy).unwrap()).unwrap();
+    let artifacts = temp.path().join("wasm-artifacts");
+    let build_args: [OsString; 16] = [
+        "build".into(),
+        "--composition".into(),
+        composition.as_os_str().into(),
+        "--artifact-dir".into(),
+        artifacts.as_os_str().into(),
+        "--rustc".into(),
+        rustc.as_os_str().into(),
+        "--cargo".into(),
+        cargo.as_os_str().into(),
+        "--linker".into(),
+        linker.as_os_str().into(),
+        "--registry-cache".into(),
+        registry.as_os_str().into(),
+        "--policy".into(),
+        policy_path.as_os_str().into(),
+        "--development-build".into(),
+    ];
+    let empty_path = temp.path().join("empty-ambient-path");
+    fs::create_dir(&empty_path).unwrap();
+    let build_output = Command::new(&binary)
+        .args(&build_args)
+        .env("PATH", &empty_path)
+        .output()
+        .unwrap();
+    assert_success(&build_output);
+    for relative in [
+        "rust-agent-build.json",
+        "rust-agent-sbom.cdx.json",
+        "intermediate/rust_agent_raw.wasm",
+        "bundle/rust_agent.js",
+        "bundle/rust_agent_bg.wasm",
+        "bundle/rust_agent.d.ts",
+    ] {
+        assert!(artifacts.join(relative).is_file(), "missing {relative}");
+    }
+    let inspect = run(
+        &binary,
+        &[
+            "inspect".into(),
+            "--artifact-dir".into(),
+            artifacts.as_os_str().into(),
+            "--allow-development".into(),
+        ],
+    );
+    assert_success(&inspect);
 }
 
 fn compile_independent_host(

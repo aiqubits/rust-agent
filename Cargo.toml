@@ -45,6 +45,8 @@ thiserror = "2.0.16"
 toml = "0.9.5"
 trybuild = "1.0.110"
 walkdir = "2.5.0"
+wasm-bindgen = { version = "=0.2.127", default-features = false, features = ["std"] }
+wasm-bindgen-futures = { version = "=0.4.77", default-features = false, features = ["std"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

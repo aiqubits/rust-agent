@@ -1,0 +1,17 @@
+schema = 1
+name = "fixture-wasm-js"
+build-kind = "wasm"
+target = "wasm32-unknown-unknown"
+environment = "browser"
+support-tier = "production"
+runtime-adapter = "fixture-runtime"
+host-boundary = "fixture-host-export"
+resolver-decision-budget = 100
+denied-effects = ["code-execution", "network-outbound", "persistent-storage", "process-exec", "read-local", "remote-execution", "secret-access", "write-local"]
+
+[components]
+fixture-driver = "enabled"
+fixture-model = "auto"
+fixture-model-fallback = "auto"
+fixture-fs-read = "disabled"
+fixture-build-proof = "disabled"

@@ -47,6 +47,7 @@ fn product_neutral_library_compile_matrix() {
             output_root: temp.path().join("compositions"),
             rustc_path: rustc.clone(),
             cargo_path: cargo.clone(),
+            registry_cache_path: None,
         })
         .unwrap();
         let built = development_build(&DevelopmentBuildOptions {
@@ -55,6 +56,7 @@ fn product_neutral_library_compile_matrix() {
             cargo_path: cargo.clone(),
             rustc_path: rustc.clone(),
             linker_path: linker.clone(),
+            registry_cache_path: None,
             policy: BuildExecutionPolicy::empty_development(),
             run_generated_tests: false,
         })

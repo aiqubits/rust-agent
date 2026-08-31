@@ -39,6 +39,8 @@ enum Command {
         rustc: PathBuf,
         #[arg(long)]
         cargo: PathBuf,
+        #[arg(long)]
+        registry_cache: Option<PathBuf>,
     },
     /// Build a verified composition through the Phase 1A development runner.
     Build {
@@ -52,6 +54,8 @@ enum Command {
         cargo: PathBuf,
         #[arg(long)]
         linker: PathBuf,
+        #[arg(long)]
+        registry_cache: Option<PathBuf>,
         #[arg(long)]
         policy: Option<PathBuf>,
         #[arg(long, required = true)]
@@ -100,6 +104,7 @@ fn main() -> Result<()> {
             output,
             rustc,
             cargo,
+            registry_cache,
         } => {
             let workspace = canonical_existing(&workspace)?;
             let generated = compose(&ComposeOptions {
@@ -108,6 +113,10 @@ fn main() -> Result<()> {
                 output_root: absolute_output(&output)?,
                 rustc_path: canonical_existing(&rustc)?,
                 cargo_path: canonical_existing(&cargo)?,
+                registry_cache_path: registry_cache
+                    .as_deref()
+                    .map(canonical_existing)
+                    .transpose()?,
                 workspace_root: workspace,
             })?;
             print_json(&CommandOutput {
@@ -121,6 +130,7 @@ fn main() -> Result<()> {
             rustc,
             cargo,
             linker,
+            registry_cache,
             policy,
             development_build: _,
             run_generated_tests,
@@ -137,6 +147,10 @@ fn main() -> Result<()> {
                 cargo_path: canonical_existing(&cargo)?,
                 rustc_path: canonical_existing(&rustc)?,
                 linker_path: canonical_existing(&linker)?,
+                registry_cache_path: registry_cache
+                    .as_deref()
+                    .map(canonical_existing)
+                    .transpose()?,
                 policy,
                 run_generated_tests,
             })?;

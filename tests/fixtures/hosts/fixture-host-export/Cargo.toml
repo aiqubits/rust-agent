@@ -11,7 +11,10 @@ publish = false
 default = []
 
 [dependencies]
+rust-agent-fixture-api = { version = "0.1.0", path = "../../api/fixture-api", default-features = false }
 rust-agent-runtime-api = { version = "0.1.0", path = "../../../../crates/api/rust-agent-runtime-api", default-features = false }
+wasm-bindgen = { version = "=0.2.127", default-features = false, features = ["std"] }
+wasm-bindgen-futures = { version = "=0.4.77", default-features = false, features = ["std"] }
 
 [lints]
 workspace = true

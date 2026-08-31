@@ -19,3 +19,7 @@ pub use metadata::CatalogDocument;
 pub use profile::CompositionProfile;
 pub use resolver::{Resolution, ResolutionError, resolve};
 pub use target::{Environment, Target, TargetError};
+
+pub const WASM_BINDGEN_CLI_LOGICAL_ID: &str = "wasm-bindgen-cli";
+pub const WASM_BINDGEN_PROTOCOL_VERSION: &str = "0.2.127";
+pub const WASM_BINDGEN_FUTURES_VERSION: &str = "0.4.77";

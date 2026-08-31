@@ -1,10 +1,13 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
+    fs,
     path::{Path, PathBuf},
+    process::Command,
 };
 
 use rust_agent_composition::{canonical, metadata::BuildRequirements};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest as _, Sha256};
 use thiserror::Error;
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -50,6 +53,27 @@ pub struct NormalizedBuildPolicy {
     environment_ids: BTreeSet<String>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VerifiedBuildExecutable {
+    path: PathBuf,
+    digest: String,
+    version: String,
+}
+
+impl VerifiedBuildExecutable {
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub fn digest(&self) -> &str {
+        &self.digest
+    }
+
+    pub fn version(&self) -> &str {
+        &self.version
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum BuildPolicyError {
     #[error("unsupported build policy schema {0}; expected 1")]
@@ -76,6 +100,18 @@ pub enum BuildPolicyError {
     },
     #[error("build policy canonical encoding failed: {0}")]
     Canonical(#[from] canonical::CanonicalError),
+    #[error("executable `{id}` cannot be resolved to a canonical regular file: {path}")]
+    InvalidExecutablePath { id: String, path: String },
+    #[error("executable `{id}` bytes do not match policy digest")]
+    ExecutableDigestMismatch { id: String },
+    #[error("executable `{id}` version probe failed: {message}")]
+    ExecutableVersionProbe { id: String, message: String },
+    #[error("executable `{id}` protocol version mismatch: expected `{expected}`, got `{actual}`")]
+    ExecutableVersionMismatch {
+        id: String,
+        expected: String,
+        actual: String,
+    },
 }
 
 impl BuildExecutionPolicy {
@@ -234,6 +270,80 @@ impl NormalizedBuildPolicy {
             b"rust-agent-build-policy-v1\0",
             &projection,
         )?))
+    }
+
+    pub fn verify_executable(
+        &self,
+        id: &str,
+        expected_version: &str,
+    ) -> Result<VerifiedBuildExecutable, BuildPolicyError> {
+        self.require_kind(id, "executable", &self.executable_ids)?;
+        let executable = self
+            .policy
+            .executables
+            .iter()
+            .find(|item| item.id == id)
+            .expect("authorized executable id has a policy entry");
+        let canonical = executable.path.canonicalize().map_err(|_| {
+            BuildPolicyError::InvalidExecutablePath {
+                id: id.to_owned(),
+                path: executable.path.display().to_string(),
+            }
+        })?;
+        if canonical != executable.path
+            || !fs::metadata(&canonical).is_ok_and(|metadata| metadata.is_file())
+        {
+            return Err(BuildPolicyError::InvalidExecutablePath {
+                id: id.to_owned(),
+                path: executable.path.display().to_string(),
+            });
+        }
+        let bytes = fs::read(&canonical).map_err(|_| BuildPolicyError::InvalidExecutablePath {
+            id: id.to_owned(),
+            path: executable.path.display().to_string(),
+        })?;
+        if hex::encode(Sha256::digest(bytes)) != executable.digest {
+            return Err(BuildPolicyError::ExecutableDigestMismatch { id: id.to_owned() });
+        }
+        if executable.version != expected_version {
+            return Err(BuildPolicyError::ExecutableVersionMismatch {
+                id: id.to_owned(),
+                expected: expected_version.to_owned(),
+                actual: executable.version.clone(),
+            });
+        }
+        let output = Command::new(&canonical)
+            .arg("--version")
+            .env_clear()
+            .env("PATH", canonical.parent().unwrap_or_else(|| Path::new("/")))
+            .output()
+            .map_err(|error| BuildPolicyError::ExecutableVersionProbe {
+                id: id.to_owned(),
+                message: error.to_string(),
+            })?;
+        if !output.status.success() {
+            return Err(BuildPolicyError::ExecutableVersionProbe {
+                id: id.to_owned(),
+                message: format!(
+                    "{}{}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                ),
+            });
+        }
+        let actual = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+        if actual != expected_version {
+            return Err(BuildPolicyError::ExecutableVersionMismatch {
+                id: id.to_owned(),
+                expected: expected_version.to_owned(),
+                actual,
+            });
+        }
+        Ok(VerifiedBuildExecutable {
+            path: canonical,
+            digest: executable.digest.clone(),
+            version: executable.version.clone(),
+        })
     }
 
     fn require_kind(

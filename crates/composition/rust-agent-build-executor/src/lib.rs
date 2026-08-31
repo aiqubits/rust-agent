@@ -1,10 +1,12 @@
 //! Locked development-only build executor for Phase 1A.
 
+mod artifact;
 mod cargo_unit_graph;
 mod host_feature;
 mod integration;
 mod policy;
 mod topology;
+mod wasm_bundle;
 
 use std::{
     env, fs, io,
@@ -12,6 +14,10 @@ use std::{
     process::Command,
 };
 
+pub use artifact::{
+    ArtifactError, DevelopmentArtifactKind, DevelopmentArtifactRecord, DevelopmentBuildManifest,
+    WasmPostprocessorManifest,
+};
 pub use cargo_unit_graph::{
     CargoCompilationKind, CargoCompileMode, CargoCrateKind, CargoDependencyKind,
     CargoPackageIdentity, CargoPackageSource, CargoTargetEvaluationDomain, CargoUnit,
@@ -27,10 +33,12 @@ pub use integration::{
 };
 pub use policy::{
     BuildEnvironment, BuildExecutable, BuildExecutionPolicy, BuildPolicyError, BuildReadInput,
+    VerifiedBuildExecutable,
 };
-use rust_agent_composition::{CompositionManifest, verify_composition};
-use serde::{Deserialize, Serialize};
-use sha2::{Digest as _, Sha256};
+use rust_agent_composition::{
+    CompositionManifest, WASM_BINDGEN_CLI_LOGICAL_ID, WASM_BINDGEN_PROTOCOL_VERSION,
+    profile::BuildKind, verify_composition,
+};
 use tempfile::TempDir;
 use thiserror::Error;
 pub use topology::{HostIntegrationTopology, HostTopologyError, verify_host_topology};
@@ -42,29 +50,9 @@ pub struct DevelopmentBuildOptions {
     pub cargo_path: PathBuf,
     pub rustc_path: PathBuf,
     pub linker_path: PathBuf,
+    pub registry_cache_path: Option<PathBuf>,
     pub policy: BuildExecutionPolicy,
     pub run_generated_tests: bool,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct DevelopmentBuildManifest {
-    pub schema: u32,
-    #[serde(rename = "composition-hash")]
-    pub composition_hash: String,
-    pub target: String,
-    pub deployable: bool,
-    #[serde(rename = "build-kind")]
-    pub build_kind: String,
-    #[serde(rename = "policy-digest")]
-    pub policy_digest: String,
-    #[serde(rename = "artifact-file")]
-    pub artifact_file: String,
-    #[serde(rename = "artifact-digest")]
-    pub artifact_digest: String,
-    #[serde(rename = "generated-tests-ran")]
-    pub generated_tests_ran: bool,
-    pub gates: Vec<String>,
 }
 
 #[derive(Debug, Error)]
@@ -75,6 +63,10 @@ pub enum DevelopmentBuildError {
     Composition(#[from] rust_agent_composition::ComposeError),
     #[error("build policy is invalid: {0}")]
     Policy(#[from] BuildPolicyError),
+    #[error("artifact contract failed: {0}")]
+    Artifact(#[from] ArtifactError),
+    #[error("WASM build contract failed: {0}")]
+    WasmContract(String),
     #[error("development Cargo {step} failed: {output}")]
     Cargo { step: &'static str, output: String },
     #[error("expected generated artifact is missing: {0}")]
@@ -83,8 +75,6 @@ pub enum DevelopmentBuildError {
     ArtifactDirectoryNotEmpty(String),
     #[error("I/O failed during development build: {0}")]
     Io(#[from] io::Error),
-    #[error("build manifest serialization failed: {0}")]
-    Serialize(#[from] serde_json::Error),
 }
 
 pub fn development_build(
@@ -92,8 +82,24 @@ pub fn development_build(
 ) -> Result<DevelopmentBuildManifest, DevelopmentBuildError> {
     validate_paths(options)?;
     let composition = verify_composition(&options.composition_path)?;
+    if composition.build_kind == BuildKind::Wasm && options.registry_cache_path.is_none() {
+        return Err(DevelopmentBuildError::WasmContract(
+            "WASM build requires an explicit offline registry cache".into(),
+        ));
+    }
     let normalized_policy = options.policy.normalize()?;
     normalized_policy.authorize(&composition.build_requirements)?;
+    let wasm_executable = if composition.build_kind == BuildKind::Wasm {
+        verify_wasm_root_requirement(&composition)?;
+        wasm_bundle::verify_protocol_lock(&options.composition_path.join("Cargo.lock"))
+            .map_err(DevelopmentBuildError::WasmContract)?;
+        Some(normalized_policy.verify_executable(
+            WASM_BINDGEN_CLI_LOGICAL_ID,
+            &format!("wasm-bindgen {WASM_BINDGEN_PROTOCOL_VERSION}"),
+        )?)
+    } else {
+        None
+    };
 
     if options.artifact_dir.exists()
         && fs::read_dir(&options.artifact_dir)?
@@ -110,16 +116,16 @@ pub fn development_build(
     let cargo_home = sandbox.path().join("cargo-home");
     let target_dir = sandbox.path().join("target");
     fs::create_dir(&cargo_home)?;
+    link_registry_cache(&cargo_home, options.registry_cache_path.as_deref())?;
     fs::create_dir(&target_dir)?;
 
     if options.run_generated_tests {
-        run_cargo(
-            options,
-            &cargo_home,
-            &target_dir,
-            "test",
-            &["test", "--locked", "--offline"],
-        )?;
+        let args: &[&str] = if composition.build_kind == BuildKind::Wasm {
+            &["test", "--no-run", "--locked", "--offline"]
+        } else {
+            &["test", "--locked", "--offline"]
+        };
+        run_cargo(options, &cargo_home, &target_dir, "test", args)?;
     }
     run_cargo(
         options,
@@ -129,44 +135,104 @@ pub fn development_build(
         &["build", "--locked", "--offline"],
     )?;
 
-    let artifact_source = generated_library_path(&target_dir, &composition);
+    let artifact_source = generated_artifact_path(&target_dir, &composition);
     if !artifact_source.is_file() {
         return Err(DevelopmentBuildError::MissingArtifact(
             artifact_source.display().to_string(),
         ));
     }
-    let artifact_name = artifact_source
-        .file_name()
-        .and_then(|value| value.to_str())
-        .ok_or_else(|| {
-            DevelopmentBuildError::MissingArtifact(artifact_source.display().to_string())
-        })?
-        .to_owned();
-    let artifact_destination = options.artifact_dir.join(&artifact_name);
-    fs::copy(&artifact_source, &artifact_destination)?;
-    let artifact_digest = sha256_file(&artifact_destination)?;
+    let (mut artifacts, postprocessor, entry_artifact) = match composition.build_kind {
+        BuildKind::Library => {
+            let artifact_name = artifact_source
+                .file_name()
+                .and_then(|value| value.to_str())
+                .ok_or_else(|| {
+                    DevelopmentBuildError::MissingArtifact(artifact_source.display().to_string())
+                })?
+                .to_owned();
+            fs::copy(&artifact_source, options.artifact_dir.join(&artifact_name))?;
+            let artifact = artifact::artifact_record(
+                &options.artifact_dir,
+                &artifact_name,
+                DevelopmentArtifactKind::RustLibrary,
+            )?;
+            (vec![artifact], None, artifact_name)
+        }
+        BuildKind::Wasm => {
+            let executable = wasm_executable.as_ref().ok_or_else(|| {
+                DevelopmentBuildError::WasmContract(
+                    "verified wasm-bindgen executable is missing".into(),
+                )
+            })?;
+            let (artifacts, postprocessor) =
+                wasm_bundle::postprocess(&artifact_source, &options.artifact_dir, executable)?;
+            (
+                artifacts,
+                Some(postprocessor),
+                "bundle/rust_agent.js".into(),
+            )
+        }
+        BuildKind::Bin => {
+            return Err(DevelopmentBuildError::WasmContract(
+                "Phase 1A binary builds are unsupported".into(),
+            ));
+        }
+    };
+    artifacts.sort_by(|left, right| left.path.cmp(&right.path));
+    let (sbom_file, sbom_digest) = artifact::write_cyclonedx_sbom(
+        &options.artifact_dir,
+        &composition,
+        &options.composition_path.join("Cargo.lock"),
+        &artifacts,
+    )?;
     let policy_digest = normalized_policy.digest()?;
-    let manifest = DevelopmentBuildManifest {
-        schema: 1,
+    let generated_tests_ran =
+        options.run_generated_tests && composition.build_kind == BuildKind::Library;
+    let mut gates = vec![
+        "composition-identity-verified".into(),
+        "build-requirements-authorized".into(),
+        "isolated-cargo-home".into(),
+        "locked-offline-cargo".into(),
+        "generated-factory-typecheck".into(),
+        "artifact-tree-accounted".into(),
+        "cyclonedx-sbom-emitted".into(),
+    ];
+    if composition.build_kind == BuildKind::Wasm {
+        gates.extend([
+            "direct-host-tool-requirement-verified".into(),
+            "wasm-protocol-lock-verified".into(),
+            "wasm-bindgen-bytes-and-version-verified".into(),
+            "wasm-bundle-closed-world-verified".into(),
+        ]);
+        if options.run_generated_tests {
+            gates.push("generated-wasm-tests-compiled".into());
+        }
+    }
+    gates.sort();
+    let mut manifest = DevelopmentBuildManifest {
+        schema: 2,
         composition_hash: composition.composition_hash,
+        profile: composition.profile,
         target: composition.target,
         deployable: false,
-        build_kind: "development".into(),
+        mode: "development".into(),
+        build_kind: composition.build_kind,
         policy_digest,
-        artifact_file: artifact_name,
-        artifact_digest,
-        generated_tests_ran: options.run_generated_tests,
-        gates: vec![
-            "composition-identity-verified".into(),
-            "build-requirements-authorized".into(),
-            "isolated-cargo-home".into(),
-            "locked-offline-cargo".into(),
-            "generated-factory-typecheck".into(),
-        ],
+        entry_artifact,
+        artifacts,
+        postprocessor,
+        sbom_file,
+        sbom_digest,
+        generated_tests_ran,
+        gates,
+        build_manifest_digest: String::new(),
+        build_output_digest: String::new(),
     };
-    let mut bytes = serde_json::to_vec_pretty(&manifest)?;
+    manifest.finalize_digests()?;
+    let mut bytes = serde_json::to_vec_pretty(&manifest).map_err(ArtifactError::from)?;
     bytes.push(b'\n');
     fs::write(options.artifact_dir.join("rust-agent-build.json"), bytes)?;
+    manifest.verify(&options.artifact_dir)?;
     Ok(manifest)
 }
 
@@ -175,20 +241,15 @@ pub fn inspect_development_build(
     allow_development: bool,
 ) -> Result<DevelopmentBuildManifest, DevelopmentBuildError> {
     let bytes = fs::read(artifact_dir.join("rust-agent-build.json"))?;
-    let manifest: DevelopmentBuildManifest = serde_json::from_slice(&bytes)?;
+    let manifest: DevelopmentBuildManifest =
+        serde_json::from_slice(&bytes).map_err(ArtifactError::from)?;
     if !allow_development && !manifest.deployable {
         return Err(DevelopmentBuildError::Cargo {
             step: "inspect",
             output: "development artifact rejected by production inspection".into(),
         });
     }
-    let artifact = artifact_dir.join(&manifest.artifact_file);
-    if sha256_file(&artifact)? != manifest.artifact_digest {
-        return Err(DevelopmentBuildError::Cargo {
-            step: "inspect",
-            output: "artifact digest mismatch".into(),
-        });
-    }
+    manifest.verify(artifact_dir)?;
     Ok(manifest)
 }
 
@@ -227,12 +288,42 @@ fn run_cargo(
     }
 }
 
-fn generated_library_path(target_dir: &Path, composition: &CompositionManifest) -> PathBuf {
-    let name = "librust_agent_generated_composition.rlib";
+fn generated_artifact_path(target_dir: &Path, composition: &CompositionManifest) -> PathBuf {
+    let name = match composition.build_kind {
+        BuildKind::Library => "librust_agent_generated_composition.rlib",
+        BuildKind::Wasm => "rust_agent_generated_composition.wasm",
+        BuildKind::Bin => "rust_agent_generated_composition",
+    };
     target_dir
         .join(&composition.target)
         .join("debug")
         .join(name)
+}
+
+fn verify_wasm_root_requirement(
+    composition: &CompositionManifest,
+) -> Result<(), DevelopmentBuildError> {
+    let boundary = composition.host_boundary.as_ref().ok_or_else(|| {
+        DevelopmentBuildError::WasmContract("WASM composition has no Host boundary".into())
+    })?;
+    let root = format!("host-boundary:{boundary}");
+    let requirements = composition
+        .direct_root_build_requirements
+        .get(&root)
+        .ok_or_else(|| {
+            DevelopmentBuildError::WasmContract(format!(
+                "WASM Host boundary direct root `{root}` is missing"
+            ))
+        })?;
+    if !requirements
+        .executables
+        .contains(WASM_BINDGEN_CLI_LOGICAL_ID)
+    {
+        return Err(DevelopmentBuildError::WasmContract(format!(
+            "WASM Host boundary `{boundary}` does not directly require `{WASM_BINDGEN_CLI_LOGICAL_ID}`"
+        )));
+    }
+    Ok(())
 }
 
 fn validate_paths(options: &DevelopmentBuildOptions) -> Result<(), DevelopmentBuildError> {
@@ -249,6 +340,25 @@ fn validate_paths(options: &DevelopmentBuildOptions) -> Result<(), DevelopmentBu
             ));
         }
     }
+    if let Some(cache) = &options.registry_cache_path
+        && (!cache.is_absolute() || !cache.is_dir())
+    {
+        return Err(DevelopmentBuildError::NonAbsolutePath(
+            cache.display().to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn link_registry_cache(cargo_home: &Path, cache: Option<&Path>) -> Result<(), io::Error> {
+    let Some(cache) = cache else {
+        return Ok(());
+    };
+    let destination = cargo_home.join("registry");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(cache, destination)?;
+    #[cfg(windows)]
+    std::os::windows::fs::symlink_dir(cache, destination)?;
     Ok(())
 }
 
@@ -268,21 +378,28 @@ fn baseline_path(
     })
 }
 
-fn sha256_file(path: &Path) -> Result<String, io::Error> {
-    Ok(hex::encode(Sha256::digest(fs::read(path)?)))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn build_manifest_never_deserializes_unknown_fields() {
-        let json = r#"{
-            "schema":1,"composition-hash":"a","target":"x","deployable":false,
-            "build-kind":"development","policy-digest":"p","artifact-file":"a",
-            "artifact-digest":"d","generated-tests-ran":false,"gates":[],"production":true
-        }"#;
-        assert!(serde_json::from_str::<DevelopmentBuildManifest>(json).is_err());
+        let json = format!(
+            r#"{{
+                "schema":2,"composition-hash":"a","profile-name":"p","target":"x",
+                "deployable":false,"mode":"development","build-kind":"library",
+                "policy-digest":"{}","entry-artifact":"a",
+                "artifacts":[{{"path":"a","kind":"rust-library","bytes":1,"digest":"{}"}}],
+                "postprocessor":null,"sbom-file":"rust-agent-sbom.cdx.json",
+                "sbom-digest":"{}","generated-tests-ran":false,"gates":[],
+                "build-manifest-digest":"{}","build-output-digest":"{}","production":true
+            }}"#,
+            "00".repeat(32),
+            "11".repeat(32),
+            "22".repeat(32),
+            "33".repeat(32),
+            "44".repeat(32),
+        );
+        assert!(serde_json::from_str::<DevelopmentBuildManifest>(&json).is_err());
     }
 }

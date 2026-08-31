@@ -8,6 +8,7 @@ implementation exists.
 | Contract | Automated evidence |
 |---|---|
 | Rust/Cargo 1.97.1, components, target set, workspace MSRV, generated manifests and CI remain synchronized | `architecture::rust_toolchain_version_is_pinned_and_synchronized`, `.github/workflows/ci.yml::quality::Verify pinned Rust and Cargo versions` |
+| `wasm-bindgen` Rust/CLI protocol versions and CI installation remain exact and synchronized | `architecture::wasm_bindgen_protocol_is_pinned_and_synchronized`, `.github/workflows/ci.yml::quality::Install pinned wasm-bindgen CLI`, `.github/workflows/ci.yml::quality::Verify pinned wasm-bindgen CLI version` |
 | Pinned formatting, compile, lint, test, documentation and dependency-policy gates | `.github/workflows/ci.yml::quality` |
 | Reference repositories and product crates are absent from the dependency graph | `architecture::workspace_has_no_product_dependency` |
 | Core/shared lifecycle APIs form an effect-free one-way dependency closure and do not import Agent/Session owners | `architecture::api_dependency_direction_is_acyclic`, `architecture::mandatory_api_crates_have_an_exact_effect_free_dependency_closure` |
@@ -32,12 +33,16 @@ implementation exists.
 | Required closure, disable, security and bounded deterministic backtracking | `resolver::tests::*`, `resolver_properties::*` |
 | Same semantic input produces the same composition identity | `generator::tests::regeneration_is_deterministic` |
 | Transient Trybuild diagnostics cannot enter source snapshots or composition identity | `generator::tests::trybuild_wip_does_not_enter_the_source_snapshot` |
-| Generated source, Cargo and manifest snapshots remain fresh | `generator::tests::minimal_golden_is_fresh` |
+| Generated source, Cargo and manifest snapshots remain fresh | `generator::tests::minimal_golden_is_fresh`, `generator::tests::javascript_wasm_golden_is_fresh` |
+| Each direct Cargo root's build requirements are identity-bound, their union is exact, and a WASM Host must directly own its postprocessor requirement and use an explicit offline registry cache | `generator::tests::wasm_direct_host_tool_requirement_is_identity_bound`, `generator::tests::javascript_wasm_requires_an_explicit_registry_cache`, `catalog::tests::wasm_host_requires_its_own_postprocessor_executable`, `wasm_bundle::javascript_wasm_bundle_is_closed_verified_and_executable_end_to_end` |
 | Optional filesystem Component is physically absent/present in real Cargo graph | `generator::tests::selected_packages_match_cargo_tree` |
 | Small resolver graphs agree with a brute-force feasibility oracle | `resolver::tests::small_graph_matches_bruteforce_oracle` |
 | Host feature delta is unit-specific and never relaxes first-party/Host/generated units | `host_feature::tests::*` |
 | Product-neutral library graph compiles on the installed target matrix | `target_matrix::product_neutral_library_compile_matrix` |
 | Emitted composition compiles in an independent Host and rejects duplicate API identity | `e2e::compose_build_inspect_emit_verify_end_to_end` |
-| Native direct, same-module Rust WASM and native backend IPC topology contracts are selected only from build kind/target/ABI; the WASM Host retains typed identity and the IPC frontend cannot depend on runtime internals | `topology_matrix::framework_neutral_host_topology_matrix`, `e2e::compose_build_inspect_emit_verify_end_to_end` |
-| Development output cannot claim deployability | `e2e::compose_build_inspect_emit_verify_end_to_end` |
-| CLI compose/build/inspect/emit/verify workflow | `rust-agent-cli/tests/e2e.rs` |
+| Native direct, same-module Rust WASM, JavaScript WASM and native backend IPC topology contracts are selected only from build kind/target/ABI; the WASM Host retains typed identity and the IPC frontend cannot depend on runtime internals | `topology_matrix::framework_neutral_host_topology_matrix`, `e2e::compose_build_inspect_emit_verify_end_to_end`, `e2e::javascript_wasm_compose_build_and_inspect_end_to_end` |
+| JavaScript WASM rejects missing/wrong-kind/wrong-digest/wrong-version tool mappings, protocol drift and ambient PATH substitution before post-link | `wasm_bundle::javascript_wasm_bundle_is_closed_verified_and_executable_end_to_end`, `wasm_bundle::tests::protocol_lock_rejects_crate_cli_drift`, `e2e::javascript_wasm_compose_build_and_inspect_end_to_end` |
+| JavaScript WASM produces a callable typed handle and a closed JS/transformed-WASM/declaration/snippet bundle; raw-only, missing, mutated or unaccounted outputs fail inspection | `wasm_bundle::javascript_wasm_bundle_is_closed_verified_and_executable_end_to_end`, `wasm_bundle::tests::output_classifier_is_closed` |
+| Raw/postprocessor identity and every WASM output are covered by artifact records, CycloneDX SBOM, recomputed manifest/output digests and a committed byte-growth/absolute size budget | `wasm_bundle::javascript_wasm_bundle_is_closed_verified_and_executable_end_to_end` |
+| Development output cannot claim deployability | `e2e::compose_build_inspect_emit_verify_end_to_end`, `e2e::javascript_wasm_compose_build_and_inspect_end_to_end` |
+| CLI compose/build/inspect/emit/verify workflows include native-library and JavaScript-WASM builds | `e2e::compose_build_inspect_emit_verify_end_to_end`, `e2e::javascript_wasm_compose_build_and_inspect_end_to_end` |

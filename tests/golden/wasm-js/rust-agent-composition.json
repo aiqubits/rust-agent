@@ -1,18 +1,18 @@
 {
   "schema": 1,
   "algorithm": "sha256-rust-agent-composition-v1",
-  "composition-hash": "e47047b2b46dbf9cacde00acb3d7a30ab1ebcbd75597c780ec53b55e7f87a2f3",
-  "build-kind": "library",
-  "profile-name": "fixture-minimal",
+  "composition-hash": "4ea957068f0d54f59379afc5f7c253619801737f1ccf0cd93677d8105d487946",
+  "build-kind": "wasm",
+  "profile-name": "fixture-wasm-js",
   "normalized-profile": {
     "schema": 1,
-    "name": "fixture-minimal",
-    "build-kind": "library",
-    "target": "x86_64-unknown-linux-gnu",
-    "environment": "desktop",
+    "name": "fixture-wasm-js",
+    "build-kind": "wasm",
+    "target": "wasm32-unknown-unknown",
+    "environment": "browser",
     "support-tier": "production",
     "runtime-adapter": "fixture-runtime",
-    "host-boundary": null,
+    "host-boundary": "fixture-host-export",
     "components": {
       "fixture-build-proof": "disabled",
       "fixture-driver": "enabled",
@@ -24,7 +24,6 @@
     "preferred-providers": {},
     "denied-effects": [
       "code-execution",
-      "host-bridge",
       "network-outbound",
       "persistent-storage",
       "process-exec",
@@ -35,36 +34,39 @@
     ],
     "resolver-decision-budget": 100
   },
-  "target": "x86_64-unknown-linux-gnu",
+  "target": "wasm32-unknown-unknown",
   "normalized-target": {
-    "triple": "x86_64-unknown-linux-gnu",
-    "environment": "desktop",
+    "triple": "wasm32-unknown-unknown",
+    "environment": "browser",
     "facts": {
       "debug_assertions": [
         null
       ],
       "panic": [
-        "unwind"
+        "abort"
       ],
       "target_abi": [
         ""
       ],
       "target_arch": [
-        "x86_64"
+        "wasm32"
       ],
       "target_endian": [
         "little"
       ],
       "target_env": [
-        "gnu"
+        ""
       ],
       "target_family": [
-        "unix"
+        "wasm"
       ],
       "target_feature": [
-        "fxsr",
-        "sse",
-        "sse2"
+        "bulk-memory",
+        "multivalue",
+        "mutable-globals",
+        "nontrapping-fptoint",
+        "reference-types",
+        "sign-ext"
       ],
       "target_has_atomic": [
         "16",
@@ -81,33 +83,36 @@
         "ptr"
       ],
       "target_os": [
-        "linux"
+        "unknown"
       ],
       "target_pointer_width": [
-        "64"
+        "32"
       ],
       "target_vendor": [
         "unknown"
-      ],
-      "unix": [
-        null
       ]
     },
-    "target-fact-digest": "73c369762a21203cde3a60f65e26ee503a07358806d6559f514e2518282056de",
+    "target-fact-digest": "23418f403297dd7944128cdc90ecab0ec981da52357db88b2e48849c9a5bc020",
     "custom-target-spec-digest": null
   },
-  "target-fact-digest": "73c369762a21203cde3a60f65e26ee503a07358806d6559f514e2518282056de",
+  "target-fact-digest": "23418f403297dd7944128cdc90ecab0ec981da52357db88b2e48849c9a5bc020",
   "selected-components": [
     "fixture-driver",
     "fixture-model"
   ],
   "runtime-adapter": "fixture-runtime",
-  "host-boundary": null,
+  "host-boundary": "fixture-host-export",
   "component-runtime-effects": [],
-  "host-runtime-effects": [],
-  "compiled-runtime-effects": [],
+  "host-runtime-effects": [
+    "host-bridge"
+  ],
+  "compiled-runtime-effects": [
+    "host-bridge"
+  ],
   "build-requirements": {
-    "executables": [],
+    "executables": [
+      "wasm-bindgen-cli"
+    ],
     "read-inputs": [],
     "environment": []
   },
@@ -137,6 +142,13 @@
       "read-inputs": [],
       "environment": []
     },
+    "host-boundary:fixture-host-export": {
+      "executables": [
+        "wasm-bindgen-cli"
+      ],
+      "read-inputs": [],
+      "environment": []
+    },
     "runtime-adapter:fixture-runtime": {
       "executables": [],
       "read-inputs": [],
@@ -147,9 +159,9 @@
   "deployable": false,
   "resolution": {
     "schema": 1,
-    "profile": "fixture-minimal",
-    "target": "x86_64-unknown-linux-gnu",
-    "target-fact-digest": "73c369762a21203cde3a60f65e26ee503a07358806d6559f514e2518282056de",
+    "profile": "fixture-wasm-js",
+    "target": "wasm32-unknown-unknown",
+    "target-fact-digest": "23418f403297dd7944128cdc90ecab0ec981da52357db88b2e48849c9a5bc020",
     "selected-components": [
       "fixture-driver",
       "fixture-model"
@@ -170,10 +182,14 @@
       "fixture-driver"
     ],
     "runtime-adapter": "fixture-runtime",
-    "host-boundary": null,
-    "compiled-runtime-effects": [],
+    "host-boundary": "fixture-host-export",
+    "compiled-runtime-effects": [
+      "host-bridge"
+    ],
     "build-requirements": {
-      "executables": [],
+      "executables": [
+        "wasm-bindgen-cli"
+      ],
       "read-inputs": [],
       "environment": []
     },
@@ -191,7 +207,7 @@
         "component": "fixture-driver",
         "conclusion": "selected",
         "reasons": [
-          "RequiredBy(profile:fixture-minimal)"
+          "RequiredBy(profile:fixture-wasm-js)"
         ]
       },
       {
@@ -254,6 +270,26 @@
           "path": "src/lib.rs",
           "digest": "cee9ac2b2cf8b66591c96272890b5634b89063b0eb5c29bfb95e6df744fc6498",
           "bytes": 1368,
+          "executable": false
+        }
+      ]
+    },
+    {
+      "id": "fixture-host-export",
+      "package": "rust-agent-fixture-host-export",
+      "logical-path": "tests/fixtures/hosts/fixture-host-export",
+      "tree-digest": "89a3eed3c4ff470c7f52c17eb81930af27a54008785d95b7ac2d8b6f0289db5a",
+      "files": [
+        {
+          "path": "Cargo.toml",
+          "digest": "26eae5112d27d3854e8ece8a6e16d398046346be91650dabfd6b033cc7771efe",
+          "bytes": 681,
+          "executable": false
+        },
+        {
+          "path": "src/lib.rs",
+          "digest": "41d88fdedce6e4ae470e59994dff3d6f982e667bd4a253f68c9874bbc3756dd7",
+          "bytes": 785,
           "executable": false
         }
       ]
@@ -396,36 +432,43 @@
   "generated-files": [
     {
       "path": ".cargo/config.toml",
-      "digest": "e68daedb4e04d8b25c9e49f7592688efc63b6374b1e9380ea73ce364d92e7963",
-      "bytes": 66
+      "digest": "d571aedb2158d245307f01daa1d5af97e27f81e9da94a6efe50c2122d294abd6",
+      "bytes": 64
     },
     {
       "path": "Cargo.toml",
-      "digest": "ea0d9d2d9a4a7c3cac26309845c1e14b58d73102b805b1d844292e42b46d0d14",
-      "bytes": 1288
+      "digest": "69c78f1695b5e305b880acb80616e83485dbc581de7307cc6967b67fecc49710",
+      "bytes": 1702
     },
     {
       "path": "cargo-resolution.json",
-      "digest": "79666139845b8a1ba750ef87e395035aa84d80aea43da68c7863d3e3014d4f25",
-      "bytes": 294
+      "digest": "62fafcfdf666a87a12d054ebfadc194efe27d3723efc11d168b677b11b9d998a",
+      "bytes": 368
     },
     {
       "path": "src/lib.rs",
-      "digest": "d93477fb5d843aa34be9d1b53fc98defbb625c73cb76a45b88b1aa4250592bd1",
-      "bytes": 1998
+      "digest": "24e736dd03efdd20ad41d1c3346ff139d4c7dec6c8d0369d8916f1ef34fdcfe8",
+      "bytes": 2029
+    },
+    {
+      "path": "src/wasm.rs",
+      "digest": "3eecaf3bfd90ad6d1aaf372f02be407290dd4353bde3553a66f2d6193e4af217",
+      "bytes": 807
     }
   ],
-  "cargo-lock-digest": "c2b26cfaf8190297043770d999c71e78000ed284e0319b84227bedbc61bdf37e",
-  "cargo-resolution-digest": "79666139845b8a1ba750ef87e395035aa84d80aea43da68c7863d3e3014d4f25",
+  "cargo-lock-digest": "1319a1932e004f5854a5017eb600307b50e81609a5c38e8affd219ee5bd9895d",
+  "cargo-resolution-digest": "62fafcfdf666a87a12d054ebfadc194efe27d3723efc11d168b677b11b9d998a",
   "cargo-resolution": {
     "schema": 1,
-    "target": "x86_64-unknown-linux-gnu",
-    "target-fact-digest": "73c369762a21203cde3a60f65e26ee503a07358806d6559f514e2518282056de",
+    "target": "wasm32-unknown-unknown",
+    "target-fact-digest": "23418f403297dd7944128cdc90ecab0ec981da52357db88b2e48849c9a5bc020",
     "resolver": "2",
     "offline": true,
     "isolated-cargo-home": true,
     "ancestor-config": "forbidden",
-    "registries": {},
+    "registries": {
+      "crates-io": "registry+https://github.com/rust-lang/crates.io-index"
+    },
     "git-sources": []
   }
 }

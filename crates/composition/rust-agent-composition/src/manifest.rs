@@ -63,6 +63,8 @@ pub struct CompositionIdentityPayload<'a> {
     pub profile: &'a CompositionProfile,
     pub target: &'a Target,
     pub resolution: &'a Resolution,
+    #[serde(rename = "direct-root-build-requirements")]
+    pub direct_root_build_requirements: &'a BTreeMap<String, BuildRequirements>,
     pub sources: &'a [SourcePackageRecord],
     #[serde(rename = "generated-files")]
     pub generated_files: &'a [GeneratedFileRecord],
@@ -104,6 +106,8 @@ pub struct CompositionManifest {
     pub compiled_runtime_effects: BTreeSet<String>,
     #[serde(rename = "build-requirements")]
     pub build_requirements: BuildRequirements,
+    #[serde(rename = "direct-root-build-requirements")]
+    pub direct_root_build_requirements: BTreeMap<String, BuildRequirements>,
     #[serde(rename = "app-handoff")]
     pub app_handoff: AppHandoff,
     pub deployable: bool,

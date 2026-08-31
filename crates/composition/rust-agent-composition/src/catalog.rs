@@ -554,6 +554,16 @@ fn validate_boundary(spec: &HostBoundarySpec) -> Result<(), CatalogError> {
             if spec.entry.is_none() && spec.export_module.is_some() =>
         {
             validate_rust_path(&spec.id, spec.export_module.as_deref().unwrap())?;
+            if !spec
+                .build_requirements
+                .executables
+                .contains(crate::WASM_BINDGEN_CLI_LOGICAL_ID)
+            {
+                return Err(CatalogError::InvalidBinding(
+                    spec.id.clone(),
+                    "WASM Host export requires executable `wasm-bindgen-cli`".into(),
+                ));
+            }
         }
         _ => {
             return Err(CatalogError::InvalidBinding(
@@ -809,6 +819,21 @@ provides = [{ capability = "cap:model", priority = 1, effects = [] }]
     fn unknown_fields_fail_closed() {
         let input = BASE.replace("schema = 1", "schema = 1\nframework = \"tauri\"");
         assert!(CatalogDocument::from_toml(&input).is_err());
+    }
+
+    #[test]
+    fn wasm_host_requires_its_own_postprocessor_executable() {
+        let catalog = include_str!("../../../../tests/fixtures/catalog.toml");
+        let required = "build-requirements = { executables = [\"wasm-bindgen-cli\"], read-inputs = [], environment = [] }";
+        assert_eq!(catalog.matches(required).count(), 1);
+        let invalid = catalog.replace(
+            required,
+            "build-requirements = { executables = [], read-inputs = [], environment = [] }",
+        );
+        assert!(matches!(
+            NormalizedCatalog::normalize(CatalogDocument::from_toml(&invalid).unwrap()),
+            Err(CatalogError::InvalidBinding(_, _))
+        ));
     }
 
     #[test]

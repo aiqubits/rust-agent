@@ -24,6 +24,10 @@ jobs:
           rustc --version | grep -E '^rustc 1\.97\.1 '
           cargo --version | grep -E '^cargo 1\.97\.1 '
       - uses: Swatinem/rust-cache@v2
+      - name: Install pinned wasm-bindgen CLI
+        run: cargo install wasm-bindgen-cli --version 0.2.127 --locked
+      - name: Verify pinned wasm-bindgen CLI version
+        run: wasm-bindgen --version | grep -E '^wasm-bindgen 0\.2\.127$'
       - run: cargo fmt --all --check
       - run: cargo check --workspace --all-targets
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings

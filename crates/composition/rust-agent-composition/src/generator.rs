@@ -18,7 +18,7 @@ use crate::{
         CargoResolutionRecord, CompositionIdentityPayload, CompositionManifest,
         GeneratedFileRecord, SecurityManifest, SourceFileRecord, SourcePackageRecord,
     },
-    metadata::{CatalogDocument, HostBoundaryKind},
+    metadata::{BuildRequirements, CatalogDocument, HostBoundaryKind},
     profile::{BuildKind, CompositionProfile},
     resolver::{ResolutionError, resolve},
     target::{Target, TargetError},
@@ -35,6 +35,7 @@ pub struct ComposeOptions {
     pub output_root: PathBuf,
     pub rustc_path: PathBuf,
     pub cargo_path: PathBuf,
+    pub registry_cache_path: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -78,6 +79,8 @@ pub enum ComposeError {
     UnsupportedPhase1A(String),
     #[error("composition verification failed: {0}")]
     Verification(String),
+    #[error("explicit Cargo registry cache is invalid: {0}")]
+    InvalidRegistryCache(String),
 }
 
 pub fn compose(options: &ComposeOptions) -> Result<GeneratedComposition, ComposeError> {
@@ -101,11 +104,16 @@ pub fn compose(options: &ComposeOptions) -> Result<GeneratedComposition, Compose
             }
         })?)
         .map_err(ComposeError::ProfileToml)?;
-    if profile.build_kind != BuildKind::Library {
+    if !matches!(profile.build_kind, BuildKind::Library | BuildKind::Wasm) {
         return Err(ComposeError::UnsupportedPhase1A(format!(
             "{:?}",
             profile.build_kind
         )));
+    }
+    if profile.build_kind == BuildKind::Wasm && options.registry_cache_path.is_none() {
+        return Err(ComposeError::InvalidRegistryCache(
+            "WASM composition requires an explicit offline registry cache".into(),
+        ));
     }
     let target = Target::query(&options.rustc_path, &profile.target, profile.environment)?;
     let resolution = resolve(&catalog, &profile, &target)?;
@@ -148,17 +156,31 @@ fn compose_in_staging(
     fs::create_dir_all(staging.join("vendor"))?;
     write_text(
         &staging.join("Cargo.toml"),
-        &generate_cargo_toml(catalog, resolution, &package_inputs),
+        &generate_cargo_toml(catalog, resolution, &package_inputs, profile.build_kind),
     )?;
     write_text(
         &staging.join("src/lib.rs"),
-        &generate_lib_rs(catalog, resolution)?,
+        &generate_lib_rs(catalog, resolution, profile.build_kind)?,
     )?;
+    if profile.build_kind == BuildKind::Wasm {
+        write_text(
+            &staging.join("src/wasm.rs"),
+            &generate_wasm_rs(catalog, resolution)?,
+        )?;
+    }
     write_text(
         &staging.join("src/identity.rs"),
         "pub const COMPOSITION_HASH: &str = \"pending\";\n",
     )?;
 
+    let registries = if profile.build_kind == BuildKind::Wasm {
+        BTreeMap::from([(
+            "crates-io".into(),
+            "registry+https://github.com/rust-lang/crates.io-index".into(),
+        )])
+    } else {
+        BTreeMap::new()
+    };
     let cargo_resolution = CargoResolutionRecord {
         schema: 1,
         target: target.triple.clone(),
@@ -167,7 +189,7 @@ fn compose_in_staging(
         offline: true,
         isolated_cargo_home: true,
         ancestor_config: "forbidden".into(),
-        registries: BTreeMap::new(),
+        registries,
         git_sources: BTreeSet::new(),
     };
     write_json(&staging.join("cargo-resolution.json"), &cargo_resolution)?;
@@ -181,20 +203,23 @@ fn compose_in_staging(
 
     generate_lockfile(options, staging)?;
     let cargo_lock_digest = file_digest(&staging.join("Cargo.lock"))?;
-    let generated_files = generated_file_records(
-        staging,
-        &[
-            "Cargo.toml",
-            "cargo-resolution.json",
-            ".cargo/config.toml",
-            "src/lib.rs",
-        ],
-    )?;
+    let mut generated_paths = vec![
+        "Cargo.toml",
+        "cargo-resolution.json",
+        ".cargo/config.toml",
+        "src/lib.rs",
+    ];
+    if profile.build_kind == BuildKind::Wasm {
+        generated_paths.push("src/wasm.rs");
+    }
+    let generated_files = generated_file_records(staging, &generated_paths)?;
+    let direct_root_build_requirements = direct_root_build_requirements(catalog, resolution);
     let payload = CompositionIdentityPayload {
         schema: 1,
         profile,
         target,
         resolution,
+        direct_root_build_requirements: &direct_root_build_requirements,
         sources: &sources,
         generated_files: &generated_files,
         cargo_lock_digest: &cargo_lock_digest,
@@ -237,6 +262,7 @@ fn compose_in_staging(
         host_runtime_effects: host_runtime_effects.clone(),
         compiled_runtime_effects: resolution.compiled_runtime_effects.clone(),
         build_requirements: resolution.build_requirements.clone(),
+        direct_root_build_requirements,
         app_handoff: resolution.app_handoff,
         deployable: false,
         resolution: resolution.clone(),
@@ -283,6 +309,42 @@ fn compose_in_staging(
     })
 }
 
+fn direct_root_build_requirements(
+    catalog: &NormalizedCatalog,
+    resolution: &crate::resolver::Resolution,
+) -> BTreeMap<String, crate::metadata::BuildRequirements> {
+    let mut roots = BTreeMap::from([
+        ("api:rust-agent-core".into(), BuildRequirements::default()),
+        (
+            "api:rust-agent-runtime-api".into(),
+            BuildRequirements::default(),
+        ),
+        (
+            "api:rust-agent-fixture-api".into(),
+            BuildRequirements::default(),
+        ),
+    ]);
+    for component in &resolution.selected_components {
+        roots.insert(
+            format!("component:{component}"),
+            catalog.components[component].build_requirements.clone(),
+        );
+    }
+    roots.insert(
+        format!("runtime-adapter:{}", resolution.runtime_adapter),
+        catalog.runtime_adapters[&resolution.runtime_adapter]
+            .build_requirements
+            .clone(),
+    );
+    if let Some(boundary) = &resolution.host_boundary {
+        roots.insert(
+            format!("host-boundary:{boundary}"),
+            catalog.host_boundaries[boundary].build_requirements.clone(),
+        );
+    }
+    roots
+}
+
 pub fn load_manifest(path: &Path) -> Result<CompositionManifest, ComposeError> {
     let bytes = fs::read(path.join("rust-agent-composition.json"))?;
     serde_json::from_slice(&bytes).map_err(|error| ComposeError::ManifestNormalization {
@@ -305,6 +367,63 @@ pub fn verify_composition(path: &Path) -> Result<CompositionManifest, ComposeErr
     if manifest.schema != 1 || manifest.algorithm != "sha256-rust-agent-composition-v1" {
         return Err(ComposeError::Verification(
             "unknown manifest schema or algorithm".into(),
+        ));
+    }
+    if manifest.build_kind != manifest.normalized_profile.build_kind
+        || manifest.profile != manifest.normalized_profile.name
+        || manifest.target != manifest.normalized_target.triple
+        || manifest.target_fact_digest != manifest.normalized_target.target_fact_digest
+        || manifest.selected_components != manifest.resolution.selected_components
+        || manifest.runtime_adapter != manifest.resolution.runtime_adapter
+        || manifest.host_boundary != manifest.resolution.host_boundary
+        || manifest.compiled_runtime_effects != manifest.resolution.compiled_runtime_effects
+        || manifest.build_requirements != manifest.resolution.build_requirements
+    {
+        return Err(ComposeError::Verification(
+            "manifest projection differs from normalized profile, target, or resolution".into(),
+        ));
+    }
+    let mut expected_roots = BTreeSet::from([
+        "api:rust-agent-core".to_owned(),
+        "api:rust-agent-runtime-api".to_owned(),
+        "api:rust-agent-fixture-api".to_owned(),
+        format!("runtime-adapter:{}", manifest.runtime_adapter),
+    ]);
+    expected_roots.extend(
+        manifest
+            .selected_components
+            .iter()
+            .map(|component| format!("component:{component}")),
+    );
+    if let Some(boundary) = &manifest.host_boundary {
+        expected_roots.insert(format!("host-boundary:{boundary}"));
+    }
+    if manifest
+        .direct_root_build_requirements
+        .keys()
+        .cloned()
+        .collect::<BTreeSet<_>>()
+        != expected_roots
+    {
+        return Err(ComposeError::Verification(
+            "direct root build-requirement keys differ from the resolved Cargo roots".into(),
+        ));
+    }
+    let mut requirement_union = crate::metadata::BuildRequirements::default();
+    for requirements in manifest.direct_root_build_requirements.values() {
+        requirement_union
+            .executables
+            .extend(requirements.executables.iter().cloned());
+        requirement_union
+            .read_inputs
+            .extend(requirements.read_inputs.iter().cloned());
+        requirement_union
+            .environment
+            .extend(requirements.environment.iter().cloned());
+    }
+    if requirement_union != manifest.build_requirements {
+        return Err(ComposeError::Verification(
+            "direct root build requirements do not equal the authorized union".into(),
         ));
     }
     let cargo_resolution_bytes = fs::read(path.join("cargo-resolution.json"))?;
@@ -381,6 +500,7 @@ pub fn verify_composition(path: &Path) -> Result<CompositionManifest, ComposeErr
         profile: &manifest.normalized_profile,
         target: &manifest.normalized_target,
         resolution: &manifest.resolution,
+        direct_root_build_requirements: &manifest.direct_root_build_requirements,
         sources: &manifest.sources,
         generated_files: &manifest.generated_files,
         cargo_lock_digest: &manifest.cargo_lock_digest,
@@ -722,6 +842,7 @@ fn generate_cargo_toml(
     catalog: &NormalizedCatalog,
     resolution: &crate::resolver::Resolution,
     packages: &[PackageInput],
+    build_kind: BuildKind,
 ) -> String {
     let mut output = format!(
         "[package]\nname = \"rust-agent-generated-composition\"\nversion = \"0.1.0\"\nedition = \"2024\"\nrust-version = \"{PINNED_RUST_VERSION}\"\nlicense = \"MIT\"\npublish = false\n\n[workspace]\nresolver = \"2\"\nexclude = [\n",
@@ -729,7 +850,11 @@ fn generate_cargo_toml(
     for package in packages {
         output.push_str(&format!("    {:?},\n", format!("sources/{}", package.path)));
     }
-    output.push_str("]\n\n[features]\ndefault = []\n\n[dependencies]\n");
+    output.push_str("]\n\n");
+    if build_kind == BuildKind::Wasm {
+        output.push_str("[lib]\ncrate-type = [\"cdylib\", \"rlib\"]\n\n");
+    }
+    output.push_str("[features]\ndefault = []\n\n[dependencies]\n");
     let mut dependencies = BTreeMap::new();
     for package in packages {
         dependencies.insert(
@@ -758,17 +883,28 @@ fn generate_cargo_toml(
         }
         output.push_str(" }\n");
     }
+    if build_kind == BuildKind::Wasm {
+        output.push_str(&format!(
+            "wasm-bindgen = {{ version = \"={}\", default-features = false, features = [\"std\"] }}\nwasm-bindgen-futures = {{ version = \"={}\", default-features = false, features = [\"std\"] }}\n",
+            crate::WASM_BINDGEN_PROTOCOL_VERSION,
+            crate::WASM_BINDGEN_FUTURES_VERSION,
+        ));
+    }
     output
 }
 
 fn generate_lib_rs(
     catalog: &NormalizedCatalog,
     resolution: &crate::resolver::Resolution,
+    build_kind: BuildKind,
 ) -> Result<String, ComposeError> {
     let adapter = &catalog.runtime_adapters[&resolution.runtime_adapter];
     let mut output = String::from(
         "#![forbid(unsafe_code)]\n\nmod identity;\n\npub use identity::COMPOSITION_HASH;\npub use rust_agent_runtime_api::{BuildError, RuntimePrimitives};\n",
     );
+    if build_kind == BuildKind::Wasm {
+        output.push_str("mod wasm;\npub use wasm::start;\n");
+    }
     output.push_str(&format!(
         "pub use {} as create_runtime_primitives;\n\n",
         adapter.constructor
@@ -882,6 +1018,29 @@ fn generate_lib_rs(
     Ok(output)
 }
 
+fn generate_wasm_rs(
+    catalog: &NormalizedCatalog,
+    resolution: &crate::resolver::Resolution,
+) -> Result<String, ComposeError> {
+    let boundary_id = resolution.host_boundary.as_ref().ok_or_else(|| {
+        ComposeError::UnsupportedPhase1A("wasm composition requires a Host export".into())
+    })?;
+    let boundary = &catalog.host_boundaries[boundary_id];
+    if boundary.kind != HostBoundaryKind::WasmExport {
+        return Err(ComposeError::UnsupportedPhase1A(format!(
+            "Host boundary `{boundary_id}` is not a WASM export"
+        )));
+    }
+    let export = boundary.export_module.as_ref().ok_or_else(|| {
+        ComposeError::UnsupportedPhase1A(format!(
+            "Host boundary `{boundary_id}` has no export module"
+        ))
+    })?;
+    Ok(format!(
+        "use {export}::{{JsValue, WasmAppHandle, wasm_bindgen}};\n\n#[wasm_bindgen]\npub async fn start(\n    runtime_config: JsValue,\n    host_bindings: JsValue,\n) -> Result<WasmAppHandle, JsValue> {{\n    if !runtime_config.is_object() || runtime_config.is_null() {{\n        return Err(JsValue::from_str(\"runtime_config must be an object\"));\n    }}\n    if !host_bindings.is_object() || host_bindings.is_null() {{\n        return Err(JsValue::from_str(\"host_bindings must be an object\"));\n    }}\n    let runtime = {export}::runtime_primitives(crate::create_runtime_primitives)\n        .map_err(|error| JsValue::from_str(&error.to_string()))?;\n    let app = crate::build(runtime)\n        .map_err(|error| JsValue::from_str(&error.to_string()))?;\n    Ok(WasmAppHandle::from_app(app))\n}}\n"
+    ))
+}
+
 fn generate_lockfile(options: &ComposeOptions, staging: &Path) -> Result<(), ComposeError> {
     let cargo_home = staging.with_extension(format!(
         "cargo-home-{}-{}",
@@ -889,6 +1048,7 @@ fn generate_lockfile(options: &ComposeOptions, staging: &Path) -> Result<(), Com
         STAGING_COUNTER.fetch_add(1, Ordering::Relaxed)
     ));
     fs::create_dir(&cargo_home)?;
+    link_registry_cache(&cargo_home, options.registry_cache_path.as_deref())?;
     let output = Command::new(&options.cargo_path)
         .args(["generate-lockfile", "--offline", "--manifest-path"])
         .arg(staging.join("Cargo.toml"))
@@ -947,6 +1107,25 @@ fn validate_options(options: &ComposeOptions) -> Result<(), ComposeError> {
             return Err(ComposeError::NonAbsolutePath(path.display().to_string()));
         }
     }
+    if let Some(cache) = &options.registry_cache_path
+        && (!cache.is_absolute() || !cache.is_dir())
+    {
+        return Err(ComposeError::InvalidRegistryCache(
+            cache.display().to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn link_registry_cache(cargo_home: &Path, cache: Option<&Path>) -> Result<(), ComposeError> {
+    let Some(cache) = cache else {
+        return Ok(());
+    };
+    let destination = cargo_home.join("registry");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(cache, destination)?;
+    #[cfg(windows)]
+    std::os::windows::fs::symlink_dir(cache, destination)?;
     Ok(())
 }
 
@@ -1043,8 +1222,17 @@ mod tests {
             output_root: temp.path().join("compositions"),
             rustc_path: tool("rustc"),
             cargo_path: tool("cargo"),
+            registry_cache_path: None,
             workspace_root: root,
         }
+    }
+
+    fn registry_cache() -> PathBuf {
+        let cargo_home = env::var_os("CARGO_HOME")
+            .map(PathBuf::from)
+            .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".cargo")))
+            .expect("Cargo home must be discoverable");
+        cargo_home.join("registry").canonicalize().unwrap()
     }
 
     #[test]
@@ -1056,6 +1244,15 @@ mod tests {
         assert_eq!(first.composition_hash, second.composition_hash);
         assert_eq!(first.manifest, second.manifest);
         assert_eq!(first.path, second.path);
+    }
+
+    #[test]
+    fn javascript_wasm_requires_an_explicit_registry_cache() {
+        let temp = TempDir::new().unwrap();
+        assert!(matches!(
+            compose(&options(&temp, "tests/fixtures/profiles/wasm-js.toml")),
+            Err(ComposeError::InvalidRegistryCache(_))
+        ));
     }
 
     #[test]
@@ -1118,6 +1315,62 @@ mod tests {
                 "stale golden {golden}"
             );
         }
+    }
+
+    #[test]
+    fn javascript_wasm_golden_is_fresh() {
+        let temp = TempDir::new().unwrap();
+        let mut wasm_options = options(&temp, "tests/fixtures/profiles/wasm-js.toml");
+        wasm_options.registry_cache_path = Some(registry_cache());
+        let generated = compose(&wasm_options).unwrap();
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../..")
+            .canonicalize()
+            .unwrap();
+        for (actual, golden) in [
+            ("Cargo.toml", "Cargo.toml"),
+            ("src/lib.rs", "lib.rs"),
+            ("src/wasm.rs", "wasm.rs"),
+            ("rust-agent-composition.json", "rust-agent-composition.json"),
+        ] {
+            if std::env::var_os("RUST_AGENT_UPDATE_GOLDENS").as_deref()
+                == Some(std::ffi::OsStr::new("1"))
+            {
+                fs::copy(
+                    generated.path.join(actual),
+                    root.join("tests/golden/wasm-js").join(golden),
+                )
+                .unwrap();
+            }
+            assert_eq!(
+                fs::read(generated.path.join(actual)).unwrap(),
+                fs::read(root.join("tests/golden/wasm-js").join(golden)).unwrap(),
+                "stale golden {golden}"
+            );
+        }
+    }
+
+    #[test]
+    fn wasm_direct_host_tool_requirement_is_identity_bound() {
+        let temp = TempDir::new().unwrap();
+        let mut wasm_options = options(&temp, "tests/fixtures/profiles/wasm-js.toml");
+        wasm_options.registry_cache_path = Some(registry_cache());
+        let generated = compose(&wasm_options).unwrap();
+        let manifest_path = generated.path.join("rust-agent-composition.json");
+        let mut manifest: serde_json::Value =
+            serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+        manifest["direct-root-build-requirements"]["host-boundary:fixture-host-export"]["executables"] =
+            serde_json::json!([]);
+        manifest["build-requirements"]["executables"] = serde_json::json!([]);
+        manifest["resolution"]["build-requirements"]["executables"] = serde_json::json!([]);
+        let mut bytes = serde_json::to_vec_pretty(&manifest).unwrap();
+        bytes.push(b'\n');
+        fs::write(manifest_path, bytes).unwrap();
+        assert!(matches!(
+            verify_composition(&generated.path),
+            Err(ComposeError::Verification(message))
+                if message.contains("composition identity mismatch")
+        ));
     }
 
     #[test]

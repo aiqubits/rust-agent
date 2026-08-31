@@ -1,0 +1,36 @@
+[package]
+name = "rust-agent-generated-composition"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97.1"
+license = "MIT"
+publish = false
+
+[workspace]
+resolver = "2"
+exclude = [
+    "sources/crates/api/rust-agent-core",
+    "sources/crates/api/rust-agent-runtime-api",
+    "sources/tests/fixtures/api/fixture-api",
+    "sources/tests/fixtures/components/fixture-driver",
+    "sources/tests/fixtures/components/fixture-model",
+    "sources/tests/fixtures/hosts/fixture-host-export",
+    "sources/tests/fixtures/runtime/fixture-runtime",
+]
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = []
+
+[dependencies]
+rust-agent-core = { version = "0.1.0", path = "sources/crates/api/rust-agent-core", default-features = false }
+rust-agent-fixture-api = { version = "0.1.0", path = "sources/tests/fixtures/api/fixture-api", default-features = false }
+rust-agent-fixture-driver = { version = "0.1.0", path = "sources/tests/fixtures/components/fixture-driver", default-features = false }
+rust-agent-fixture-host-export = { version = "0.1.0", path = "sources/tests/fixtures/hosts/fixture-host-export", default-features = false }
+rust-agent-fixture-model = { version = "0.1.0", path = "sources/tests/fixtures/components/fixture-model", default-features = false }
+rust-agent-fixture-runtime = { version = "0.1.0", path = "sources/tests/fixtures/runtime/fixture-runtime", default-features = false }
+rust-agent-runtime-api = { version = "0.1.0", path = "sources/crates/api/rust-agent-runtime-api", default-features = false }
+wasm-bindgen = { version = "=0.2.127", default-features = false, features = ["std"] }
+wasm-bindgen-futures = { version = "=0.4.77", default-features = false, features = ["std"] }

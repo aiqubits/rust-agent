@@ -44,6 +44,7 @@ fn build_requirements_need_exact_policy_kind_but_never_expand_runtime_effects() 
         output_root: temp.path().join("compositions"),
         rustc_path: rustc.clone(),
         cargo_path: cargo.clone(),
+        registry_cache_path: None,
     })
     .unwrap();
     assert!(generated.manifest.compiled_runtime_effects.is_empty());
@@ -61,6 +62,7 @@ fn build_requirements_need_exact_policy_kind_but_never_expand_runtime_effects() 
         cargo_path: cargo.clone(),
         rustc_path: rustc.clone(),
         linker_path: linker.clone(),
+        registry_cache_path: None,
         policy: BuildExecutionPolicy::empty_development(),
         run_generated_tests: false,
     });
@@ -94,6 +96,7 @@ fn build_requirements_need_exact_policy_kind_but_never_expand_runtime_effects() 
         cargo_path: cargo,
         rustc_path: rustc,
         linker_path: linker,
+        registry_cache_path: None,
         policy,
         run_generated_tests: true,
     })

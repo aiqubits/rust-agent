@@ -38,6 +38,14 @@ fn tool(name: &str) -> PathBuf {
         .unwrap()
 }
 
+fn registry_cache() -> PathBuf {
+    let cargo_home = env::var_os("CARGO_HOME")
+        .map(PathBuf::from)
+        .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".cargo")))
+        .expect("Cargo home must be discoverable");
+    cargo_home.join("registry").canonicalize().unwrap()
+}
+
 fn compose_fixture(
     root: &Path,
     temp: &Path,
@@ -52,6 +60,7 @@ fn compose_fixture(
         output_root: temp.join("compositions"),
         rustc_path: rustc.to_owned(),
         cargo_path: cargo.to_owned(),
+        registry_cache_path: (profile == "wasm-js.toml").then(registry_cache),
     })
     .unwrap()
 }
@@ -86,6 +95,20 @@ fn framework_neutral_host_topology_matrix() {
         HostIntegrationTopology::JavaScriptWasm,
     ] {
         assert!(verify_host_topology(&wasm.manifest, rejected).is_err());
+    }
+
+    let javascript = compose_fixture(&root, temp.path(), &rustc, &cargo, "wasm-js.toml");
+    verify_host_topology(
+        &javascript.manifest,
+        HostIntegrationTopology::JavaScriptWasm,
+    )
+    .unwrap();
+    for rejected in [
+        HostIntegrationTopology::SameProcessNativeRust,
+        HostIntegrationTopology::NativeBackendIpc,
+        HostIntegrationTopology::SameModuleRustWasm,
+    ] {
+        assert!(verify_host_topology(&javascript.manifest, rejected).is_err());
     }
 
     let native_integration = temp.path().join("native-integration");
