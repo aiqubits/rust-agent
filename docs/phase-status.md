@@ -25,7 +25,7 @@ The Phase 0/1A baseline is intentionally development-only. Named tests cover:
 - deterministic CBOR/JCS inputs, target-fact digests and reproducible composition hashes;
 - resolver required closure, explicit disable, security denial, conflicts, bounded backtracking,
   decision exhaustion, provenance, property cases and a brute-force small-graph oracle;
-- generated source/Cargo/manifest goldens and full-tree mutation detection;
+- generated source/Cargo/manifest goldens, transient Trybuild diagnostic exclusion and canonical-tree mutation detection;
 - real Cargo graph removal/addition of `rust-agent-fixture-fs-read`;
 - generated factory type checking and execution under a locked, offline, isolated Cargo home;
 - exact build-requirement kind authorization without runtime-effect expansion;

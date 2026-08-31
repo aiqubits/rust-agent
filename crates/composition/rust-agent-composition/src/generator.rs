@@ -602,10 +602,7 @@ fn snapshot_package(
         if relative.as_os_str().is_empty() {
             continue;
         }
-        if relative
-            .components()
-            .any(|part| part.as_os_str() == "target" || part.as_os_str() == ".git")
-        {
+        if snapshot_path_is_transient(relative) {
             continue;
         }
         let metadata = fs::symlink_metadata(entry.path())?;
@@ -658,6 +655,17 @@ fn snapshot_package(
         tree_digest,
         files: records,
     })
+}
+
+fn snapshot_path_is_transient(relative: &Path) -> bool {
+    let is_trybuild_wip = relative
+        .components()
+        .next()
+        .is_some_and(|part| part.as_os_str() == "wip");
+    is_trybuild_wip
+        || relative
+            .components()
+            .any(|part| part.as_os_str() == "target" || part.as_os_str() == ".git")
 }
 
 fn normalize_snapshot_manifest(path: &Path) -> Result<Vec<u8>, ComposeError> {
@@ -1044,6 +1052,36 @@ mod tests {
         assert_eq!(first.composition_hash, second.composition_hash);
         assert_eq!(first.manifest, second.manifest);
         assert_eq!(first.path, second.path);
+    }
+
+    #[test]
+    fn trybuild_wip_does_not_enter_the_source_snapshot() {
+        let temp = TempDir::new().unwrap();
+        let package = temp.path().join("fixture");
+        fs::create_dir_all(package.join("src")).unwrap();
+        fs::create_dir_all(package.join("wip")).unwrap();
+        fs::write(
+            package.join("Cargo.toml"),
+            "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\nedition = \"2024\"\nrust-version = \"1.85\"\nlicense = \"MIT\"\n",
+        )
+        .unwrap();
+        fs::write(package.join("src/lib.rs"), "pub fn fixture() {}\n").unwrap();
+        fs::write(package.join("wip/.gitignore"), "*\n").unwrap();
+        fs::write(package.join("wip/transient.stderr"), "not canonical\n").unwrap();
+
+        let snapshot_root = temp.path().join("snapshots");
+        let record =
+            snapshot_package(temp.path(), &snapshot_root, "fixture", "fixture", "fixture").unwrap();
+
+        assert_eq!(
+            record
+                .files
+                .iter()
+                .map(|file| file.path.as_str())
+                .collect::<Vec<_>>(),
+            ["Cargo.toml", "src/lib.rs"]
+        );
+        assert!(!snapshot_root.join("fixture/wip").exists());
     }
 
     #[test]

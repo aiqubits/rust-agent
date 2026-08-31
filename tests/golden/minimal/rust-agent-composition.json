@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "algorithm": "sha256-rust-agent-composition-v1",
-  "composition-hash": "59f16828a66ae867e8cb0e22705c7c5cefa482275e1976d656ea852422edbfd9",
+  "composition-hash": "d9d9dc8ef0535636dae5a5591602d02fcc7a034b897ab0bc3929d1c5aac04fa3",
   "build-kind": "library",
   "profile-name": "fixture-minimal",
   "normalized-profile": {
@@ -289,7 +289,7 @@
       "id": "rust-agent-runtime-api",
       "package": "rust-agent-runtime-api",
       "logical-path": "crates/api/rust-agent-runtime-api",
-      "tree-digest": "e24e0dc133282b2094b6e60714a86d2babdf303ef73dc8eae261fe78ac45d3d1",
+      "tree-digest": "4525ec4895bff6b2764acb59acb3fa635eb7ba36af0037f7917a6fb6bf917a34",
       "files": [
         {
           "path": "Cargo.toml",
@@ -329,24 +329,6 @@
         },
         {
           "path": "tests/ui/forge_runtime_identity.stderr",
-          "digest": "1ded5d6a929f37630e34a9d5798465ebefcf4004bdac45e72cb783843c9d48c3",
-          "bytes": 432,
-          "executable": false
-        },
-        {
-          "path": "wip/.gitignore",
-          "digest": "cdbcae15105d6b781e620813c79c7e868740d4e9cc53ce6f5fcbbc12387adf4b",
-          "bytes": 2,
-          "executable": false
-        },
-        {
-          "path": "wip/forge_event_cursor.stderr",
-          "digest": "bbbb7de5cf0a2026fa096216af8912ea720748fc078adf31de5d2f3074614b72",
-          "bytes": 548,
-          "executable": false
-        },
-        {
-          "path": "wip/forge_runtime_identity.stderr",
           "digest": "1ded5d6a929f37630e34a9d5798465ebefcf4004bdac45e72cb783843c9d48c3",
           "bytes": 432,
           "executable": false

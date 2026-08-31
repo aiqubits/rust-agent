@@ -14,6 +14,7 @@ implementation exists.
 | Target facts and predicates are canonical and closed | `target::tests::*` |
 | Required closure, disable, security and bounded deterministic backtracking | `resolver::tests::*`, `resolver_properties::*` |
 | Same semantic input produces the same composition identity | `generator::tests::regeneration_is_deterministic` |
+| Transient Trybuild diagnostics cannot enter source snapshots or composition identity | `generator::tests::trybuild_wip_does_not_enter_the_source_snapshot` |
 | Generated source, Cargo and manifest snapshots remain fresh | `generator::tests::minimal_golden_is_fresh` |
 | Optional filesystem Component is physically absent/present in real Cargo graph | `generator::tests::selected_packages_match_cargo_tree` |
 | Small resolver graphs agree with a brute-force feasibility oracle | `resolver::tests::small_graph_matches_bruteforce_oracle` |
