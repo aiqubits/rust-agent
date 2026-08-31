@@ -1,0 +1,16 @@
+schema = 1
+name = "fixture-wasm-library"
+build-kind = "library"
+target = "wasm32-unknown-unknown"
+environment = "browser"
+support-tier = "production"
+runtime-adapter = "fixture-runtime"
+resolver-decision-budget = 100
+denied-effects = ["code-execution", "host-bridge", "network-outbound", "persistent-storage", "process-exec", "read-local", "remote-execution", "secret-access", "write-local"]
+
+[components]
+fixture-driver = "enabled"
+fixture-model = "auto"
+fixture-model-fallback = "auto"
+fixture-fs-read = "disabled"
+fixture-build-proof = "disabled"

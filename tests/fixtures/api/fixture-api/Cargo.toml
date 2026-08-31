@@ -1,0 +1,23 @@
+[package]
+name = "rust-agent-fixture-api"
+description = "Product-neutral capability API used only by composition proof fixtures"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[package.metadata.rust-agent.build-requirements]
+schema = 1
+executables = []
+read-inputs = []
+environment = []
+
+[features]
+default = []
+
+[dependencies]
+rust-agent-runtime-api = { version = "0.1.0", path = "../../../../crates/api/rust-agent-runtime-api", default-features = false }
+
+[lints]
+workspace = true

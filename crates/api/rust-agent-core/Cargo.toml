@@ -1,0 +1,20 @@
+[package]
+name = "rust-agent-core"
+description = "Stable identifiers and effect-free primitives for rust-agent"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[package.metadata.rust-agent.build-requirements]
+schema = 1
+executables = []
+read-inputs = []
+environment = []
+
+[features]
+default = []
+
+[lints]
+workspace = true

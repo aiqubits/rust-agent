@@ -1,0 +1,392 @@
+{
+  "schema": 1,
+  "algorithm": "sha256-rust-agent-composition-v1",
+  "composition-hash": "59f16828a66ae867e8cb0e22705c7c5cefa482275e1976d656ea852422edbfd9",
+  "build-kind": "library",
+  "profile-name": "fixture-minimal",
+  "normalized-profile": {
+    "schema": 1,
+    "name": "fixture-minimal",
+    "build-kind": "library",
+    "target": "x86_64-unknown-linux-gnu",
+    "environment": "desktop",
+    "support-tier": "production",
+    "runtime-adapter": "fixture-runtime",
+    "host-boundary": null,
+    "components": {
+      "fixture-build-proof": "disabled",
+      "fixture-driver": "enabled",
+      "fixture-fs-read": "disabled",
+      "fixture-model": "auto",
+      "fixture-model-fallback": "auto"
+    },
+    "bindings": {},
+    "preferred-providers": {},
+    "denied-effects": [
+      "code-execution",
+      "host-bridge",
+      "network-outbound",
+      "persistent-storage",
+      "process-exec",
+      "read-local",
+      "remote-execution",
+      "secret-access",
+      "write-local"
+    ],
+    "resolver-decision-budget": 100
+  },
+  "target": "x86_64-unknown-linux-gnu",
+  "normalized-target": {
+    "triple": "x86_64-unknown-linux-gnu",
+    "environment": "desktop",
+    "facts": {
+      "debug_assertions": [
+        null
+      ],
+      "panic": [
+        "unwind"
+      ],
+      "target_abi": [
+        ""
+      ],
+      "target_arch": [
+        "x86_64"
+      ],
+      "target_endian": [
+        "little"
+      ],
+      "target_env": [
+        "gnu"
+      ],
+      "target_family": [
+        "unix"
+      ],
+      "target_feature": [
+        "fxsr",
+        "sse",
+        "sse2"
+      ],
+      "target_has_atomic": [
+        "16",
+        "32",
+        "64",
+        "8",
+        "ptr"
+      ],
+      "target_has_atomic_primitive_alignment": [
+        "16",
+        "32",
+        "64",
+        "8",
+        "ptr"
+      ],
+      "target_os": [
+        "linux"
+      ],
+      "target_pointer_width": [
+        "64"
+      ],
+      "target_vendor": [
+        "unknown"
+      ],
+      "unix": [
+        null
+      ]
+    },
+    "target-fact-digest": "73c369762a21203cde3a60f65e26ee503a07358806d6559f514e2518282056de",
+    "custom-target-spec-digest": null
+  },
+  "target-fact-digest": "73c369762a21203cde3a60f65e26ee503a07358806d6559f514e2518282056de",
+  "selected-components": [
+    "fixture-driver",
+    "fixture-model"
+  ],
+  "runtime-adapter": "fixture-runtime",
+  "host-boundary": null,
+  "component-runtime-effects": [],
+  "host-runtime-effects": [],
+  "compiled-runtime-effects": [],
+  "build-requirements": {
+    "executables": [],
+    "read-inputs": [],
+    "environment": []
+  },
+  "app-handoff": "stop-old-app",
+  "deployable": false,
+  "resolution": {
+    "schema": 1,
+    "profile": "fixture-minimal",
+    "target": "x86_64-unknown-linux-gnu",
+    "target-fact-digest": "73c369762a21203cde3a60f65e26ee503a07358806d6559f514e2518282056de",
+    "selected-components": [
+      "fixture-driver",
+      "fixture-model"
+    ],
+    "bindings": [
+      {
+        "capability": "cap:model",
+        "key": null,
+        "provider": "fixture-model",
+        "consumer": "fixture-driver",
+        "field": "model",
+        "effects": []
+      }
+    ],
+    "construction-order": [
+      "fixture-model",
+      "fixture-driver"
+    ],
+    "runtime-adapter": "fixture-runtime",
+    "host-boundary": null,
+    "compiled-runtime-effects": [],
+    "build-requirements": {
+      "executables": [],
+      "read-inputs": [],
+      "environment": []
+    },
+    "app-handoff": "stop-old-app",
+    "explored-decisions": 2,
+    "diagnostics": [
+      {
+        "component": "fixture-build-proof",
+        "conclusion": "excluded",
+        "reasons": [
+          "ExplicitDisabled"
+        ]
+      },
+      {
+        "component": "fixture-driver",
+        "conclusion": "selected",
+        "reasons": [
+          "RequiredBy(profile:fixture-minimal)"
+        ]
+      },
+      {
+        "component": "fixture-fs-read",
+        "conclusion": "excluded",
+        "reasons": [
+          "ExplicitDisabled"
+        ]
+      },
+      {
+        "component": "fixture-model",
+        "conclusion": "selected",
+        "reasons": [
+          "CandidateFor(cap:model) required by fixture-driver"
+        ]
+      },
+      {
+        "component": "fixture-model-fallback",
+        "conclusion": "excluded",
+        "reasons": [
+          "NotRequired"
+        ]
+      }
+    ]
+  },
+  "sources": [
+    {
+      "id": "fixture-api",
+      "package": "rust-agent-fixture-api",
+      "logical-path": "tests/fixtures/api/fixture-api",
+      "tree-digest": "2d4191bb4812bad29842a934e25a531a7d4474bda0ba53428b36f5e848a0da9b",
+      "files": [
+        {
+          "path": "Cargo.toml",
+          "digest": "30ed961ab894630b4f4352985f2af2d10bfce69762343c97a69d0d10b9051e0f",
+          "bytes": 492,
+          "executable": false
+        },
+        {
+          "path": "src/lib.rs",
+          "digest": "b224b8aef4be43ace5bdb9d1246309204375d28f661ea3a838b79faad0a5ff98",
+          "bytes": 3245,
+          "executable": false
+        }
+      ]
+    },
+    {
+      "id": "fixture-driver",
+      "package": "rust-agent-fixture-driver",
+      "logical-path": "tests/fixtures/components/fixture-driver",
+      "tree-digest": "be2c4b2a621c3fd0dd901b2eaf2c914d3b17730f1697ec8b0046ccac0c939c8f",
+      "files": [
+        {
+          "path": "Cargo.toml",
+          "digest": "c94a94049b4252a926c8b9240a48e307d4be37feb0e0a24851142ab2c394aa0a",
+          "bytes": 463,
+          "executable": false
+        },
+        {
+          "path": "src/lib.rs",
+          "digest": "cee9ac2b2cf8b66591c96272890b5634b89063b0eb5c29bfb95e6df744fc6498",
+          "bytes": 1368,
+          "executable": false
+        }
+      ]
+    },
+    {
+      "id": "fixture-model",
+      "package": "rust-agent-fixture-model",
+      "logical-path": "tests/fixtures/components/fixture-model",
+      "tree-digest": "4b7ae4e352bdeeb7c717a397d629b848ea61b6e57adf8db9f2051d4a66a4d129",
+      "files": [
+        {
+          "path": "Cargo.toml",
+          "digest": "bdc56e710d9e03e721d17bb463188636378d69a2bf367c339a8ef22d3c63959e",
+          "bytes": 463,
+          "executable": false
+        },
+        {
+          "path": "src/lib.rs",
+          "digest": "b8504a6d991f8e1462783232fb52d52ea7351a0286bd00da73ce1c5b02927f98",
+          "bytes": 920,
+          "executable": false
+        }
+      ]
+    },
+    {
+      "id": "fixture-runtime",
+      "package": "rust-agent-fixture-runtime",
+      "logical-path": "tests/fixtures/runtime/fixture-runtime",
+      "tree-digest": "02771f0a21e804d653c1c4f47f9d0e5706a00f71ed76d858d9316db875a87742",
+      "files": [
+        {
+          "path": "Cargo.toml",
+          "digest": "de3233aab369647546c28a194306d0cce1de26b13172945810a4b6ef8c2b7e56",
+          "bytes": 376,
+          "executable": false
+        },
+        {
+          "path": "src/lib.rs",
+          "digest": "3c1dd048db25921b2b7b711e9641eae9f20e56aa6ed1cf8370e0108c65340a8f",
+          "bytes": 535,
+          "executable": false
+        }
+      ]
+    },
+    {
+      "id": "rust-agent-core",
+      "package": "rust-agent-core",
+      "logical-path": "crates/api/rust-agent-core",
+      "tree-digest": "b9f847fad4fcfdfd7ea83952200783497c40214ba86e623e0bfc70c19705ed63",
+      "files": [
+        {
+          "path": "Cargo.toml",
+          "digest": "76d8001ec8035087a98b4f193e6afdaf18a3abe1eb482bfb4e3b261e7c4f5189",
+          "bytes": 322,
+          "executable": false
+        },
+        {
+          "path": "src/lib.rs",
+          "digest": "ccd620b23295e67ecfce0fbdb9c221a024315052b3f3943bb1ea117882ba76e4",
+          "bytes": 9735,
+          "executable": false
+        }
+      ]
+    },
+    {
+      "id": "rust-agent-runtime-api",
+      "package": "rust-agent-runtime-api",
+      "logical-path": "crates/api/rust-agent-runtime-api",
+      "tree-digest": "e24e0dc133282b2094b6e60714a86d2babdf303ef73dc8eae261fe78ac45d3d1",
+      "files": [
+        {
+          "path": "Cargo.toml",
+          "digest": "f4084ef68e20dec7015d325a870043f0ce11813646a80a10c067470d52fd7966",
+          "bytes": 440,
+          "executable": false
+        },
+        {
+          "path": "src/lib.rs",
+          "digest": "d37422fe63c17a86caaf876fcb51f18a1cc3bc89710ce85b568389dd8fb74ac7",
+          "bytes": 6071,
+          "executable": false
+        },
+        {
+          "path": "tests/privacy.rs",
+          "digest": "ac055943b9a356626e241527e005ea3674bd74b5237f5405f9e3256476fe4db5",
+          "bytes": 143,
+          "executable": false
+        },
+        {
+          "path": "tests/ui/forge_event_cursor.rs",
+          "digest": "dafd74e24f882306f6e7885ad7fe79879383ab9347866c2e576823d3c8194f91",
+          "bytes": 101,
+          "executable": false
+        },
+        {
+          "path": "tests/ui/forge_event_cursor.stderr",
+          "digest": "bbbb7de5cf0a2026fa096216af8912ea720748fc078adf31de5d2f3074614b72",
+          "bytes": 548,
+          "executable": false
+        },
+        {
+          "path": "tests/ui/forge_runtime_identity.rs",
+          "digest": "1a83003edfa4cdbd3713cb06bb96496ff567bf613ed79a49d80b1a1771cab232",
+          "bytes": 150,
+          "executable": false
+        },
+        {
+          "path": "tests/ui/forge_runtime_identity.stderr",
+          "digest": "1ded5d6a929f37630e34a9d5798465ebefcf4004bdac45e72cb783843c9d48c3",
+          "bytes": 432,
+          "executable": false
+        },
+        {
+          "path": "wip/.gitignore",
+          "digest": "cdbcae15105d6b781e620813c79c7e868740d4e9cc53ce6f5fcbbc12387adf4b",
+          "bytes": 2,
+          "executable": false
+        },
+        {
+          "path": "wip/forge_event_cursor.stderr",
+          "digest": "bbbb7de5cf0a2026fa096216af8912ea720748fc078adf31de5d2f3074614b72",
+          "bytes": 548,
+          "executable": false
+        },
+        {
+          "path": "wip/forge_runtime_identity.stderr",
+          "digest": "1ded5d6a929f37630e34a9d5798465ebefcf4004bdac45e72cb783843c9d48c3",
+          "bytes": 432,
+          "executable": false
+        }
+      ]
+    }
+  ],
+  "generated-files": [
+    {
+      "path": ".cargo/config.toml",
+      "digest": "e68daedb4e04d8b25c9e49f7592688efc63b6374b1e9380ea73ce364d92e7963",
+      "bytes": 66
+    },
+    {
+      "path": "Cargo.toml",
+      "digest": "b2d37356dc3459c0a6b64078bf6acf322aeac021a31722d1823b7a14e46fc6a4",
+      "bytes": 1286
+    },
+    {
+      "path": "cargo-resolution.json",
+      "digest": "79666139845b8a1ba750ef87e395035aa84d80aea43da68c7863d3e3014d4f25",
+      "bytes": 294
+    },
+    {
+      "path": "src/lib.rs",
+      "digest": "d93477fb5d843aa34be9d1b53fc98defbb625c73cb76a45b88b1aa4250592bd1",
+      "bytes": 1998
+    }
+  ],
+  "cargo-lock-digest": "c2b26cfaf8190297043770d999c71e78000ed284e0319b84227bedbc61bdf37e",
+  "cargo-resolution-digest": "79666139845b8a1ba750ef87e395035aa84d80aea43da68c7863d3e3014d4f25",
+  "cargo-resolution": {
+    "schema": 1,
+    "target": "x86_64-unknown-linux-gnu",
+    "target-fact-digest": "73c369762a21203cde3a60f65e26ee503a07358806d6559f514e2518282056de",
+    "resolver": "2",
+    "offline": true,
+    "isolated-cargo-home": true,
+    "ancestor-config": "forbidden",
+    "registries": {},
+    "git-sources": []
+  }
+}

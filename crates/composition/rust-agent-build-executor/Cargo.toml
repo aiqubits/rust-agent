@@ -1,0 +1,28 @@
+[package]
+name = "rust-agent-build-executor"
+description = "Locked Phase 1A development build and integration verifier"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+default = []
+
+[dependencies]
+hex.workspace = true
+rust-agent-composition = { version = "0.1.0", path = "../rust-agent-composition", default-features = false }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
+toml.workspace = true
+walkdir.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

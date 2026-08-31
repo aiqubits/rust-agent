@@ -1,0 +1,11 @@
+error[E0423]: cannot initialize a tuple struct which contains private fields
+ --> tests/ui/forge_runtime_identity.rs:5:19
+  |
+5 |     let _forged = RuntimeAdapterIdentity(Arc::from("forged"));
+  |                   ^^^^^^^^^^^^^^^^^^^^^^
+  |
+note: constructor is not visible here due to private fields
+ --> src/lib.rs
+  |
+  | pub struct RuntimeAdapterIdentity(Arc<str>);
+  |                                   ^^^^^^^^ private field

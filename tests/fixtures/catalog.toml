@@ -1,0 +1,178 @@
+schema = 1
+
+[[capabilities]]
+id = "cap:model"
+api-package = "rust-agent-fixture-api"
+rust-api = "rust_agent_fixture_api::Model"
+binding-type = "rust_agent_fixture_api::ModelBinding"
+binding-adapter = "rust_agent_fixture_api::ModelBinding::from_provider"
+binding = "singleton"
+scope = "app"
+
+[[capabilities]]
+id = "cap:driver"
+api-package = "rust-agent-fixture-api"
+rust-api = "rust_agent_fixture_api::Driver"
+binding-type = "rust_agent_fixture_api::DriverBinding"
+binding-adapter = "rust_agent_fixture_api::DriverBinding::from_provider"
+binding = "singleton"
+scope = "app"
+
+[[capabilities]]
+id = "cap:fs-read"
+api-package = "rust-agent-fixture-api"
+rust-api = "rust_agent_fixture_api::FileReader"
+binding-type = "rust_agent_fixture_api::FileReaderBinding"
+binding-adapter = "rust_agent_fixture_api::FileReaderBinding::from_provider"
+binding = "singleton"
+scope = "app"
+
+[[capabilities]]
+id = "cap:build-proof"
+api-package = "rust-agent-fixture-api"
+rust-api = "rust_agent_fixture_api::BuildProof"
+binding-type = "rust_agent_fixture_api::BuildProofBinding"
+binding-adapter = "rust_agent_fixture_api::BuildProofBinding::from_provider"
+binding = "singleton"
+scope = "app"
+
+[[components]]
+id = "fixture-model"
+package = "rust-agent-fixture-model"
+package-path = "tests/fixtures/components/fixture-model"
+scope = "app"
+factory = "rust_agent_fixture_model::build"
+dependencies-type = "rust_agent_fixture_model::Dependencies"
+config-type = "rust_agent_fixture_model::Config"
+config-source = "none"
+targets = "cfg(true)"
+support = "production"
+lifecycle-effects = []
+provides = [{ capability = "cap:model", priority = 100, effects = [] }]
+requires = []
+conflicts = []
+security = []
+runtime-primitives = []
+build-requirements = { executables = [], read-inputs = [], environment = [] }
+app-coexistence = { mode = "requires-stop" }
+cargo-features = []
+
+[[components]]
+id = "fixture-model-fallback"
+package = "rust-agent-fixture-model-fallback"
+package-path = "tests/fixtures/components/fixture-model-fallback"
+scope = "app"
+factory = "rust_agent_fixture_model_fallback::build"
+dependencies-type = "rust_agent_fixture_model_fallback::Dependencies"
+config-type = "rust_agent_fixture_model_fallback::Config"
+config-source = "none"
+targets = "cfg(true)"
+support = "production"
+lifecycle-effects = []
+provides = [{ capability = "cap:model", priority = 200, effects = [] }]
+requires = []
+conflicts = ["fixture-driver"]
+security = []
+runtime-primitives = []
+build-requirements = { executables = [], read-inputs = [], environment = [] }
+app-coexistence = { mode = "requires-stop" }
+cargo-features = []
+
+[[components]]
+id = "fixture-driver"
+package = "rust-agent-fixture-driver"
+package-path = "tests/fixtures/components/fixture-driver"
+scope = "app"
+factory = "rust_agent_fixture_driver::build"
+dependencies-type = "rust_agent_fixture_driver::Dependencies"
+config-type = "rust_agent_fixture_driver::Config"
+config-source = "none"
+targets = "cfg(true)"
+support = "production"
+lifecycle-effects = []
+provides = [{ capability = "cap:driver", priority = 100, effects = [] }]
+requires = [{ capability = "cap:model", mode = "required", field = "model" }]
+conflicts = []
+security = []
+runtime-primitives = []
+build-requirements = { executables = [], read-inputs = [], environment = [] }
+app-coexistence = { mode = "requires-stop" }
+cargo-features = []
+
+[[components]]
+id = "fixture-fs-read"
+package = "rust-agent-fixture-fs-read"
+package-path = "tests/fixtures/components/fixture-fs-read"
+scope = "app"
+factory = "rust_agent_fixture_fs_read::build"
+dependencies-type = "rust_agent_fixture_fs_read::Dependencies"
+config-type = "rust_agent_fixture_fs_read::Config"
+config-source = "none"
+targets = "cfg(not(target_arch = \"wasm32\"))"
+support = "production"
+lifecycle-effects = []
+provides = [{ capability = "cap:fs-read", priority = 100, effects = ["read-local"] }]
+requires = []
+conflicts = []
+security = ["read-local"]
+runtime-primitives = []
+build-requirements = { executables = [], read-inputs = [], environment = [] }
+app-coexistence = { mode = "requires-stop" }
+cargo-features = []
+
+[[components]]
+id = "fixture-build-proof"
+package = "rust-agent-fixture-build-proof"
+package-path = "tests/fixtures/components/fixture-build-proof"
+scope = "app"
+factory = "rust_agent_fixture_build_proof::build"
+dependencies-type = "rust_agent_fixture_build_proof::Dependencies"
+config-type = "rust_agent_fixture_build_proof::Config"
+config-source = "none"
+targets = "cfg(true)"
+support = "production"
+lifecycle-effects = []
+provides = [{ capability = "cap:build-proof", priority = 100, effects = [] }]
+requires = []
+conflicts = []
+security = []
+runtime-primitives = []
+build-requirements = { executables = ["fixture-codegen"], read-inputs = ["fixture-sdk"], environment = [] }
+app-coexistence = { mode = "requires-stop" }
+cargo-features = []
+
+[[runtime-adapters]]
+id = "fixture-runtime"
+package = "rust-agent-fixture-runtime"
+package-path = "tests/fixtures/runtime/fixture-runtime"
+constructor = "rust_agent_fixture_runtime::create_runtime_primitives"
+targets = "cfg(true)"
+support = "production"
+primitives = []
+security = []
+app-coexistence = { mode = "requires-stop" }
+build-requirements = { executables = [], read-inputs = [], environment = [] }
+
+[[host-boundaries]]
+id = "fixture-host-entry"
+package = "rust-agent-fixture-host-entry"
+package-path = "tests/fixtures/hosts/fixture-host-entry"
+kind = "entry"
+entry = "rust_agent_fixture_host_entry::run"
+targets = "cfg(any(target_os = \"linux\", target_os = \"macos\", target_os = \"windows\"))"
+support = "production"
+security = ["host-bridge"]
+runtime-adapters = ["fixture-runtime"]
+build-requirements = { executables = [], read-inputs = [], environment = [] }
+
+[[host-boundaries]]
+id = "fixture-host-export"
+package = "rust-agent-fixture-host-export"
+package-path = "tests/fixtures/hosts/fixture-host-export"
+kind = "wasm-export"
+export-module = "rust_agent_fixture_host_export"
+targets = "cfg(target_arch = \"wasm32\")"
+support = "production"
+security = ["host-bridge"]
+runtime-adapters = ["fixture-runtime"]
+build-requirements = { executables = ["wasm-bindgen-cli"], read-inputs = [], environment = [] }

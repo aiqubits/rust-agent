@@ -1,0 +1,61 @@
+[workspace]
+members = [
+    "crates/api/rust-agent-core",
+    "crates/api/rust-agent-runtime-api",
+    "crates/composition/rust-agent-composition",
+    "crates/composition/rust-agent-build-executor",
+    "crates/control/rust-agent-cli",
+    "tests/fixtures/api/fixture-api",
+    "tests/fixtures/components/fixture-driver",
+    "tests/fixtures/components/fixture-build-proof",
+    "tests/fixtures/components/fixture-fs-read",
+    "tests/fixtures/components/fixture-model",
+    "tests/fixtures/components/fixture-model-fallback",
+    "tests/fixtures/runtime/fixture-runtime",
+    "tests/fixtures/hosts/fixture-host-entry",
+    "tests/fixtures/hosts/fixture-host-export",
+]
+default-members = [
+    "crates/api/rust-agent-core",
+    "crates/api/rust-agent-runtime-api",
+    "crates/composition/rust-agent-composition",
+    "crates/composition/rust-agent-build-executor",
+    "crates/control/rust-agent-cli",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT"
+repository = "https://github.com/aiqubits/rust-agent"
+
+[workspace.dependencies]
+anyhow = "1.0.99"
+clap = { version = "4.5.46", features = ["derive"] }
+hex = "0.4.3"
+proptest = "1.7.0"
+serde = { version = "1.0.219", features = ["derive"] }
+serde_json = "1.0.143"
+serde_jcs = "0.1.0"
+sha2 = "0.10.9"
+tempfile = "3.21.0"
+thiserror = "2.0.16"
+toml = "0.9.5"
+trybuild = "1.0.110"
+walkdir = "2.5.0"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_debug_implementations = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+too_many_lines = "allow"
+format_push_string = "allow"

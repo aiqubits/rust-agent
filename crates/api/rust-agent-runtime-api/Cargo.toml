@@ -1,0 +1,26 @@
+[package]
+name = "rust-agent-runtime-api"
+description = "Effect-free runtime ownership and lifecycle contracts for rust-agent"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[package.metadata.rust-agent.build-requirements]
+schema = 1
+executables = []
+read-inputs = []
+environment = []
+
+[features]
+default = []
+
+[dependencies]
+rust-agent-core = { version = "0.1.0", path = "../rust-agent-core", default-features = false }
+
+[dev-dependencies]
+trybuild.workspace = true
+
+[lints]
+workspace = true
