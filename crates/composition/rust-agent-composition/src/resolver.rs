@@ -25,6 +25,8 @@ pub struct Resolution {
     #[serde(rename = "selected-components")]
     pub selected_components: Vec<String>,
     pub bindings: Vec<ResolvedBinding>,
+    #[serde(rename = "resource-namespace-bindings")]
+    pub resource_namespace_bindings: Vec<ResolvedResourceNamespaceBinding>,
     #[serde(rename = "construction-order")]
     pub construction_order: Vec<String>,
     #[serde(rename = "runtime-adapter")]
@@ -50,6 +52,21 @@ pub struct ResolvedBinding {
     pub provider: String,
     pub consumer: String,
     pub field: String,
+    pub effects: BTreeSet<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResolvedResourceNamespaceBinding {
+    pub consumer: String,
+    #[serde(rename = "provide-capability")]
+    pub provide_capability: String,
+    #[serde(rename = "provide-key")]
+    pub provide_key: Option<String>,
+    #[serde(rename = "bootstrap-provider")]
+    pub bootstrap_provider: String,
+    #[serde(rename = "bootstrap-key")]
+    pub bootstrap_key: String,
     pub effects: BTreeSet<String>,
 }
 
@@ -107,6 +124,7 @@ struct State {
     selected: BTreeSet<String>,
     visiting: BTreeSet<String>,
     bindings: Vec<ResolvedBinding>,
+    resource_namespace_bindings: Vec<ResolvedResourceNamespaceBinding>,
     order: Vec<String>,
     reasons: BTreeMap<String, Vec<String>>,
 }
@@ -199,6 +217,20 @@ pub fn resolve(
                 &right.provider,
             ))
     });
+    state.resource_namespace_bindings.sort_by(|left, right| {
+        (
+            &left.consumer,
+            &left.provide_capability,
+            &left.provide_key,
+            &left.bootstrap_key,
+        )
+            .cmp(&(
+                &right.consumer,
+                &right.provide_capability,
+                &right.provide_key,
+                &right.bootstrap_key,
+            ))
+    });
 
     let mut compiled_runtime_effects = BTreeSet::new();
     let mut build_requirements = BuildRequirements::default();
@@ -249,6 +281,7 @@ pub fn resolve(
         target_fact_digest: target.target_fact_digest.clone(),
         selected_components,
         bindings: state.bindings,
+        resource_namespace_bindings: state.resource_namespace_bindings,
         construction_order: state.order,
         runtime_adapter: adapter.id.clone(),
         host_boundary: boundary.map(|value| value.id.clone()),
@@ -347,6 +380,56 @@ impl Resolver<'_> {
                     ))
                 })
             })?;
+        }
+
+        if let Some(requirements) = self
+            .catalog
+            .resource_namespace_requirements
+            .get(&component.id)
+        {
+            for requirement in requirements {
+                let candidates = self.candidates(
+                    "cap:resource-namespace-bootstrap",
+                    Some(&requirement.bootstrap_key),
+                )?;
+                let provider = candidates.into_iter().next().ok_or_else(|| {
+                    BranchFailure::Constraint(format!(
+                        "resource namespace bootstrap `{}` has no provider",
+                        requirement.bootstrap_key
+                    ))
+                })?;
+                let mut branch = state.clone();
+                branch
+                    .reasons
+                    .entry(provider.clone())
+                    .or_default()
+                    .push(format!(
+                        "ResourceNamespaceFor({}:{})",
+                        component.id, requirement.provide_capability
+                    ));
+                let mut branch = self.include_component(branch, &provider)?;
+                let bootstrap_provide = self.catalog.components[&provider]
+                    .provides
+                    .iter()
+                    .find(|provide| {
+                        provide.capability == "cap:resource-namespace-bootstrap"
+                            && provide.key.as_deref() == Some(requirement.bootstrap_key.as_str())
+                    })
+                    .expect("catalog normalization fixed the exact bootstrap provide");
+                let mut effects = self.catalog.components[&provider].lifecycle_effects.clone();
+                effects.extend(bootstrap_provide.effects.iter().cloned());
+                branch
+                    .resource_namespace_bindings
+                    .push(ResolvedResourceNamespaceBinding {
+                        consumer: component.id.clone(),
+                        provide_capability: requirement.provide_capability.clone(),
+                        provide_key: requirement.provide_key.clone(),
+                        bootstrap_provider: provider,
+                        bootstrap_key: requirement.bootstrap_key.clone(),
+                        effects,
+                    });
+                state = branch;
+            }
         }
 
         state.visiting.remove(id);
@@ -754,6 +837,10 @@ mod tests {
         ));
 
         profile.host_boundary = Some("fixture-host-entry".into());
+        assert!(matches!(
+            resolve(&catalog, &profile, &target()),
+            Err(ResolutionError::InvalidHostBoundary { .. })
+        ));
         profile.denied_effects.remove("host-bridge");
         let resolved = resolve(&catalog, &profile, &target()).unwrap();
         assert!(resolved.compiled_runtime_effects.contains("host-bridge"));
@@ -763,30 +850,106 @@ mod tests {
             resolve(&catalog, &profile, &target()),
             Err(ResolutionError::InvalidHostBoundary { .. })
         ));
+
+        profile.build_kind = BuildKind::Wasm;
+        profile.host_boundary = None;
+        assert!(matches!(
+            resolve(&catalog, &profile, &target()),
+            Err(ResolutionError::InvalidHostBoundary { .. })
+        ));
+        profile.host_boundary = Some("fixture-host-entry".into());
+        assert!(matches!(
+            resolve(&catalog, &profile, &target()),
+            Err(ResolutionError::InvalidHostBoundary { .. })
+        ));
+        profile.host_boundary = Some("fixture-host-export".into());
+        assert!(matches!(
+            resolve(&catalog, &profile, &target()),
+            Err(ResolutionError::InvalidHostBoundary { .. })
+        ));
+
+        profile.target = "wasm32-unknown-unknown".into();
+        profile.environment = crate::target::Environment::Browser;
+        let wasm = Target::from_facts(
+            "wasm32-unknown-unknown",
+            crate::target::Environment::Browser,
+            parse_facts("target_arch=\"wasm32\"\ntarget_os=\"unknown\"\n").unwrap(),
+        )
+        .unwrap();
+        let resolved = resolve(&catalog, &profile, &wasm).unwrap();
+        assert!(resolved.compiled_runtime_effects.contains("host-bridge"));
+
+        let mut unsupported_catalog = catalog;
+        unsupported_catalog
+            .host_boundaries
+            .get_mut("fixture-host-export")
+            .unwrap()
+            .support = crate::metadata::SupportTier::Experimental;
+        assert!(matches!(
+            resolve(&unsupported_catalog, &profile, &wasm),
+            Err(ResolutionError::InvalidHostBoundary { .. })
+        ));
     }
 
     #[test]
-    fn native_host_entry_rejects_mobile_before_cargo() {
+    fn native_host_entry_accepts_only_declared_desktop_operating_systems() {
         let catalog = fixture_catalog();
         let mut profile = profile();
         profile.build_kind = BuildKind::Bin;
         profile.host_boundary = Some("fixture-host-entry".into());
         profile.denied_effects.remove("host-bridge");
-        profile.target = "aarch64-linux-android".into();
-        profile.environment = crate::target::Environment::Mobile;
-        let android = Target::from_facts(
-            "aarch64-linux-android",
-            crate::target::Environment::Mobile,
-            parse_facts(
-                "target_arch=\"aarch64\"\ntarget_os=\"android\"\ntarget_family=\"unix\"\nunix\n",
+        for (triple, environment, os, accepted) in [
+            (
+                "x86_64-unknown-linux-gnu",
+                crate::target::Environment::Desktop,
+                "linux",
+                true,
+            ),
+            (
+                "x86_64-apple-darwin",
+                crate::target::Environment::Desktop,
+                "macos",
+                true,
+            ),
+            (
+                "x86_64-pc-windows-msvc",
+                crate::target::Environment::Desktop,
+                "windows",
+                true,
+            ),
+            (
+                "aarch64-linux-android",
+                crate::target::Environment::Mobile,
+                "android",
+                false,
+            ),
+            (
+                "aarch64-apple-ios",
+                crate::target::Environment::Mobile,
+                "ios",
+                false,
+            ),
+            (
+                "x86_64-unknown-freebsd",
+                crate::target::Environment::Desktop,
+                "freebsd",
+                false,
+            ),
+        ] {
+            profile.target = triple.into();
+            profile.environment = environment;
+            let target = Target::from_facts(
+                triple,
+                environment,
+                parse_facts(&format!("target_os=\"{os}\"\n")).unwrap(),
             )
-            .unwrap(),
-        )
-        .unwrap();
-        assert!(matches!(
-            resolve(&catalog, &profile, &android),
-            Err(ResolutionError::InvalidHostBoundary { .. })
-        ));
+            .unwrap();
+            assert_eq!(
+                resolve(&catalog, &profile, &target).is_ok(),
+                accepted,
+                "{triple}"
+            );
+        }
     }
 
     proptest! {

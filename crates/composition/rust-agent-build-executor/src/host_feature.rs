@@ -4,34 +4,9 @@ use rust_agent_composition::{canonical, metadata::BuildRequirements};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-#[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct CargoUnitSelector {
-    pub package: String,
-    pub source: String,
-    pub target: String,
-    #[serde(rename = "compilation-kind")]
-    pub compilation_kind: CargoCompilationKind,
-    pub profile: String,
-    #[serde(rename = "crate-kind")]
-    pub crate_kind: CargoCrateKind,
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum CargoCompilationKind {
-    BuildHost,
-    Target,
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum CargoCrateKind {
-    Library,
-    Binary,
-    CustomBuild,
-    ProcMacro,
-}
+use crate::cargo_unit_graph::{
+    CargoCompilationKind, CargoCrateKind, CargoUnitSelector, validate_selector_identity,
+};
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -109,6 +84,8 @@ pub enum HostFeaturePolicyError {
     InvalidAdditiveSet(Box<CargoUnitSelector>),
     #[error("invalid feature/evidence identifier `{0}`")]
     InvalidIdentifier(String),
+    #[error("feature policy contains an invalid exact Cargo unit selector: {0:?}")]
+    InvalidUnitSelector(Box<CargoUnitSelector>),
     #[error("invalid canonical digest in feature evidence for `{0}`")]
     InvalidDigest(String),
     #[error("host-only-additive-api requires exact evidence for every feature: {0:?}")]
@@ -209,6 +186,8 @@ impl NormalizedHostFeaturePolicy {
 }
 
 fn validate_entry(entry: &HostFeaturePolicyEntry) -> Result<(), HostFeaturePolicyError> {
+    validate_selector_identity(&entry.unit)
+        .map_err(|_| HostFeaturePolicyError::InvalidUnitSelector(Box::new(entry.unit.clone())))?;
     if entry.unit.compilation_kind == CargoCompilationKind::BuildHost {
         return Err(HostFeaturePolicyError::HostBuildUnitDeltaUnsupported(
             Box::new(entry.unit.clone()),
@@ -298,13 +277,22 @@ fn validate_digest(owner: &str, value: &str) -> Result<(), HostFeaturePolicyErro
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cargo_unit_graph::{CargoCompileMode, CargoPackageIdentity, CargoPackageSource};
 
     fn selector() -> CargoUnitSelector {
         CargoUnitSelector {
-            package: "external-helper@1.0.0".into(),
-            source: "registry+sha256:abc".into(),
-            target: "x86_64-unknown-linux-gnu".into(),
+            package: CargoPackageIdentity {
+                name: "external-helper".into(),
+                version: "1.0.0".into(),
+                source: CargoPackageSource::Registry {
+                    registry: "https://github.com/rust-lang/crates.io-index".into(),
+                    checksum: "aa".repeat(32),
+                },
+            },
+            target_name: "external_helper".into(),
             compilation_kind: CargoCompilationKind::Target,
+            compilation_target: "x86_64-unknown-linux-gnu".into(),
+            compile_mode: CargoCompileMode::Build,
             profile: "release".into(),
             crate_kind: CargoCrateKind::Library,
         }
@@ -399,7 +387,7 @@ mod tests {
     #[test]
     fn normalization_is_deterministic() {
         let mut second = entry();
-        second.unit.package = "another@1.0.0".into();
+        second.unit.package.name = "another".into();
         let first = HostFeatureUnionPolicy {
             schema: 1,
             entries: vec![entry(), second.clone()],

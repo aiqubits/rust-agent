@@ -8,7 +8,8 @@ use thiserror::Error;
 use crate::{
     metadata::{
         AppCoexistence, BindingKind, BuildRequirements, CapabilitySpec, CatalogDocument,
-        ComponentSpec, ConfigSource, HostBoundarySpec, ProvideLayer, RuntimeAdapterSpec, ScopeKind,
+        ComponentSpec, ConfigSource, HostBoundarySpec, ProvideLayer, ResourceNamespaceMode,
+        RuntimeAdapterSpec, ScopeKind,
     },
     target::TargetError,
 };
@@ -33,6 +34,14 @@ pub struct NormalizedCatalog {
     pub components: BTreeMap<String, ComponentSpec>,
     pub runtime_adapters: BTreeMap<String, RuntimeAdapterSpec>,
     pub host_boundaries: BTreeMap<String, HostBoundarySpec>,
+    pub resource_namespace_requirements: BTreeMap<String, Vec<ResourceNamespaceRequirement>>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ResourceNamespaceRequirement {
+    pub provide_capability: String,
+    pub provide_key: Option<String>,
+    pub bootstrap_key: String,
 }
 
 #[derive(Debug, Error)]
@@ -82,6 +91,8 @@ pub enum CatalogError {
     EffectfulRuntimeAdapter(String),
     #[error("host boundary `{0}` has an empty runtime-adapter allowlist")]
     EmptyHostAdapterAllowlist(String),
+    #[error("component `{0}` has invalid resource-namespace metadata: {1}")]
+    InvalidResourceNamespace(String, String),
     #[error("target predicate in {owner} is invalid: {source}")]
     InvalidTargetPredicate { owner: String, source: TargetError },
 }
@@ -128,6 +139,8 @@ impl NormalizedCatalog {
                 }
             }
         }
+        let resource_namespace_requirements =
+            normalize_resource_namespace_requirements(&components, &capabilities)?;
         for adapter in runtime_adapters.values() {
             validate_adapter(adapter)?;
         }
@@ -140,6 +153,7 @@ impl NormalizedCatalog {
             components,
             runtime_adapters,
             host_boundaries,
+            resource_namespace_requirements,
         })
     }
 }
@@ -181,6 +195,12 @@ fn validate_component(
     validate_rust_path(&spec.id, &spec.factory)?;
     validate_rust_path(&spec.id, &spec.dependencies_type)?;
     validate_rust_path(&spec.id, &spec.config_type)?;
+    if let Some(preparer) = &spec.resource_namespace_preparer {
+        validate_rust_path(&spec.id, preparer)?;
+    }
+    if let Some(prepared) = &spec.prepared_config_type {
+        validate_rust_path(&spec.id, prepared)?;
+    }
     validate_target_syntax(&spec.id, &spec.targets)?;
 
     match spec.config_source {
@@ -360,6 +380,136 @@ fn validate_component(
                 format!("negative Cargo feature `{feature}` is forbidden"),
             ));
         }
+    }
+    Ok(())
+}
+
+fn normalize_resource_namespace_requirements(
+    components: &BTreeMap<String, ComponentSpec>,
+    capabilities: &BTreeMap<String, CapabilitySpec>,
+) -> Result<BTreeMap<String, Vec<ResourceNamespaceRequirement>>, CatalogError> {
+    let mut requirements = BTreeMap::new();
+    for component in components.values() {
+        let mut component_requirements = Vec::new();
+        for provide in &component.provides {
+            let ResourceNamespaceMode::Required { bootstrap } = &provide.resource_namespace else {
+                continue;
+            };
+            validate_id(bootstrap, "resource namespace bootstrap key")?;
+            component_requirements.push(ResourceNamespaceRequirement {
+                provide_capability: provide.capability.clone(),
+                provide_key: provide.key.clone(),
+                bootstrap_key: bootstrap.clone(),
+            });
+        }
+
+        match (
+            component_requirements.is_empty(),
+            component.resource_namespace_preparer.as_ref(),
+            component.prepared_config_type.as_ref(),
+        ) {
+            (true, None, None) | (false, Some(_), Some(_)) => {}
+            (true, _, _) => {
+                return Err(CatalogError::InvalidResourceNamespace(
+                    component.id.clone(),
+                    "preparer/prepared-config-type are forbidden without a required provide".into(),
+                ));
+            }
+            (false, _, _) => {
+                return Err(CatalogError::InvalidResourceNamespace(
+                    component.id.clone(),
+                    "every required provide needs both resource-namespace-preparer and prepared-config-type"
+                        .into(),
+                ));
+            }
+        }
+
+        for requirement in &component_requirements {
+            validate_bootstrap_requirement(component, requirement, components, capabilities)?;
+        }
+        if !component_requirements.is_empty() {
+            component_requirements.sort_by(|left, right| {
+                (
+                    &left.provide_capability,
+                    &left.provide_key,
+                    &left.bootstrap_key,
+                )
+                    .cmp(&(
+                        &right.provide_capability,
+                        &right.provide_key,
+                        &right.bootstrap_key,
+                    ))
+            });
+            requirements.insert(component.id.clone(), component_requirements);
+        }
+    }
+    Ok(requirements)
+}
+
+fn validate_bootstrap_requirement(
+    consumer: &ComponentSpec,
+    requirement: &ResourceNamespaceRequirement,
+    components: &BTreeMap<String, ComponentSpec>,
+    capabilities: &BTreeMap<String, CapabilitySpec>,
+) -> Result<(), CatalogError> {
+    let capability = capabilities
+        .get("cap:resource-namespace-bootstrap")
+        .ok_or_else(|| {
+            CatalogError::InvalidResourceNamespace(
+                consumer.id.clone(),
+                "required namespace needs cap:resource-namespace-bootstrap".into(),
+            )
+        })?;
+    if capability.binding != BindingKind::Registry || capability.scope != ScopeKind::App {
+        return Err(CatalogError::InvalidResourceNamespace(
+            consumer.id.clone(),
+            "cap:resource-namespace-bootstrap must be an App Registry".into(),
+        ));
+    }
+
+    let providers: Vec<_> = components
+        .values()
+        .filter(|candidate| {
+            candidate.provides.iter().any(|provide| {
+                provide.capability == capability.id
+                    && provide.key.as_deref() == Some(requirement.bootstrap_key.as_str())
+            })
+        })
+        .collect();
+    let [provider] = providers.as_slice() else {
+        return Err(CatalogError::InvalidResourceNamespace(
+            consumer.id.clone(),
+            format!(
+                "bootstrap key `{}` must resolve to exactly one provider",
+                requirement.bootstrap_key
+            ),
+        ));
+    };
+    let bootstrap_provide = provider
+        .provides
+        .iter()
+        .find(|provide| {
+            provide.capability == capability.id
+                && provide.key.as_deref() == Some(requirement.bootstrap_key.as_str())
+        })
+        .expect("provider was selected by this exact provide");
+    if provider.scope != ScopeKind::App
+        || !provider.lifecycle_effects.is_empty()
+        || !provider.requires.is_empty()
+        || provider.config_source != ConfigSource::None
+        || bootstrap_provide.effects.is_empty()
+        || provider
+            .provides
+            .iter()
+            .any(|provide| !matches!(provide.resource_namespace, ResourceNamespaceMode::None))
+    {
+        return Err(CatalogError::InvalidResourceNamespace(
+            consumer.id.clone(),
+            format!(
+                "bootstrap provider `{}` must be App-scoped, stateless-configured, effect-accounted, dependency-free, and namespace-free",
+                provider.id
+            ),
+        ));
     }
     Ok(())
 }
@@ -670,6 +820,15 @@ provides = [{ capability = "cap:model", priority = 1, effects = [] }]
     }
 
     #[test]
+    fn lifecycle_and_provide_effect_fields_are_required() {
+        let missing_lifecycle = BASE.replace("lifecycle-effects = []\n", "");
+        assert!(CatalogDocument::from_toml(&missing_lifecycle).is_err());
+
+        let missing_provide = BASE.replace(", effects = [] }]", " }]");
+        assert!(CatalogDocument::from_toml(&missing_provide).is_err());
+    }
+
+    #[test]
     fn app_coexistence_is_scope_bound() {
         let missing = BASE.replace("app-coexistence = { mode = \"requires-stop\" }\n", "");
         assert!(matches!(
@@ -681,5 +840,159 @@ provides = [{ capability = "cap:model", priority = 1, effects = [] }]
         assert!(
             NormalizedCatalog::normalize(CatalogDocument::from_toml(&shorter).unwrap()).is_err()
         );
+    }
+
+    fn namespace_catalog() -> String {
+        let consumer = BASE
+            .replace(
+                "config-source = \"none\"\n",
+                "config-source = \"none\"\nresource-namespace-preparer = \"fixture_model::prepare_resource_namespaces\"\nprepared-config-type = \"fixture_model::PreparedConfig\"\n",
+            )
+            .replace(
+                "provides = [{ capability = \"cap:model\", priority = 1, effects = [] }]",
+                "provides = [{ capability = \"cap:model\", priority = 1, resource-namespace = { mode = \"required\", bootstrap = \"local-bootstrap\" }, effects = [] }]",
+            );
+        format!(
+            r#"{consumer}
+
+[[capabilities]]
+id = "cap:resource-namespace-bootstrap"
+api-package = "rust-agent-fixture-api"
+rust-api = "rust_agent_fixture_api::ResourceNamespaceBootstrap"
+binding-type = "rust_agent_fixture_api::ResourceNamespaceBootstrapBinding"
+binding-adapter = "rust_agent_fixture_api::ResourceNamespaceBootstrapBinding::from_provider"
+binding = "registry"
+scope = "app"
+
+[[components]]
+id = "local-bootstrap"
+package = "fixture-local-bootstrap"
+package-path = "fixtures/local-bootstrap"
+scope = "app"
+factory = "fixture_local_bootstrap::build"
+dependencies-type = "fixture_local_bootstrap::Dependencies"
+config-type = "fixture_local_bootstrap::Config"
+config-source = "none"
+targets = "cfg(true)"
+support = "production"
+lifecycle-effects = []
+security = ["read-local"]
+runtime-primitives = []
+app-coexistence = {{ mode = "requires-stop" }}
+cargo-features = []
+build-requirements = {{ executables = [], read-inputs = [], environment = [] }}
+provides = [{{ capability = "cap:resource-namespace-bootstrap", key = "local-bootstrap", priority = 1, effects = ["read-local"] }}]
+requires = []
+
+[[runtime-adapters]]
+id = "fixture-runtime"
+package = "fixture-runtime"
+package-path = "fixtures/runtime"
+constructor = "fixture_runtime::create_runtime_primitives"
+targets = "cfg(true)"
+support = "production"
+primitives = []
+security = []
+app-coexistence = {{ mode = "requires-stop" }}
+build-requirements = {{ executables = [], read-inputs = [], environment = [] }}
+"#
+        )
+    }
+
+    #[test]
+    fn required_resource_namespace_derives_an_exact_bootstrap_requirement() {
+        let catalog =
+            NormalizedCatalog::normalize(CatalogDocument::from_toml(&namespace_catalog()).unwrap())
+                .unwrap();
+        assert_eq!(
+            catalog.resource_namespace_requirements["model"],
+            vec![ResourceNamespaceRequirement {
+                provide_capability: "cap:model".into(),
+                provide_key: None,
+                bootstrap_key: "local-bootstrap".into(),
+            }]
+        );
+    }
+
+    #[test]
+    fn resolver_selects_the_exact_namespace_bootstrap_before_the_consumer() {
+        let catalog =
+            NormalizedCatalog::normalize(CatalogDocument::from_toml(&namespace_catalog()).unwrap())
+                .unwrap();
+        let profile = crate::profile::CompositionProfile::from_toml(
+            r#"
+schema = 1
+name = "namespace"
+build-kind = "library"
+target = "x86_64-unknown-linux-gnu"
+environment = "desktop"
+support-tier = "production"
+runtime-adapter = "fixture-runtime"
+resolver-decision-budget = 10
+denied-effects = []
+
+[components]
+model = "enabled"
+local-bootstrap = "auto"
+"#,
+        )
+        .unwrap();
+        let target = crate::target::Target::from_facts(
+            "x86_64-unknown-linux-gnu",
+            crate::target::Environment::Desktop,
+            BTreeMap::new(),
+        )
+        .unwrap();
+        let resolution = crate::resolver::resolve(&catalog, &profile, &target).unwrap();
+        assert_eq!(resolution.selected_components, ["local-bootstrap", "model"]);
+        assert_eq!(resolution.construction_order, ["local-bootstrap", "model"]);
+        assert_eq!(resolution.resource_namespace_bindings.len(), 1);
+        let binding = &resolution.resource_namespace_bindings[0];
+        assert_eq!(binding.bootstrap_provider, "local-bootstrap");
+        assert_eq!(binding.bootstrap_key, "local-bootstrap");
+        assert_eq!(binding.effects, ["read-local".into()].into_iter().collect());
+
+        let unavailable = namespace_catalog().replace(
+            "config-type = \"fixture_local_bootstrap::Config\"\nconfig-source = \"none\"\ntargets = \"cfg(true)\"",
+            "config-type = \"fixture_local_bootstrap::Config\"\nconfig-source = \"none\"\ntargets = \"cfg(target_os = \\\"windows\\\")\"",
+        );
+        let unavailable =
+            NormalizedCatalog::normalize(CatalogDocument::from_toml(&unavailable).unwrap())
+                .unwrap();
+        assert!(matches!(
+            crate::resolver::resolve(&unavailable, &profile, &target),
+            Err(crate::resolver::ResolutionError::Unsatisfiable { .. })
+        ));
+    }
+
+    #[test]
+    fn incomplete_or_unsafe_namespace_metadata_fails_closed() {
+        let missing_preparer = namespace_catalog().replace(
+            "resource-namespace-preparer = \"fixture_model::prepare_resource_namespaces\"\n",
+            "",
+        );
+        assert!(matches!(
+            NormalizedCatalog::normalize(CatalogDocument::from_toml(&missing_preparer).unwrap()),
+            Err(CatalogError::InvalidResourceNamespace(_, _))
+        ));
+
+        let missing_provider = namespace_catalog().replacen(
+            "bootstrap = \"local-bootstrap\"",
+            "bootstrap = \"missing-bootstrap\"",
+            1,
+        );
+        assert!(matches!(
+            NormalizedCatalog::normalize(CatalogDocument::from_toml(&missing_provider).unwrap()),
+            Err(CatalogError::InvalidResourceNamespace(_, _))
+        ));
+
+        let effectful_lifecycle = namespace_catalog().replace(
+            "lifecycle-effects = []\nsecurity = [\"read-local\"]",
+            "lifecycle-effects = [\"read-local\"]\nsecurity = [\"read-local\"]",
+        );
+        assert!(matches!(
+            NormalizedCatalog::normalize(CatalogDocument::from_toml(&effectful_lifecycle).unwrap()),
+            Err(CatalogError::InvalidResourceNamespace(_, _))
+        ));
     }
 }

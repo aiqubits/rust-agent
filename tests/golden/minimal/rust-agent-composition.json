@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "algorithm": "sha256-rust-agent-composition-v1",
-  "composition-hash": "d9d9dc8ef0535636dae5a5591602d02fcc7a034b897ab0bc3929d1c5aac04fa3",
+  "composition-hash": "08922ff9ad9213abd7b206d4f295864e676247e8327c8b703aebbe0705945768",
   "build-kind": "library",
   "profile-name": "fixture-minimal",
   "normalized-profile": {
@@ -132,6 +132,7 @@
         "effects": []
       }
     ],
+    "resource-namespace-bindings": [],
     "construction-order": [
       "fixture-model",
       "fixture-driver"
@@ -269,7 +270,7 @@
       "id": "rust-agent-core",
       "package": "rust-agent-core",
       "logical-path": "crates/api/rust-agent-core",
-      "tree-digest": "b9f847fad4fcfdfd7ea83952200783497c40214ba86e623e0bfc70c19705ed63",
+      "tree-digest": "32a7d67a6013bd43ca39b27899262c4fe3d1fdffc05b67cb541ed7a744b5911c",
       "files": [
         {
           "path": "Cargo.toml",
@@ -279,8 +280,8 @@
         },
         {
           "path": "src/lib.rs",
-          "digest": "ccd620b23295e67ecfce0fbdb9c221a024315052b3f3943bb1ea117882ba76e4",
-          "bytes": 9735,
+          "digest": "88fa65b11a16c8be1e558b5eefa9654b7ab9cdc6cb6c90cfaf373f66d8cbaff4",
+          "bytes": 17179,
           "executable": false
         }
       ]
@@ -289,7 +290,7 @@
       "id": "rust-agent-runtime-api",
       "package": "rust-agent-runtime-api",
       "logical-path": "crates/api/rust-agent-runtime-api",
-      "tree-digest": "4525ec4895bff6b2764acb59acb3fa635eb7ba36af0037f7917a6fb6bf917a34",
+      "tree-digest": "b3afd40e420e65a54215d4c8ce3ad466e703c637ba544a75acb96c3b1578cfba",
       "files": [
         {
           "path": "Cargo.toml",
@@ -299,8 +300,8 @@
         },
         {
           "path": "src/lib.rs",
-          "digest": "d37422fe63c17a86caaf876fcb51f18a1cc3bc89710ce85b568389dd8fb74ac7",
-          "bytes": 6071,
+          "digest": "f569caa5da6c15fa5dcbf8b016bb4b97ef69cdb50b7cad4af306c12f79ddfb12",
+          "bytes": 14246,
           "executable": false
         },
         {
@@ -319,6 +320,30 @@
           "path": "tests/ui/forge_event_cursor.stderr",
           "digest": "bbbb7de5cf0a2026fa096216af8912ea720748fc078adf31de5d2f3074614b72",
           "bytes": 548,
+          "executable": false
+        },
+        {
+          "path": "tests/ui/forge_lifecycle_reservation.rs",
+          "digest": "f00abd64cd67e46e2f1ab1aa404418789b2502da3fca158eed8750a02375a518",
+          "bytes": 827,
+          "executable": false
+        },
+        {
+          "path": "tests/ui/forge_lifecycle_reservation.stderr",
+          "digest": "296a3b97bec10c2cc3cdb2896af1f93b5fb2fa65719368e41c4a5573b552aa6c",
+          "bytes": 1191,
+          "executable": false
+        },
+        {
+          "path": "tests/ui/forge_operation_id.rs",
+          "digest": "88c847ce095e2eee4f1d8939df18673d7274da4f6d00df34e47ebe9023c3fab1",
+          "bytes": 160,
+          "executable": false
+        },
+        {
+          "path": "tests/ui/forge_operation_id.stderr",
+          "digest": "b20238fccf51fc53d8a4763469ba1a1c2dfbf6e8aa826a486344f3cb8838dd06",
+          "bytes": 532,
           "executable": false
         },
         {

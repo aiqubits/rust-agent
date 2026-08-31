@@ -2,7 +2,10 @@
 
 use std::{fmt, sync::Arc};
 
-pub use rust_agent_core::{AgentOperationRecoveryKey, Digest};
+pub use rust_agent_core::{
+    AgentLifecycleOperationId, AgentLifecycleOperationIdKind, AgentOperationRecoveryKey,
+    CompositionHash, Digest, SessionId,
+};
 
 /// Opaque identity of the runtime adapter that created a primitive bundle.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -127,22 +130,170 @@ impl fmt::Display for ComponentBuildError {
 
 impl std::error::Error for ComponentBuildError {}
 
-/// Canonical lifecycle intent. Allocation tokens remain in later owner APIs.
+/// Canonical lifecycle intent shared by the Agent and persistence seams.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum AgentOperationIntent {
+pub enum AgentLifecycleOperationIntent {
     CreateSessionless,
     CreateEphemeral,
     CreateDurable,
-    ResumeDurable,
+    ResumeDurable { session_id: SessionId },
+}
+
+/// Error returned when a lifecycle reservation contains a non-canonical field.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum LifecycleReservationEncodingError {
+    InvalidCanonicalField(&'static str),
+}
+
+impl fmt::Display for LifecycleReservationEncodingError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidCanonicalField(field) => {
+                write!(
+                    formatter,
+                    "invalid canonical lifecycle reservation field `{field}`"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for LifecycleReservationEncodingError {}
+
+/// A complete projected request passed atomically to a persistent allocator.
+/// Fields stay private so a backend can inspect, but cannot rewrite, the seal.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LifecycleOperationReservationDraft {
+    recovery_key: AgentOperationRecoveryKey,
+    intent: AgentLifecycleOperationIntent,
+    request_fingerprint: Digest,
+    projected_authority_digest: Digest,
+    projected_plan_digest: Digest,
+    composition: CompositionHash,
+    catalog: Digest,
+}
+
+impl LifecycleOperationReservationDraft {
+    #[doc(hidden)]
+    pub fn from_projected_request(
+        recovery_key: AgentOperationRecoveryKey,
+        intent: AgentLifecycleOperationIntent,
+        request_fingerprint: Digest,
+        projected_authority_digest: Digest,
+        projected_plan_digest: Digest,
+        composition: CompositionHash,
+        catalog: Digest,
+    ) -> Result<Self, LifecycleReservationEncodingError> {
+        if !matches!(
+            intent,
+            AgentLifecycleOperationIntent::CreateDurable
+                | AgentLifecycleOperationIntent::ResumeDurable { .. }
+        ) {
+            return Err(LifecycleReservationEncodingError::InvalidCanonicalField(
+                "intent",
+            ));
+        }
+        Ok(Self {
+            recovery_key,
+            intent,
+            request_fingerprint,
+            projected_authority_digest,
+            projected_plan_digest,
+            composition,
+            catalog,
+        })
+    }
+
+    pub fn recovery_key(&self) -> &AgentOperationRecoveryKey {
+        &self.recovery_key
+    }
+
+    pub const fn intent(&self) -> &AgentLifecycleOperationIntent {
+        &self.intent
+    }
+
+    pub const fn request_fingerprint(&self) -> &Digest {
+        &self.request_fingerprint
+    }
+
+    pub const fn projected_authority_digest(&self) -> &Digest {
+        &self.projected_authority_digest
+    }
+
+    pub const fn projected_plan_digest(&self) -> &Digest {
+        &self.projected_plan_digest
+    }
+
+    pub const fn composition(&self) -> &CompositionHash {
+        &self.composition
+    }
+
+    pub const fn catalog(&self) -> &Digest {
+        &self.catalog
+    }
+}
+
+/// The authoritative reservation committed with a persistent operation id.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LifecycleOperationReservation {
+    draft: LifecycleOperationReservationDraft,
+    reserved_session_id: Option<SessionId>,
+}
+
+impl LifecycleOperationReservation {
+    #[doc(hidden)]
+    pub fn from_committed_allocation(
+        draft: LifecycleOperationReservationDraft,
+        operation_id: &AgentLifecycleOperationId,
+    ) -> Result<Self, LifecycleReservationEncodingError> {
+        if operation_id.kind() != AgentLifecycleOperationIdKind::Persistent {
+            return Err(LifecycleReservationEncodingError::InvalidCanonicalField(
+                "operation-id",
+            ));
+        }
+        let reserved_session_id = match draft.intent {
+            AgentLifecycleOperationIntent::CreateDurable => {
+                SessionId::from_persistent_operation(*operation_id).map_err(|_| {
+                    LifecycleReservationEncodingError::InvalidCanonicalField("operation-id")
+                })?
+            }
+            AgentLifecycleOperationIntent::ResumeDurable { session_id } => session_id,
+            AgentLifecycleOperationIntent::CreateSessionless
+            | AgentLifecycleOperationIntent::CreateEphemeral => {
+                return Err(LifecycleReservationEncodingError::InvalidCanonicalField(
+                    "intent",
+                ));
+            }
+        };
+        Ok(Self {
+            draft,
+            reserved_session_id: Some(reserved_session_id),
+        })
+    }
+
+    pub const fn draft(&self) -> &LifecycleOperationReservationDraft {
+        &self.draft
+    }
+
+    pub const fn reserved_session_id(&self) -> Option<&SessionId> {
+        self.reserved_session_id.as_ref()
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum AgentOperationAllocationError {
-    Closed,
-    UnsupportedMode,
+    UnsupportedIntent,
+    AppClosed,
+    OwnerClosed,
+    OwnerMismatch,
+    StoreUnavailable,
+    IssuerStateCorrupt,
+    CounterExhausted,
     ReservationConflict,
     OperationConflict,
-    OutcomeUnknown,
+    OperationNotFound,
+    ReservationStatusUnknown,
+    UnsupportedRecovery,
 }
 
 /// Bounded public event-feed cursor.
@@ -224,5 +375,97 @@ mod tests {
     fn public_cursors_start_at_zero() {
         assert_eq!(AgentEventCursor::initial().value(), 0);
         assert_eq!(SessionQueryCursor::initial().value(), 0);
+    }
+
+    fn recovery_key() -> AgentOperationRecoveryKey {
+        let mut bytes = [0_u8; AgentOperationRecoveryKey::ENCODED_LEN];
+        bytes[0] = AgentOperationRecoveryKey::VERSION;
+        bytes[1] = 1;
+        AgentOperationRecoveryKey::from_canonical_v1_bytes(bytes).unwrap()
+    }
+
+    fn operation(kind: u8, counter: u8) -> AgentLifecycleOperationId {
+        let mut bytes = [0_u8; AgentLifecycleOperationId::ENCODED_LEN];
+        bytes[0] = AgentLifecycleOperationId::VERSION;
+        bytes[1] = kind;
+        bytes[2] = 1;
+        bytes[41] = 1;
+        bytes[49] = counter;
+        AgentLifecycleOperationId::from_canonical_v1_bytes(bytes).unwrap()
+    }
+
+    fn draft(intent: AgentLifecycleOperationIntent) -> LifecycleOperationReservationDraft {
+        LifecycleOperationReservationDraft::from_projected_request(
+            recovery_key(),
+            intent,
+            Digest::from_bytes([1; 32]),
+            Digest::from_bytes([2; 32]),
+            Digest::from_bytes([3; 32]),
+            CompositionHash::from_digest(Digest::from_bytes([4; 32])),
+            Digest::from_bytes([5; 32]),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn persistent_create_reservation_binds_all_projected_fields() {
+        let operation = operation(2, 7);
+        let reservation = LifecycleOperationReservation::from_committed_allocation(
+            draft(AgentLifecycleOperationIntent::CreateDurable),
+            &operation,
+        )
+        .unwrap();
+        assert_eq!(
+            reservation
+                .reserved_session_id()
+                .unwrap()
+                .to_canonical_v1_bytes(),
+            operation.to_canonical_v1_bytes()
+        );
+        assert_eq!(
+            reservation.draft().request_fingerprint(),
+            &Digest::from_bytes([1; 32])
+        );
+        assert_eq!(
+            reservation.draft().projected_authority_digest(),
+            &Digest::from_bytes([2; 32])
+        );
+        assert_eq!(
+            reservation.draft().projected_plan_digest(),
+            &Digest::from_bytes([3; 32])
+        );
+    }
+
+    #[test]
+    fn resume_keeps_exact_existing_session_and_volatile_paths_fail_closed() {
+        let existing = SessionId::from_persistent_operation(operation(2, 8)).unwrap();
+        let reservation = LifecycleOperationReservation::from_committed_allocation(
+            draft(AgentLifecycleOperationIntent::ResumeDurable {
+                session_id: existing,
+            }),
+            &operation(2, 9),
+        )
+        .unwrap();
+        assert_eq!(reservation.reserved_session_id(), Some(&existing));
+
+        assert!(
+            LifecycleOperationReservationDraft::from_projected_request(
+                recovery_key(),
+                AgentLifecycleOperationIntent::CreateEphemeral,
+                Digest::from_bytes([1; 32]),
+                Digest::from_bytes([2; 32]),
+                Digest::from_bytes([3; 32]),
+                CompositionHash::from_digest(Digest::from_bytes([4; 32])),
+                Digest::from_bytes([5; 32]),
+            )
+            .is_err()
+        );
+        assert!(
+            LifecycleOperationReservation::from_committed_allocation(
+                draft(AgentLifecycleOperationIntent::CreateDurable),
+                &operation(1, 1),
+            )
+            .is_err()
+        );
     }
 }

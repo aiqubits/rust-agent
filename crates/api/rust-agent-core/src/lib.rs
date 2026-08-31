@@ -219,6 +219,172 @@ impl fmt::Display for DigestEncodingError {
 
 impl std::error::Error for DigestEncodingError {}
 
+/// Canonical composition identity used by lifecycle protocol records.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct CompositionHash(Digest);
+
+impl CompositionHash {
+    pub const fn from_digest(digest: Digest) -> Self {
+        Self(digest)
+    }
+
+    pub const fn digest(self) -> Digest {
+        self.0
+    }
+}
+
+/// Error returned when a lifecycle or Session identity is not canonical.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LifecycleIdentityEncodingError {
+    UnknownVersion(u8),
+    UnknownKind(u8),
+    ZeroIssuer,
+    ZeroGeneration,
+    ZeroCounter,
+    VolatileOperation,
+}
+
+impl fmt::Display for LifecycleIdentityEncodingError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::UnknownVersion(version) => {
+                write!(formatter, "unknown lifecycle identity version {version}")
+            }
+            Self::UnknownKind(kind) => write!(formatter, "unknown lifecycle identity kind {kind}"),
+            Self::ZeroIssuer => formatter.write_str("lifecycle issuer must not be all zero"),
+            Self::ZeroGeneration => {
+                formatter.write_str("lifecycle issuer generation must not be zero")
+            }
+            Self::ZeroCounter => formatter.write_str("lifecycle counter must not be zero"),
+            Self::VolatileOperation => {
+                formatter.write_str("volatile lifecycle identity is not durable")
+            }
+        }
+    }
+}
+
+impl std::error::Error for LifecycleIdentityEncodingError {}
+
+/// Whether an Agent lifecycle operation is process-local or store-persistent.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum AgentLifecycleOperationIdKind {
+    Volatile,
+    Persistent,
+}
+
+/// A private-field, versioned lifecycle operation identity.
+#[derive(Clone, Copy, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct AgentLifecycleOperationId([u8; Self::ENCODED_LEN]);
+
+impl AgentLifecycleOperationId {
+    pub const VERSION: u8 = 1;
+    pub const ENCODED_LEN: usize = 50;
+    const VOLATILE_TAG: u8 = 1;
+    const PERSISTENT_TAG: u8 = 2;
+
+    pub fn from_canonical_v1_bytes(
+        bytes: [u8; Self::ENCODED_LEN],
+    ) -> Result<Self, LifecycleIdentityEncodingError> {
+        validate_lifecycle_identity(&bytes)?;
+        Ok(Self(bytes))
+    }
+
+    pub const fn to_canonical_v1_bytes(self) -> [u8; Self::ENCODED_LEN] {
+        self.0
+    }
+
+    pub fn to_durable_canonical_v1_bytes(
+        self,
+    ) -> Result<[u8; Self::ENCODED_LEN], LifecycleIdentityEncodingError> {
+        if self.is_persistent() {
+            Ok(self.0)
+        } else {
+            Err(LifecycleIdentityEncodingError::VolatileOperation)
+        }
+    }
+
+    pub const fn kind(self) -> AgentLifecycleOperationIdKind {
+        if self.0[1] == Self::VOLATILE_TAG {
+            AgentLifecycleOperationIdKind::Volatile
+        } else {
+            AgentLifecycleOperationIdKind::Persistent
+        }
+    }
+
+    pub const fn is_persistent(self) -> bool {
+        matches!(self.kind(), AgentLifecycleOperationIdKind::Persistent)
+    }
+}
+
+impl fmt::Debug for AgentLifecycleOperationId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AgentLifecycleOperationId")
+            .field("kind", &self.kind())
+            .finish_non_exhaustive()
+    }
+}
+
+fn validate_lifecycle_identity(
+    bytes: &[u8; AgentLifecycleOperationId::ENCODED_LEN],
+) -> Result<(), LifecycleIdentityEncodingError> {
+    if bytes[0] != AgentLifecycleOperationId::VERSION {
+        return Err(LifecycleIdentityEncodingError::UnknownVersion(bytes[0]));
+    }
+    if !matches!(
+        bytes[1],
+        AgentLifecycleOperationId::VOLATILE_TAG | AgentLifecycleOperationId::PERSISTENT_TAG
+    ) {
+        return Err(LifecycleIdentityEncodingError::UnknownKind(bytes[1]));
+    }
+    if bytes[2..34].iter().all(|byte| *byte == 0) {
+        return Err(LifecycleIdentityEncodingError::ZeroIssuer);
+    }
+    if bytes[34..42].iter().all(|byte| *byte == 0) {
+        return Err(LifecycleIdentityEncodingError::ZeroGeneration);
+    }
+    if bytes[42..50].iter().all(|byte| *byte == 0) {
+        return Err(LifecycleIdentityEncodingError::ZeroCounter);
+    }
+    Ok(())
+}
+
+/// A canonical Session identity. New durable Sessions derive this losslessly
+/// from their persistent lifecycle operation id.
+#[derive(Clone, Copy, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct SessionId([u8; Self::ENCODED_LEN]);
+
+impl SessionId {
+    pub const VERSION: u8 = 1;
+    pub const ENCODED_LEN: usize = AgentLifecycleOperationId::ENCODED_LEN;
+
+    pub fn from_canonical_v1_bytes(
+        bytes: [u8; Self::ENCODED_LEN],
+    ) -> Result<Self, LifecycleIdentityEncodingError> {
+        validate_lifecycle_identity(&bytes)?;
+        Ok(Self(bytes))
+    }
+
+    pub fn from_persistent_operation(
+        operation: AgentLifecycleOperationId,
+    ) -> Result<Self, LifecycleIdentityEncodingError> {
+        if !operation.is_persistent() {
+            return Err(LifecycleIdentityEncodingError::VolatileOperation);
+        }
+        Ok(Self(operation.to_canonical_v1_bytes()))
+    }
+
+    pub const fn to_canonical_v1_bytes(self) -> [u8; Self::ENCODED_LEN] {
+        self.0
+    }
+}
+
+impl fmt::Debug for SessionId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("SessionId(<canonical>)")
+    }
+}
+
 /// A caller-persisted, versioned idempotency key for durable lifecycle requests.
 #[derive(Clone, Eq, Hash, PartialEq)]
 pub struct AgentOperationRecoveryKey([u8; Self::ENCODED_LEN]);
@@ -226,6 +392,7 @@ pub struct AgentOperationRecoveryKey([u8; Self::ENCODED_LEN]);
 impl AgentOperationRecoveryKey {
     pub const VERSION: u8 = 1;
     pub const ENCODED_LEN: usize = 33;
+    pub const V1_ENCODED_LEN: usize = Self::ENCODED_LEN;
 
     pub fn from_canonical_v1_bytes(
         bytes: [u8; Self::ENCODED_LEN],
@@ -268,6 +435,8 @@ impl fmt::Display for RecoveryKeyEncodingError {
 }
 
 impl std::error::Error for RecoveryKeyEncodingError {}
+
+pub type AgentOperationRecoveryKeyEncodingError = RecoveryKeyEncodingError;
 
 #[cfg(test)]
 mod tests {
@@ -326,5 +495,55 @@ mod tests {
             AgentOperationRecoveryKey::from_canonical_v1_bytes(bytes),
             Err(RecoveryKeyEncodingError::UnknownVersion(2))
         );
+    }
+
+    fn operation_bytes(kind: u8) -> [u8; AgentLifecycleOperationId::ENCODED_LEN] {
+        let mut bytes = [0_u8; AgentLifecycleOperationId::ENCODED_LEN];
+        bytes[0] = AgentLifecycleOperationId::VERSION;
+        bytes[1] = kind;
+        bytes[2] = 1;
+        bytes[41] = 1;
+        bytes[49] = 1;
+        bytes
+    }
+
+    #[test]
+    fn lifecycle_identity_rejects_unknown_and_zero_fields() {
+        let persistent = operation_bytes(AgentLifecycleOperationId::PERSISTENT_TAG);
+        let operation = AgentLifecycleOperationId::from_canonical_v1_bytes(persistent).unwrap();
+        assert!(operation.is_persistent());
+        assert_eq!(operation.to_canonical_v1_bytes(), persistent);
+
+        let mut invalid = persistent;
+        invalid[2..34].fill(0);
+        assert_eq!(
+            AgentLifecycleOperationId::from_canonical_v1_bytes(invalid),
+            Err(LifecycleIdentityEncodingError::ZeroIssuer)
+        );
+        let mut invalid = persistent;
+        invalid[1] = 9;
+        assert_eq!(
+            AgentLifecycleOperationId::from_canonical_v1_bytes(invalid),
+            Err(LifecycleIdentityEncodingError::UnknownKind(9))
+        );
+    }
+
+    #[test]
+    fn only_persistent_operations_derive_durable_session_ids() {
+        let persistent = AgentLifecycleOperationId::from_canonical_v1_bytes(operation_bytes(
+            AgentLifecycleOperationId::PERSISTENT_TAG,
+        ))
+        .unwrap();
+        let session = SessionId::from_persistent_operation(persistent).unwrap();
+        assert_eq!(
+            session.to_canonical_v1_bytes(),
+            persistent.to_canonical_v1_bytes()
+        );
+
+        let volatile = AgentLifecycleOperationId::from_canonical_v1_bytes(operation_bytes(
+            AgentLifecycleOperationId::VOLATILE_TAG,
+        ))
+        .unwrap();
+        assert!(SessionId::from_persistent_operation(volatile).is_err());
     }
 }

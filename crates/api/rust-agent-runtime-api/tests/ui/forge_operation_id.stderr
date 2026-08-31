@@ -1,0 +1,11 @@
+error[E0423]: cannot initialize a tuple struct which contains private fields
+ --> tests/ui/forge_operation_id.rs:4:19
+  |
+4 |     let _forged = AgentLifecycleOperationId([0; AgentLifecycleOperationId::ENCODED_LEN]);
+  |                   ^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+note: constructor is not visible here due to private fields
+ --> $WORKSPACE/crates/api/rust-agent-core/src/lib.rs
+  |
+  | pub struct AgentLifecycleOperationId([u8; Self::ENCODED_LEN]);
+  |                                      ^^^^^^^^^^^^^^^^^^^^^^^ private field

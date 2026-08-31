@@ -1,5 +1,6 @@
 //! Locked development-only build executor for Phase 1A.
 
+mod cargo_unit_graph;
 mod host_feature;
 mod integration;
 mod policy;
@@ -10,10 +11,15 @@ use std::{
     process::Command,
 };
 
+pub use cargo_unit_graph::{
+    CargoCompilationKind, CargoCompileMode, CargoCrateKind, CargoDependencyKind,
+    CargoPackageIdentity, CargoPackageSource, CargoTargetEvaluationDomain, CargoUnit,
+    CargoUnitEdge, CargoUnitGraphError, CargoUnitGraphPlannerIdentity, CargoUnitSelector,
+    HostCargoUnitGraph, NormalizedCargoUnit, NormalizedHostCargoUnitGraph,
+};
 pub use host_feature::{
-    CargoCompilationKind, CargoCrateKind, CargoUnitSelector, FeatureAccountingMode, FeatureDelta,
-    FeatureSemanticsEvidence, HostFeaturePolicyEntry, HostFeaturePolicyError,
-    HostFeatureUnionPolicy, NormalizedHostFeaturePolicy,
+    FeatureAccountingMode, FeatureDelta, FeatureSemanticsEvidence, HostFeaturePolicyEntry,
+    HostFeaturePolicyError, HostFeatureUnionPolicy, NormalizedHostFeaturePolicy,
 };
 pub use integration::{IntegrationError, emit_integration, verify_integration};
 pub use policy::{

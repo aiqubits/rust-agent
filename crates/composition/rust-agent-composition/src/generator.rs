@@ -1097,6 +1097,15 @@ mod tests {
             ("src/lib.rs", "lib.rs"),
             ("rust-agent-composition.json", "rust-agent-composition.json"),
         ] {
+            if std::env::var_os("RUST_AGENT_UPDATE_GOLDENS").as_deref()
+                == Some(std::ffi::OsStr::new("1"))
+            {
+                fs::copy(
+                    generated.path.join(actual),
+                    root.join("tests/golden/minimal").join(golden),
+                )
+                .unwrap();
+            }
             assert_eq!(
                 fs::read(generated.path.join(actual)).unwrap(),
                 fs::read(root.join("tests/golden/minimal").join(golden)).unwrap(),

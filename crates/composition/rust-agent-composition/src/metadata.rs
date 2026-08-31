@@ -82,6 +82,10 @@ pub struct ComponentSpec {
     pub config_source: ConfigSource,
     #[serde(default, rename = "config-key")]
     pub config_key: Option<String>,
+    #[serde(default, rename = "resource-namespace-preparer")]
+    pub resource_namespace_preparer: Option<String>,
+    #[serde(default, rename = "prepared-config-type")]
+    pub prepared_config_type: Option<String>,
     pub targets: String,
     pub support: SupportTier,
     #[serde(rename = "lifecycle-effects")]
@@ -129,7 +133,19 @@ pub struct CapabilityProvide {
     pub order: i32,
     #[serde(default)]
     pub layer: ProvideLayer,
+    #[serde(default, rename = "resource-namespace")]
+    pub resource_namespace: ResourceNamespaceMode,
     pub effects: BTreeSet<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "mode", rename_all = "kebab-case", deny_unknown_fields)]
+pub enum ResourceNamespaceMode {
+    #[default]
+    None,
+    Required {
+        bootstrap: String,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]

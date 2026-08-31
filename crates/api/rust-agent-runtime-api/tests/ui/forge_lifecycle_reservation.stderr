@@ -1,0 +1,19 @@
+error[E0451]: fields `recovery_key`, `intent`, `request_fingerprint`, `projected_authority_digest`, `projected_plan_digest`, `composition` and `catalog` of struct `LifecycleOperationReservationDraft` are private
+  --> tests/ui/forge_lifecycle_reservation.rs:11:9
+   |
+10 |     let _forged = LifecycleOperationReservationDraft {
+   |                   ---------------------------------- in this type
+11 |         recovery_key: AgentOperationRecoveryKey::from_canonical_v1_bytes(key).unwrap(),
+   |         ^^^^^^^^^^^^ private field
+12 |         intent: AgentLifecycleOperationIntent::CreateDurable,
+   |         ^^^^^^ private field
+13 |         request_fingerprint: Digest::from_bytes([1; 32]),
+   |         ^^^^^^^^^^^^^^^^^^^ private field
+14 |         projected_authority_digest: Digest::from_bytes([2; 32]),
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^ private field
+15 |         projected_plan_digest: Digest::from_bytes([3; 32]),
+   |         ^^^^^^^^^^^^^^^^^^^^^ private field
+16 |         composition: CompositionHash::from_digest(Digest::from_bytes([4; 32])),
+   |         ^^^^^^^^^^^ private field
+17 |         catalog: Digest::from_bytes([5; 32]),
+   |         ^^^^^^^ private field
