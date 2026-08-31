@@ -38,5 +38,6 @@ implementation exists.
 | Host feature delta is unit-specific and never relaxes first-party/Host/generated units | `host_feature::tests::*` |
 | Product-neutral library graph compiles on the installed target matrix | `target_matrix::product_neutral_library_compile_matrix` |
 | Emitted composition compiles in an independent Host and rejects duplicate API identity | `e2e::compose_build_inspect_emit_verify_end_to_end` |
+| Native direct, same-module Rust WASM and native backend IPC topology contracts are selected only from build kind/target/ABI; the WASM Host retains typed identity and the IPC frontend cannot depend on runtime internals | `topology_matrix::framework_neutral_host_topology_matrix`, `e2e::compose_build_inspect_emit_verify_end_to_end` |
 | Development output cannot claim deployability | `e2e::compose_build_inspect_emit_verify_end_to_end` |
 | CLI compose/build/inspect/emit/verify workflow | `rust-agent-cli/tests/e2e.rs` |

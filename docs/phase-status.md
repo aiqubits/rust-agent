@@ -6,7 +6,7 @@ represented in `docs/invariant-tests.md` and all applicable gates pass.
 | Phase | Status | Evidence / remaining gate |
 |---|---|---|
 | 0 — repository and contract | Complete | Rust/Cargo 1.97.1 is synchronized across local toolchain targets, workspace MSRV, generated manifests and CI; workspace/deny/ADR, effect-free core/runtime contracts, checked lifecycle identities and reservation schema, closed metadata/target parsing, resource-namespace bootstrap graph, Host/runtime metadata, canonical Host Cargo unit-graph schema, privacy compile-fail tests and every Phase 0 acceptance mapping pass. The lightweight Session API remains a Phase 2 deliverable; Phase 0 has an automated absence guard so no Agent dependency is exposed early. |
-| 1A — generated graph proof | In progress | Deterministic bounded resolver, property/oracle tests, source snapshots, real Cargo graph absence/presence, manifests, locked development build, controlled build requirements, integration emission/verification, independent Host/type-identity tests and six-target library matrix pass. JS WASM post-link bundle, external shared-feature Host fixture, and the remaining framework-neutral topology fixtures are not yet delivered. |
+| 1A — generated graph proof | In progress | Deterministic bounded resolver, property/oracle tests, source snapshots, real Cargo graph absence/presence, manifests, locked development build, controlled build requirements, integration emission/verification, independent Native Host/type-identity tests, same-module Rust WASM Host compilation, native backend/WebView IPC isolation and the six-target library matrix pass. The JavaScript WASM post-link bundle and external shared-feature Host fixture are not yet delivered. |
 | 1B — Linux production build | Not started | Requires trusted supervisor/backend, escape suite and signed attestation. |
 | 2 — minimal runtime spine | Blocked by Phase 1A gate | Must not be represented by empty product crates. |
 | 3 — tool execution plane | Not started | Starts after the Phase 1A contract is stable. |
@@ -36,6 +36,12 @@ The Phase 0/1A baseline is intentionally development-only. Named tests cover:
   dependency-cycle rejection and planned/observed drift rejection;
 - external Target-library feature delta policy and first-party/Host/generated-output rejection;
 - independent Rust Host compilation and duplicate API source type-identity rejection;
+- framework-neutral topology validation derived only from build kind, target facts and ABI boundary;
+- same-module Rust WASM Host compilation through the emitted library alias with no JS export or
+  `wasm-bindgen` dependency;
+- native backend IPC command/channel mapping with bounded nonblocking delivery, exact request-id
+  preservation, closed/full failure paths and a frontend Cargo graph that cannot import runtime
+  internal types;
 - Linux, WASM, Android, iOS, macOS and Windows product-neutral library cross-compilation;
 - development artifact/integration production rejection and end-to-end CLI mutation checks.
 

@@ -8,6 +8,8 @@ use rust_agent_composition::{CompositionManifest, verify_composition};
 use thiserror::Error;
 use walkdir::WalkDir;
 
+use crate::topology::{HostIntegrationTopology, HostTopologyError, verify_host_topology};
+
 static EMIT_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Error)]
@@ -20,6 +22,8 @@ pub enum IntegrationError {
     DestinationConflict(String),
     #[error("development composition requires --allow-development")]
     DevelopmentNotAllowed,
+    #[error("Host topology verification failed: {0}")]
+    HostTopology(#[from] HostTopologyError),
     #[error("integration tree contains a symlink or unsupported file: {0}")]
     UnsupportedEntry(String),
     #[error("I/O failed during integration emission: {0}")]
@@ -80,6 +84,16 @@ pub fn verify_integration(
     if !allow_development && !manifest.deployable {
         return Err(IntegrationError::DevelopmentNotAllowed);
     }
+    Ok(manifest)
+}
+
+pub fn verify_integration_topology(
+    destination: &Path,
+    allow_development: bool,
+    topology: HostIntegrationTopology,
+) -> Result<CompositionManifest, IntegrationError> {
+    let manifest = verify_integration(destination, allow_development)?;
+    verify_host_topology(&manifest, topology)?;
     Ok(manifest)
 }
 

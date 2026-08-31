@@ -4,6 +4,7 @@ mod cargo_unit_graph;
 mod host_feature;
 mod integration;
 mod policy;
+mod topology;
 
 use std::{
     env, fs, io,
@@ -21,7 +22,9 @@ pub use host_feature::{
     FeatureAccountingMode, FeatureDelta, FeatureSemanticsEvidence, HostFeaturePolicyEntry,
     HostFeaturePolicyError, HostFeatureUnionPolicy, NormalizedHostFeaturePolicy,
 };
-pub use integration::{IntegrationError, emit_integration, verify_integration};
+pub use integration::{
+    IntegrationError, emit_integration, verify_integration, verify_integration_topology,
+};
 pub use policy::{
     BuildEnvironment, BuildExecutable, BuildExecutionPolicy, BuildPolicyError, BuildReadInput,
 };
@@ -30,6 +33,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use tempfile::TempDir;
 use thiserror::Error;
+pub use topology::{HostIntegrationTopology, HostTopologyError, verify_host_topology};
 
 #[derive(Clone, Debug)]
 pub struct DevelopmentBuildOptions {
