@@ -193,6 +193,23 @@ pub enum BuildPanicStrategy {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
+pub struct BuildArtifactSelector {
+    pub package: String,
+    pub target: BuildArtifactTarget,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
+pub enum BuildArtifactTarget {
+    Library,
+    Binary { name: String },
+    Example { name: String },
+    Test { name: String },
+    Bench { name: String },
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct BuildEnforcementContext {
     pub schema: u32,
     #[serde(rename = "build-triple")]
@@ -208,7 +225,7 @@ pub struct BuildEnforcementContext {
     pub cargo_config_digest: String,
     pub profile: String,
     #[serde(rename = "artifact-selector")]
-    pub artifact_selector: String,
+    pub artifact_selector: BuildArtifactSelector,
     #[serde(rename = "panic-strategy")]
     pub panic_strategy: BuildPanicStrategy,
     #[serde(rename = "rustc-settings-digest")]
@@ -600,14 +617,12 @@ impl BuildEnforcementContext {
                 return Err(ProductionBuildPolicyError::InvalidEnforcementContext(field));
             }
         }
-        for (field, value) in [
-            ("profile", self.profile.as_str()),
-            ("artifact-selector", self.artifact_selector.as_str()),
-        ] {
+        for (field, value) in [("profile", self.profile.as_str())] {
             if validate_id("build enforcement context", value).is_err() {
                 return Err(ProductionBuildPolicyError::InvalidEnforcementContext(field));
             }
         }
+        self.artifact_selector.validate()?;
         for (field, digest) in [
             ("target-facts-digest", self.target_facts_digest.as_str()),
             (
@@ -636,6 +651,58 @@ impl BuildEnforcementContext {
             ));
         }
         Ok(())
+    }
+}
+
+impl BuildArtifactSelector {
+    pub fn digest(&self) -> Result<String, ProductionBuildPolicyError> {
+        self.validate()?;
+        Ok(hex::encode(canonical::domain_hash(
+            b"rust-agent-build-artifact-selector-v1\0",
+            self,
+        )?))
+    }
+
+    pub fn cargo_arguments(&self) -> Vec<String> {
+        let mut arguments = vec!["--package".into(), self.package.clone()];
+        match &self.target {
+            BuildArtifactTarget::Library => arguments.push("--lib".into()),
+            BuildArtifactTarget::Binary { name } => {
+                arguments.extend(["--bin".into(), name.clone()]);
+            }
+            BuildArtifactTarget::Example { name } => {
+                arguments.extend(["--example".into(), name.clone()]);
+            }
+            BuildArtifactTarget::Test { name } => {
+                arguments.extend(["--test".into(), name.clone()]);
+            }
+            BuildArtifactTarget::Bench { name } => {
+                arguments.extend(["--bench".into(), name.clone()]);
+            }
+        }
+        arguments
+    }
+
+    fn validate(&self) -> Result<(), ProductionBuildPolicyError> {
+        if !is_cargo_name(&self.package) {
+            return Err(ProductionBuildPolicyError::InvalidEnforcementContext(
+                "artifact-selector.package",
+            ));
+        }
+        let target_name = match &self.target {
+            BuildArtifactTarget::Library => return Ok(()),
+            BuildArtifactTarget::Binary { name }
+            | BuildArtifactTarget::Example { name }
+            | BuildArtifactTarget::Test { name }
+            | BuildArtifactTarget::Bench { name } => name,
+        };
+        if is_cargo_name(target_name) {
+            Ok(())
+        } else {
+            Err(ProductionBuildPolicyError::InvalidEnforcementContext(
+                "artifact-selector.target.name",
+            ))
+        }
     }
 }
 
@@ -933,6 +1000,15 @@ fn is_canonical_target_name(value: &str) -> bool {
         && value.as_bytes()[0].is_ascii_lowercase()
         && value.bytes().all(|byte| {
             byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_' | b'.')
+        })
+}
+
+fn is_cargo_name(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 64
+        && value.as_bytes()[0].is_ascii_lowercase()
+        && value.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_')
         })
 }
 

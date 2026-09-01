@@ -62,7 +62,11 @@ implementation exists.
 | Host manifest/lock/config, package/emitted trees, Cargo resolution, target facts/custom spec and rustc settings are cardinality-, logical-path-, content-kind- and context-checked; any drift changes identity or fails closed | `host_input_closure::item_and_context_drift_fail_before_stage_receipts`, `host_input_closure::required_roles_paths_content_and_custom_specs_are_closed` |
 | Closure planner identity matches the Rust/Cargo 1.97.1 production policy, and every feature-semantics evidence item is exact and bound to a trusted reviewer policy | `host_input_closure::policy_planner_and_feature_evidence_are_cross_checked` |
 | Development pre/build-host/post closure receipts are closed, mutation-detecting, exact-input consistent and permanently non-deployable | `host_input_closure::closure_digest_is_order_independent_and_stage_chain_is_exact`, `host_input_closure::closed_json_and_stage_receipt_mutations_fail_closed` |
+| Final Host artifact selection is typed, validated, domain-separated and a required context-matching closure item rather than an opaque CLI string | `production_policy::production_policy_rejects_untrusted_or_ambient_surfaces`, `host_input_closure::required_roles_paths_content_and_custom_specs_are_closed` |
+| Standalone/final Cargo planner requests bind the exact Host closure aggregate and paths, explicit config, selector, panic strategy, policy/toolchain and a fixed isolated invocation; Cargo 1.97.1 unit-graph v1 output is closed, bounded and mutation/context/cycle checked | `cargo_planner::tests::requests_bind_exact_roots_selector_policy_toolchain_and_invocation`, `cargo_planner::tests::unit_graph_v1_envelope_is_closed_context_checked_and_mutation_detecting` |
+| A pinned Cargo without the trusted unit-graph interface fails as unsupported before build.rs and cannot silently fall back to package-level metadata | `cargo_planner::tests::stable_cargo_is_explicitly_unsupported_and_never_executes_build_script` |
+| Cargo.lock v4 registry checksum, HTTPS git precise revision and path tree identities form an exact Host-lock/unit-package-bound source closure; fetched observations require the same complete package set and exact locked identities | `host_input_closure::locked_sources_bind_lock_unit_packages_and_exact_fetch_observations`, `host_input_closure::locked_source_and_fetch_mutations_fail_closed` |
 
-These tests do not cover or imply the still-missing closure materializer/mount verifier, production
-sandbox, actual unit observer, escape suite, trusted completion handle, signed executor attestation
-or deployable artifact path.
+These tests do not cover or imply a trusted unit-graph-enabled Cargo runner/raw graph normalizer,
+isolated fetch or closure materializer/mount verifier, production sandbox, actual unit observer,
+escape suite, trusted completion handle, signed executor attestation or deployable artifact path.

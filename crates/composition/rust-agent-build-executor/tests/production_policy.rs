@@ -1,11 +1,12 @@
 use std::collections::BTreeSet;
 
 use rust_agent_build_executor::{
-    BuildEnforcementContext, BuildPanicStrategy, DerivedExecutablePolicy,
-    ProductionAttestationPolicy, ProductionBuildExecutionPolicy, ProductionBuildPolicyError,
-    ProductionEnvironment, ProductionExecutable, ProductionFetchPolicy, ProductionFileIdentity,
-    ProductionReadInput, ProductionSandboxBackend, ProductionToolIdentity, ProductionToolchain,
-    ProductionTreeIdentity, SigningHelper, TrustedReviewerPolicy, TrustedSigner,
+    BuildArtifactSelector, BuildArtifactTarget, BuildEnforcementContext, BuildPanicStrategy,
+    DerivedExecutablePolicy, ProductionAttestationPolicy, ProductionBuildExecutionPolicy,
+    ProductionBuildPolicyError, ProductionEnvironment, ProductionExecutable, ProductionFetchPolicy,
+    ProductionFileIdentity, ProductionReadInput, ProductionSandboxBackend, ProductionToolIdentity,
+    ProductionToolchain, ProductionTreeIdentity, SigningHelper, TrustedReviewerPolicy,
+    TrustedSigner,
 };
 use rust_agent_composition::metadata::BuildRequirements;
 
@@ -139,7 +140,10 @@ fn context() -> BuildEnforcementContext {
         cargo_resolution_digest: digest("d"),
         cargo_config_digest: digest("e"),
         profile: "release".into(),
-        artifact_selector: "host-integration".into(),
+        artifact_selector: BuildArtifactSelector {
+            package: "host-fixture".into(),
+            target: BuildArtifactTarget::Library,
+        },
         panic_strategy: BuildPanicStrategy::Unwind,
         rustc_settings_digest: digest("f"),
         prefix_remap_schema: 1,
@@ -254,7 +258,7 @@ fn normalization_is_order_independent_and_schema_digest_is_frozen() {
         normalized
             .enforcement_identity_digest(&requirements(), &context())
             .unwrap(),
-        "8bd63354a0f0d0680f9b80d53962fd970529b4a25ea282e9ecc562d4479bf908"
+        "2b7ebfca99a0fcf39e6878e6602c5a1ace96b3f3ebe75de121cbdd3c5f0acd5f"
     );
 }
 
@@ -288,6 +292,26 @@ fn production_policy_rejects_untrusted_or_ambient_surfaces() {
     assert!(matches!(
         normalized.enforcement_identity(&requirements(), &invalid_context),
         Err(ProductionBuildPolicyError::UnsupportedPrefixRemapSchema(2))
+    ));
+
+    let mut invalid_context = context();
+    invalid_context.artifact_selector.package = "Host Fixture".into();
+    assert!(matches!(
+        normalized.enforcement_identity(&requirements(), &invalid_context),
+        Err(ProductionBuildPolicyError::InvalidEnforcementContext(
+            "artifact-selector.package"
+        ))
+    ));
+
+    let mut invalid_context = context();
+    invalid_context.artifact_selector.target = BuildArtifactTarget::Binary {
+        name: "../host".into(),
+    };
+    assert!(matches!(
+        normalized.enforcement_identity(&requirements(), &invalid_context),
+        Err(ProductionBuildPolicyError::InvalidEnforcementContext(
+            "artifact-selector.target.name"
+        ))
     ));
 
     let mut invalid = policy();

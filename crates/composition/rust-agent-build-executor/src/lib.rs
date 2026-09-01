@@ -5,10 +5,12 @@
 //! unit observation, escape-suite evidence and a trusted completion attestation.
 
 mod artifact;
+mod cargo_planner;
 mod cargo_unit_graph;
 mod host_feature;
 mod host_input_closure;
 mod integration;
+mod locked_sources;
 mod policy;
 mod production_policy;
 mod topology;
@@ -23,6 +25,10 @@ use std::{
 pub use artifact::{
     ArtifactError, DevelopmentArtifactKind, DevelopmentArtifactRecord, DevelopmentBuildManifest,
     WasmPostprocessorManifest,
+};
+pub use cargo_planner::{
+    CargoPlannerError, CargoPlannerGraphRoot, CargoPlannerInvocation, CargoPlannerRequest,
+    NormalizedCargoPlannerRequest, VerifiedCargoUnitGraphEnvelope,
 };
 pub use cargo_unit_graph::{
     CargoCompilationKind, CargoCompileMode, CargoCrateKind, CargoDependencyKind,
@@ -46,18 +52,23 @@ pub use host_input_closure::{
 pub use integration::{
     IntegrationError, emit_integration, verify_integration, verify_integration_topology,
 };
+pub use locked_sources::{
+    FetchedSourceEvidence, FetchedSourceObservation, FetchedSourcePackage, LockedSourceClosure,
+    LockedSourceError, NormalizedFetchedSourceEvidence, NormalizedLockedSourceClosure,
+};
 pub use policy::{
     BuildEnvironment, BuildExecutable, BuildExecutionPolicy, BuildPolicyError, BuildReadInput,
     VerifiedBuildExecutable,
 };
 pub use production_policy::{
-    BuildEnforcementContext, BuildEnforcementEnvironment, BuildEnforcementExecutable,
-    BuildEnforcementIdentity, BuildEnforcementReadInput, BuildEnforcementToolchain,
-    BuildPanicStrategy, DerivedExecutablePolicy, NormalizedProductionBuildPolicy,
-    ProductionAttestationPolicy, ProductionBuildExecutionPolicy, ProductionBuildPolicyError,
-    ProductionEnvironment, ProductionExecutable, ProductionFetchPolicy, ProductionFileIdentity,
-    ProductionReadInput, ProductionSandboxBackend, ProductionToolIdentity, ProductionToolchain,
-    ProductionTreeIdentity, SigningHelper, TrustedReviewerPolicy, TrustedSigner,
+    BuildArtifactSelector, BuildArtifactTarget, BuildEnforcementContext,
+    BuildEnforcementEnvironment, BuildEnforcementExecutable, BuildEnforcementIdentity,
+    BuildEnforcementReadInput, BuildEnforcementToolchain, BuildPanicStrategy,
+    DerivedExecutablePolicy, NormalizedProductionBuildPolicy, ProductionAttestationPolicy,
+    ProductionBuildExecutionPolicy, ProductionBuildPolicyError, ProductionEnvironment,
+    ProductionExecutable, ProductionFetchPolicy, ProductionFileIdentity, ProductionReadInput,
+    ProductionSandboxBackend, ProductionToolIdentity, ProductionToolchain, ProductionTreeIdentity,
+    SigningHelper, TrustedReviewerPolicy, TrustedSigner,
 };
 use rust_agent_composition::{
     CompositionManifest, WASM_BINDGEN_CLI_LOGICAL_ID, WASM_BINDGEN_PROTOCOL_VERSION,

@@ -1,14 +1,16 @@
 use rust_agent_build_executor::{
-    BuildEnforcementContext, BuildPanicStrategy, CanonicalSnapshotMetadataContract,
-    CargoCompilationKind, CargoCompileMode, CargoCrateKind, CargoDependencyKind,
-    CargoPackageIdentity, CargoPackageSource, CargoTargetEvaluationDomain, CargoUnit,
-    CargoUnitEdge, CargoUnitGraphPlannerIdentity, CargoUnitSelector, DerivedExecutablePolicy,
+    BuildArtifactSelector, BuildArtifactTarget, BuildEnforcementContext, BuildPanicStrategy,
+    CanonicalSnapshotMetadataContract, CargoCompilationKind, CargoCompileMode, CargoCrateKind,
+    CargoDependencyKind, CargoPackageIdentity, CargoPackageSource, CargoTargetEvaluationDomain,
+    CargoUnit, CargoUnitEdge, CargoUnitGraphPlannerIdentity, CargoUnitSelector,
+    DerivedExecutablePolicy, FetchedSourceEvidence, FetchedSourceObservation, FetchedSourcePackage,
     HostBuildClosureContent, HostBuildClosureItem, HostBuildClosureItemRole, HostBuildClosureStage,
     HostBuildInputClosure, HostBuildInputClosureError, HostCargoUnitGraph,
-    HostFeaturePolicyClosure, NormalizedProductionBuildPolicy, ProductionAttestationPolicy,
-    ProductionBuildExecutionPolicy, ProductionFetchPolicy, ProductionSandboxBackend,
-    ProductionToolIdentity, ProductionToolchain, ProductionTreeIdentity, SigningHelper,
-    TrustedReviewerPolicy, TrustedSigner, verify_development_host_closure_stage_chain,
+    HostFeaturePolicyClosure, LockedSourceClosure, LockedSourceError,
+    NormalizedProductionBuildPolicy, ProductionAttestationPolicy, ProductionBuildExecutionPolicy,
+    ProductionFetchPolicy, ProductionSandboxBackend, ProductionToolIdentity, ProductionToolchain,
+    ProductionTreeIdentity, SigningHelper, TrustedReviewerPolicy, TrustedSigner,
+    verify_development_host_closure_stage_chain,
 };
 use rust_agent_composition::metadata::BuildRequirements;
 
@@ -84,7 +86,10 @@ fn context() -> BuildEnforcementContext {
         cargo_resolution_digest: digest('7'),
         cargo_config_digest: digest('8'),
         profile: "release".into(),
-        artifact_selector: "host-integration".into(),
+        artifact_selector: BuildArtifactSelector {
+            package: "host-fixture".into(),
+            target: BuildArtifactTarget::Library,
+        },
         panic_strategy: BuildPanicStrategy::Unwind,
         rustc_settings_digest: digest('9'),
         prefix_remap_schema: 1,
@@ -202,6 +207,21 @@ fn record(
     }
 }
 
+fn record_digest(
+    role: HostBuildClosureItemRole,
+    id: &str,
+    path: &str,
+    digest: String,
+) -> HostBuildClosureItem {
+    HostBuildClosureItem {
+        role,
+        id: id.into(),
+        logical_path: path.into(),
+        metadata_contract: CanonicalSnapshotMetadataContract::ReadOnlyEpochV1,
+        content: HostBuildClosureContent::CanonicalRecord { digest },
+    }
+}
+
 fn closure(policy: &NormalizedProductionBuildPolicy) -> HostBuildInputClosure {
     let context = context();
     let requirements = BuildRequirements::default();
@@ -259,6 +279,12 @@ fn closure(policy: &NormalizedProductionBuildPolicy) -> HostBuildInputClosure {
                 "/rust-agent/closure/records/rustc-settings.json",
                 '9',
             ),
+            record_digest(
+                HostBuildClosureItemRole::ArtifactSelectorRecord,
+                "artifact-selector",
+                "/rust-agent/closure/records/artifact-selector.json",
+                context.artifact_selector.digest().unwrap(),
+            ),
         ],
         standalone_unit_graph: unit_graph(),
         final_unit_graph: unit_graph(),
@@ -287,7 +313,7 @@ fn closure_digest_is_order_independent_and_stage_chain_is_exact() {
     assert_eq!(normalized.items(), reordered.items());
     assert_eq!(
         normalized.digest(),
-        "2e7cfae555561ef0dbdd93b8965afdd11af8f97a99b8582acc1cf634e531c51e"
+        "617bcaba945ed6f6186270552eed224bef3326632a2f9900b132037fce42e50a"
     );
 
     let pre = normalized
@@ -369,6 +395,32 @@ fn required_roles_paths_content_and_custom_specs_are_closed() {
             role: HostBuildClosureItemRole::HostCargoLock,
             ..
         })
+    ));
+
+    let mut missing_artifact_selector = closure(&policy);
+    missing_artifact_selector
+        .items
+        .retain(|item| item.role != HostBuildClosureItemRole::ArtifactSelectorRecord);
+    assert!(matches!(
+        missing_artifact_selector.normalize(&policy),
+        Err(HostBuildInputClosureError::InvalidRoleCardinality {
+            role: HostBuildClosureItemRole::ArtifactSelectorRecord,
+            ..
+        })
+    ));
+
+    let mut artifact_selector_drift = closure(&policy);
+    artifact_selector_drift
+        .items
+        .iter_mut()
+        .find(|item| item.role == HostBuildClosureItemRole::ArtifactSelectorRecord)
+        .unwrap()
+        .content = HostBuildClosureContent::CanonicalRecord {
+        digest: digest('1'),
+    };
+    assert!(matches!(
+        artifact_selector_drift.normalize(&policy),
+        Err(HostBuildInputClosureError::ContextItemMismatch { .. })
     ));
 
     let mut escape = closure(&policy);
@@ -528,5 +580,263 @@ fn closed_json_and_stage_receipt_mutations_fail_closed() {
     assert!(matches!(
         verify_development_host_closure_stage_chain(&pre, &other_build, &post),
         Err(HostBuildInputClosureError::ReceiptInputMismatch)
+    ));
+}
+
+fn cargo_lock() -> Vec<u8> {
+    format!(
+        "# generated fixture\nversion = 4\n\n[[package]]\nname = \"host-fixture\"\nversion = \"0.1.0\"\n\n[[package]]\nname = \"registry-lib\"\nversion = \"1.2.3\"\nsource = \"registry+https://github.com/rust-lang/crates.io-index\"\nchecksum = \"{}\"\n\n[[package]]\nname = \"git-helper\"\nversion = \"0.4.0\"\nsource = \"git+https://example.invalid/helper?rev=v1#{}\"\n",
+        digest('c'),
+        "1".repeat(40)
+    )
+    .into_bytes()
+}
+
+fn fetched_evidence(closure_digest: &str) -> FetchedSourceEvidence {
+    FetchedSourceEvidence {
+        schema: 1,
+        locked_source_closure_digest: closure_digest.into(),
+        packages: vec![
+            FetchedSourcePackage {
+                package: CargoPackageIdentity {
+                    name: "registry-lib".into(),
+                    version: "1.2.3".into(),
+                    source: CargoPackageSource::Registry {
+                        registry: "https://github.com/rust-lang/crates.io-index".into(),
+                        checksum: digest('c'),
+                    },
+                },
+                observation: FetchedSourceObservation::RegistryArchive {
+                    archive_sha256: digest('c'),
+                    snapshot_tree_digest: digest('d'),
+                },
+            },
+            FetchedSourcePackage {
+                package: CargoPackageIdentity {
+                    name: "git-helper".into(),
+                    version: "0.4.0".into(),
+                    source: CargoPackageSource::Git {
+                        repository: "https://example.invalid/helper?rev=v1".into(),
+                        precise: "1".repeat(40),
+                    },
+                },
+                observation: FetchedSourceObservation::GitCheckout {
+                    precise: "1".repeat(40),
+                    snapshot_tree_digest: digest('e'),
+                },
+            },
+            FetchedSourcePackage {
+                package: package(),
+                observation: FetchedSourceObservation::PathSnapshot {
+                    snapshot_tree_digest: digest('a'),
+                },
+            },
+        ],
+    }
+}
+
+#[test]
+fn locked_sources_bind_lock_unit_packages_and_exact_fetch_observations() {
+    let cargo_lock = cargo_lock();
+    let sources = LockedSourceClosure::from_cargo_lock(&cargo_lock, &[package()]).unwrap();
+    let normalized = sources.normalize().unwrap();
+    assert_eq!(
+        normalized.digest(),
+        "f6c82d009052887741e32265a537fc27f1d81abb0f7e0eca8eceaf2813863003"
+    );
+    assert_eq!(normalized.packages().len(), 3);
+    let mut reordered_sources = sources;
+    reordered_sources.packages.reverse();
+    assert_eq!(reordered_sources.normalize().unwrap(), normalized);
+
+    let policy = policy();
+    let mut host = closure(&policy);
+    let lock_item = host
+        .items
+        .iter_mut()
+        .find(|item| item.role == HostBuildClosureItemRole::HostCargoLock)
+        .unwrap();
+    lock_item.content = HostBuildClosureContent::File {
+        sha256: normalized.cargo_lock_digest().into(),
+    };
+    let host = host.normalize(&policy).unwrap();
+    normalized.verify_host_closure(&host).unwrap();
+
+    let evidence = fetched_evidence(normalized.digest());
+    let verified = evidence.normalize(&normalized).unwrap();
+    assert_eq!(
+        verified.digest(),
+        "1de6cc4b87618d191449074240b95117f95239d5e72f9cac28f1a6bab298889d"
+    );
+    let mut reordered = evidence;
+    reordered.packages.reverse();
+    assert_eq!(reordered.normalize(&normalized).unwrap(), verified);
+}
+
+#[test]
+fn locked_source_and_fetch_mutations_fail_closed() {
+    let cargo_lock = cargo_lock();
+    let normalized = LockedSourceClosure::from_cargo_lock(&cargo_lock, &[package()])
+        .unwrap()
+        .normalize()
+        .unwrap();
+
+    let unsupported =
+        String::from_utf8(cargo_lock.clone())
+            .unwrap()
+            .replacen("version = 4", "version = 3", 1);
+    assert!(matches!(
+        LockedSourceClosure::from_cargo_lock(unsupported.as_bytes(), &[package()]),
+        Err(LockedSourceError::UnsupportedCargoLock(3))
+    ));
+
+    let missing_checksum = String::from_utf8(cargo_lock.clone())
+        .unwrap()
+        .replace(&format!("checksum = \"{}\"\n", digest('c')), "");
+    assert!(matches!(
+        LockedSourceClosure::from_cargo_lock(missing_checksum.as_bytes(), &[package()]),
+        Err(LockedSourceError::InvalidLockedPackage {
+            field: "checksum",
+            ..
+        })
+    ));
+    let insecure_registry = String::from_utf8(cargo_lock.clone()).unwrap().replacen(
+        "registry+https://",
+        "registry+http://",
+        1,
+    );
+    assert!(matches!(
+        LockedSourceClosure::from_cargo_lock(insecure_registry.as_bytes(), &[package()]),
+        Err(LockedSourceError::InvalidLockedPackage {
+            field: "registry",
+            ..
+        })
+    ));
+    let imprecise_git = String::from_utf8(cargo_lock.clone()).unwrap().replacen(
+        &format!("#{}", "1".repeat(40)),
+        "#floating",
+        1,
+    );
+    assert!(matches!(
+        LockedSourceClosure::from_cargo_lock(imprecise_git.as_bytes(), &[package()]),
+        Err(LockedSourceError::InvalidLockedPackage {
+            field: "git-source",
+            ..
+        })
+    ));
+    assert!(matches!(
+        LockedSourceClosure::from_cargo_lock(&cargo_lock, &[]),
+        Err(LockedSourceError::PathPackageMapping(_))
+    ));
+    let mut extra_path = package();
+    extra_path.name = "unused-path".into();
+    assert!(matches!(
+        LockedSourceClosure::from_cargo_lock(&cargo_lock, &[package(), extra_path]),
+        Err(LockedSourceError::PathPackageMapping(_))
+    ));
+    let duplicated_path = format!(
+        "{}\n[[package]]\nname = \"host-fixture\"\nversion = \"0.1.0\"\n",
+        String::from_utf8(cargo_lock.clone()).unwrap()
+    );
+    assert!(matches!(
+        LockedSourceClosure::from_cargo_lock(duplicated_path.as_bytes(), &[package()]),
+        Err(LockedSourceError::DuplicateLockedPackage(_))
+    ));
+
+    let policy = policy();
+    let wrong_lock_host = closure(&policy).normalize(&policy).unwrap();
+    assert!(matches!(
+        normalized.verify_host_closure(&wrong_lock_host),
+        Err(LockedSourceError::HostCargoLockMismatch)
+    ));
+    assert!(!wrong_lock_host.items().is_empty());
+
+    let mut wrong_unit_source = LockedSourceClosure::from_cargo_lock(
+        &cargo_lock,
+        &[CargoPackageIdentity {
+            name: "host-fixture".into(),
+            version: "0.1.0".into(),
+            source: CargoPackageSource::Path {
+                tree_digest: digest('b'),
+            },
+        }],
+    )
+    .unwrap();
+    wrong_unit_source.cargo_lock_digest = normalized.cargo_lock_digest().into();
+    let wrong_unit_source = wrong_unit_source.normalize().unwrap();
+    let mut host = closure(&policy);
+    host.items
+        .iter_mut()
+        .find(|item| item.role == HostBuildClosureItemRole::HostCargoLock)
+        .unwrap()
+        .content = HostBuildClosureContent::File {
+        sha256: normalized.cargo_lock_digest().into(),
+    };
+    assert!(matches!(
+        wrong_unit_source.verify_host_closure(&host.normalize(&policy).unwrap()),
+        Err(LockedSourceError::UnitPackageMismatch(_))
+    ));
+
+    let evidence = fetched_evidence(normalized.digest());
+    let mut wrong_closure = evidence.clone();
+    wrong_closure.locked_source_closure_digest = digest('f');
+    assert!(matches!(
+        wrong_closure.normalize(&normalized),
+        Err(LockedSourceError::InvalidClosureDigest)
+    ));
+    let mut missing = evidence.clone();
+    missing.packages.pop();
+    assert!(matches!(
+        missing.normalize(&normalized),
+        Err(LockedSourceError::EvidencePackageSetMismatch)
+    ));
+
+    let mut checksum_drift = evidence.clone();
+    if let FetchedSourceObservation::RegistryArchive { archive_sha256, .. } =
+        &mut checksum_drift.packages[0].observation
+    {
+        *archive_sha256 = digest('f');
+    }
+    assert!(matches!(
+        checksum_drift.normalize(&normalized),
+        Err(LockedSourceError::EvidenceObservationMismatch(_))
+    ));
+
+    let mut precise_drift = evidence;
+    if let FetchedSourceObservation::GitCheckout { precise, .. } =
+        &mut precise_drift.packages[1].observation
+    {
+        *precise = "2".repeat(40);
+    }
+    assert!(matches!(
+        precise_drift.normalize(&normalized),
+        Err(LockedSourceError::EvidenceObservationMismatch(_))
+    ));
+
+    let mut wrong_kind = fetched_evidence(normalized.digest());
+    wrong_kind.packages[2].observation = FetchedSourceObservation::GitCheckout {
+        precise: "1".repeat(40),
+        snapshot_tree_digest: digest('a'),
+    };
+    assert!(matches!(
+        wrong_kind.normalize(&normalized),
+        Err(LockedSourceError::EvidenceObservationMismatch(_))
+    ));
+
+    let unknown = serde_json::to_string(
+        &LockedSourceClosure::from_cargo_lock(&cargo_lock, &[package()]).unwrap(),
+    )
+    .unwrap()
+    .replacen('{', "{\"ambient\":true,", 1);
+    assert!(matches!(
+        LockedSourceClosure::from_json(&unknown),
+        Err(LockedSourceError::Json(_))
+    ));
+    let unknown_evidence = serde_json::to_string(&fetched_evidence(normalized.digest()))
+        .unwrap()
+        .replacen('{', "{\"ambient\":true,", 1);
+    assert!(matches!(
+        FetchedSourceEvidence::from_json(&unknown_evidence),
+        Err(LockedSourceError::Json(_))
     ));
 }

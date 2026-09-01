@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
-    BuildEnforcementContext, CargoUnitGraphError, HostCargoUnitGraph,
+    BuildEnforcementContext, CargoPackageIdentity, CargoUnitGraphError, HostCargoUnitGraph,
     NormalizedProductionBuildPolicy, ProductionBuildPolicyError,
 };
 
@@ -73,6 +73,7 @@ pub enum HostBuildClosureItemRole {
     TargetFactsRecord,
     CustomTargetSpec,
     RustcSettingsRecord,
+    ArtifactSelectorRecord,
     FeatureSemanticsEvidence,
 }
 
@@ -128,6 +129,9 @@ pub struct NormalizedHostBuildClosureItem {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NormalizedHostBuildInputClosure {
     items: Vec<NormalizedHostBuildClosureItem>,
+    generated_package_name: String,
+    build_context: BuildEnforcementContext,
+    final_unit_packages: BTreeSet<CargoPackageIdentity>,
     standalone_unit_graph_digest: String,
     final_unit_graph_digest: String,
     build_execution_policy_digest: String,
@@ -335,6 +339,11 @@ impl HostBuildInputClosure {
 
         let standalone_unit_graph_digest = standalone.digest().to_owned();
         let final_unit_graph_digest = final_graph.digest().to_owned();
+        let final_unit_packages = final_graph
+            .nodes()
+            .keys()
+            .map(|selector| selector.package.clone())
+            .collect();
         let projection = ClosureProjection {
             schema: 1,
             composition_hash: &self.composition_hash,
@@ -356,6 +365,9 @@ impl HostBuildInputClosure {
         )?);
         Ok(NormalizedHostBuildInputClosure {
             items,
+            generated_package_name: self.generated_package_name.clone(),
+            build_context: self.build_context.clone(),
+            final_unit_packages,
             standalone_unit_graph_digest,
             final_unit_graph_digest,
             build_execution_policy_digest: self.build_execution_policy_digest.clone(),
@@ -376,12 +388,28 @@ impl NormalizedHostBuildInputClosure {
         &self.items
     }
 
+    pub fn generated_package_name(&self) -> &str {
+        &self.generated_package_name
+    }
+
+    pub fn build_context(&self) -> &BuildEnforcementContext {
+        &self.build_context
+    }
+
+    pub fn final_unit_packages(&self) -> &BTreeSet<CargoPackageIdentity> {
+        &self.final_unit_packages
+    }
+
     pub fn standalone_unit_graph_digest(&self) -> &str {
         &self.standalone_unit_graph_digest
     }
 
     pub fn final_unit_graph_digest(&self) -> &str {
         &self.final_unit_graph_digest
+    }
+
+    pub fn build_execution_policy_digest(&self) -> &str {
+        &self.build_execution_policy_digest
     }
 
     pub fn development_stage_receipt(
@@ -629,6 +657,13 @@ fn normalize_items(
         1,
         "exactly one",
     )?;
+    require_count(
+        &counts,
+        HostBuildClosureItemRole::ArtifactSelectorRecord,
+        1,
+        1,
+        "exactly one",
+    )?;
     let expected_custom_spec = usize::from(context.custom_target_spec_digest.is_some());
     require_count(
         &counts,
@@ -665,6 +700,12 @@ fn normalize_items(
         HostBuildClosureItemRole::RustcSettingsRecord,
         &context.rustc_settings_digest,
         "rustc-settings-digest",
+    )?;
+    verify_context_item(
+        &items,
+        HostBuildClosureItemRole::ArtifactSelectorRecord,
+        &context.artifact_selector.digest()?,
+        "artifact-selector-digest",
     )?;
     if let Some(digest) = &context.custom_target_spec_digest {
         verify_context_item(
@@ -775,7 +816,8 @@ fn role_accepts_content(role: HostBuildClosureItemRole, content: &HostBuildClosu
         ) | (
             HostBuildClosureItemRole::CargoResolutionRecord
                 | HostBuildClosureItemRole::TargetFactsRecord
-                | HostBuildClosureItemRole::RustcSettingsRecord,
+                | HostBuildClosureItemRole::RustcSettingsRecord
+                | HostBuildClosureItemRole::ArtifactSelectorRecord,
             HostBuildClosureContent::CanonicalRecord { .. }
         ) | (
             HostBuildClosureItemRole::FeatureSemanticsEvidence,
