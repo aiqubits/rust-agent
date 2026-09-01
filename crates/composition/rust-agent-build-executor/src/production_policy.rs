@@ -448,6 +448,24 @@ impl NormalizedProductionBuildPolicy {
         &self.policy
     }
 
+    pub fn reviewer_policy_digest(
+        &self,
+        id: &str,
+    ) -> Result<Option<String>, ProductionBuildPolicyError> {
+        self.policy
+            .attestation
+            .trusted_reviewer_policies
+            .iter()
+            .find(|policy| policy.id == id)
+            .map(|policy| {
+                Ok(hex::encode(canonical::domain_hash(
+                    b"rust-agent-trusted-reviewer-policy-v1\0",
+                    policy,
+                )?))
+            })
+            .transpose()
+    }
+
     pub fn enforcement_identity(
         &self,
         requirements: &BuildRequirements,

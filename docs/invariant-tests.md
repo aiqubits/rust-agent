@@ -58,6 +58,11 @@ implementation exists.
 | Complete policy identity includes concrete runner/fetch/trust mapping, while BuildEnforcementIdentity is path-free/trust-free and binds selected build inputs plus exact target facts, Cargo resolution/config, profile, artifact, panic, rustc settings and prefix-remap schema | `production_policy::policy_and_enforcement_identity_have_separate_stable_domains`, `production_policy::production_policy_rejects_untrusted_or_ambient_surfaces` |
 | Production policy normalization is order-independent and both schema domain digests are frozen | `production_policy::normalization_is_order_independent_and_schema_digest_is_frozen` |
 | Build requirements select a minimal typed executable/read-input/environment projection; missing or cross-kind mappings fail closed | `production_policy::requirement_resolution_is_typed_and_minimal` |
+| HostBuildInputClosure has an order-independent frozen aggregate identity over role-checked canonical metadata items, exact policy/enforcement context and standalone/final Host Cargo unit graphs | `host_input_closure::closure_digest_is_order_independent_and_stage_chain_is_exact` |
+| Host manifest/lock/config, package/emitted trees, Cargo resolution, target facts/custom spec and rustc settings are cardinality-, logical-path-, content-kind- and context-checked; any drift changes identity or fails closed | `host_input_closure::item_and_context_drift_fail_before_stage_receipts`, `host_input_closure::required_roles_paths_content_and_custom_specs_are_closed` |
+| Closure planner identity matches the Rust/Cargo 1.97.1 production policy, and every feature-semantics evidence item is exact and bound to a trusted reviewer policy | `host_input_closure::policy_planner_and_feature_evidence_are_cross_checked` |
+| Development pre/build-host/post closure receipts are closed, mutation-detecting, exact-input consistent and permanently non-deployable | `host_input_closure::closure_digest_is_order_independent_and_stage_chain_is_exact`, `host_input_closure::closed_json_and_stage_receipt_mutations_fail_closed` |
 
-These tests do not cover or imply the still-missing production sandbox, escape suite, trusted
-completion handle, signed executor attestation or deployable artifact path.
+These tests do not cover or imply the still-missing closure materializer/mount verifier, production
+sandbox, actual unit observer, escape suite, trusted completion handle, signed executor attestation
+or deployable artifact path.

@@ -7,7 +7,7 @@ represented in `docs/invariant-tests.md` and all applicable gates pass.
 |---|---|---|
 | 0 — repository and contract | Complete | Rust/Cargo 1.97.1 is synchronized across local toolchain targets, workspace MSRV, generated manifests and CI; workspace/deny/ADR, effect-free core/runtime contracts, checked lifecycle identities and reservation schema, closed metadata/target parsing, resource-namespace bootstrap graph, Host/runtime metadata, canonical Host Cargo unit-graph schema, privacy compile-fail tests and every Phase 0 acceptance mapping pass. The lightweight Session API remains a Phase 2 deliverable; Phase 0 has an automated absence guard so no Agent dependency is exposed early. |
 | 1A — generated graph proof | Complete | Deterministic bounded resolver, property/oracle tests, source snapshots, real Cargo graph absence/presence, manifests, locked development build, controlled build requirements, integration emission/verification, independent Native Host/type-identity tests, same-module Rust WASM Host compilation, JavaScript WASM post-link packaging/Node execution, native backend/WebView IPC isolation, the six-target library matrix and the external shared-feature Host fixture pass. |
-| 1B — Linux production build | In progress | The closed Linux production BuildExecutionPolicy schema, full runner/trust digest and path-free requirement-minimal BuildEnforcementIdentity are implemented. Pinned planner/fetch runner, HostBuildInputClosure, namespace/Landlock/seccomp backend, actual unit observer, descendant escape suite, completion-handle signer, production pre/build-host/post and deployable output remain required. |
+| 1B — Linux production build | In progress | The closed Linux production BuildExecutionPolicy/BuildEnforcementIdentity and HostBuildInputClosure schemas are implemented, including canonical item metadata, policy/toolchain/context/graph/evidence cross-checks and non-deployable pre/build-host/post input receipts. Pinned Cargo planner/fetch runner, closure snapshot materializer/mount verifier, namespace/Landlock/seccomp backend, actual unit observer, descendant escape suite, completion-handle signer, signed production pre/build-host/post and deployable output remain required. |
 | 2 — minimal runtime spine | Not started | Phase 1A gate passed; implementation must provide the real minimal runtime behavior and must not be represented by empty product crates. |
 | 3 — tool execution plane | Not started | Starts after the Phase 1A contract is stable. |
 | 4 — local execution providers | Not started | Real-target security regressions required. |
@@ -76,7 +76,18 @@ No test result above is evidence for Phase 1B deployability or for a Phase 2+ ru
 - concrete Host path, fetch mirror, policy id and signer/reviewer/helper rotation change the full
   policy digest but not build-output enforcement identity, while selected tool/input/environment
   content or enforcement semantics change the latter.
+- `HostBuildInputClosure` requires the Host manifest/lock/config chain, Host package and emitted
+  composition snapshot trees, Cargo resolution, target facts/custom spec, rustc settings and any
+  feature-semantics evidence as role-checked logical items under one canonical read-only metadata
+  contract; missing, duplicate, path-escaping, wrong-kind or context-mismatched items fail closed;
+- the closure cross-checks the normalized production policy and requirement-minimal enforcement
+  identity, pinned Cargo/rustc planner identity, build-host/target/profile and standalone/final
+  Cargo unit-graph digests. Trusted feature evidence must match a reviewer policy from the same
+  normalized BuildExecutionPolicy;
+- development pre/build-host/post receipts bind the exact same closure/policy/enforcement/graph/
+  feature-delta inputs and are permanently `deployable=false`; stage reordering, mutation or mixed
+  closures are rejected.
 
-This evidence establishes only the first Phase 1B policy boundary. It cannot authorize a
-production build or produce `deployable=true` without the remaining trusted backend and signed
-attestation gates.
+This evidence establishes the policy and input-closure boundaries only. It cannot authorize a
+production build or produce `deployable=true` without the remaining snapshot materializer,
+trusted backend, actual unit observation, escape suite and signed attestation gates.

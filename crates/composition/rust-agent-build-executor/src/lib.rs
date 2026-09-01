@@ -7,6 +7,7 @@
 mod artifact;
 mod cargo_unit_graph;
 mod host_feature;
+mod host_input_closure;
 mod integration;
 mod policy;
 mod production_policy;
@@ -35,6 +36,12 @@ pub use host_feature::{
     HostFeaturePolicyError, HostFeaturePolicyStageDigests, HostFeatureUnionPolicy,
     HostFeatureUnitObservation, NormalizedHostFeaturePolicy, ProductBuildContribution,
     verify_development_host_feature_union,
+};
+pub use host_input_closure::{
+    CanonicalSnapshotMetadataContract, DevelopmentHostClosureStageReceipt, HostBuildClosureContent,
+    HostBuildClosureItem, HostBuildClosureItemRole, HostBuildClosureStage, HostBuildInputClosure,
+    HostBuildInputClosureError, HostFeaturePolicyClosure, NormalizedHostBuildClosureItem,
+    NormalizedHostBuildInputClosure, verify_development_host_closure_stage_chain,
 };
 pub use integration::{
     IntegrationError, emit_integration, verify_integration, verify_integration_topology,
