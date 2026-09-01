@@ -203,6 +203,7 @@ fn record(
         metadata_contract: CanonicalSnapshotMetadataContract::ReadOnlyEpochV1,
         content: HostBuildClosureContent::CanonicalRecord {
             digest: digest(byte),
+            bytes_sha256: digest(byte),
         },
     }
 }
@@ -218,7 +219,10 @@ fn record_digest(
         id: id.into(),
         logical_path: path.into(),
         metadata_contract: CanonicalSnapshotMetadataContract::ReadOnlyEpochV1,
-        content: HostBuildClosureContent::CanonicalRecord { digest },
+        content: HostBuildClosureContent::CanonicalRecord {
+            bytes_sha256: digest.clone(),
+            digest,
+        },
     }
 }
 
@@ -313,7 +317,7 @@ fn closure_digest_is_order_independent_and_stage_chain_is_exact() {
     assert_eq!(normalized.items(), reordered.items());
     assert_eq!(
         normalized.digest(),
-        "617bcaba945ed6f6186270552eed224bef3326632a2f9900b132037fce42e50a"
+        "9af5c47b0442599e419bcd12c8472ca448b545ed0af689b232bdeca5d45ce4bc"
     );
 
     let pre = normalized
@@ -349,6 +353,21 @@ fn item_and_context_drift_fail_before_stage_receipts() {
     };
     assert_ne!(
         lock_drift.normalize(&policy).unwrap().digest(),
+        baseline.digest()
+    );
+
+    let mut record_bytes_drift = closure(&policy);
+    let record = record_bytes_drift
+        .items
+        .iter_mut()
+        .find(|item| item.role == HostBuildClosureItemRole::CargoResolutionRecord)
+        .unwrap();
+    let HostBuildClosureContent::CanonicalRecord { bytes_sha256, .. } = &mut record.content else {
+        panic!("Cargo resolution item must be a canonical record");
+    };
+    *bytes_sha256 = digest('1');
+    assert_ne!(
+        record_bytes_drift.normalize(&policy).unwrap().digest(),
         baseline.digest()
     );
 
@@ -417,6 +436,7 @@ fn required_roles_paths_content_and_custom_specs_are_closed() {
         .unwrap()
         .content = HostBuildClosureContent::CanonicalRecord {
         digest: digest('1'),
+        bytes_sha256: digest('1'),
     };
     assert!(matches!(
         artifact_selector_drift.normalize(&policy),
@@ -429,12 +449,33 @@ fn required_roles_paths_content_and_custom_specs_are_closed() {
         escape.normalize(&policy),
         Err(HostBuildInputClosureError::InvalidLogicalPath(_))
     ));
+    for invalid_path in [
+        "/rust-agent/closure/host\\Cargo.toml",
+        "/rust-agent/closure/host/Cargo\n.toml",
+        "/rust-agent/closure/host/Cargó.toml",
+    ] {
+        let mut invalid = closure(&policy);
+        invalid.items[0].logical_path = invalid_path.into();
+        assert!(matches!(
+            invalid.normalize(&policy),
+            Err(HostBuildInputClosureError::InvalidLogicalPath(_))
+        ));
+    }
 
     let mut duplicate = closure(&policy);
     duplicate.items[1].logical_path = duplicate.items[0].logical_path.clone();
     assert!(matches!(
         duplicate.normalize(&policy),
         Err(HostBuildInputClosureError::DuplicateItem(_))
+    ));
+
+    let mut case_collision = closure(&policy);
+    case_collision.items[1].logical_path = case_collision.items[0]
+        .logical_path
+        .replace("Cargo.toml", "cargo.toml");
+    assert!(matches!(
+        case_collision.normalize(&policy),
+        Err(HostBuildInputClosureError::LogicalPathCaseCollision { .. })
     ));
 
     let mut wrong_content = closure(&policy);
@@ -544,6 +585,21 @@ fn closed_json_and_stage_receipt_mutations_fail_closed() {
     let unknown = json.replacen('{', "{\"ambient-home\":true,", 1);
     assert!(matches!(
         HostBuildInputClosure::from_json(&unknown),
+        Err(HostBuildInputClosureError::Json(_))
+    ));
+    let mut missing_record_bytes: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let record = missing_record_bytes["items"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|item| item["content"]["kind"] == "canonical-record")
+        .unwrap();
+    record["content"]
+        .as_object_mut()
+        .unwrap()
+        .remove("bytes-sha256");
+    assert!(matches!(
+        HostBuildInputClosure::from_json(&serde_json::to_string(&missing_record_bytes).unwrap()),
         Err(HostBuildInputClosureError::Json(_))
     ));
 

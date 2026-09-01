@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "algorithm": "sha256-rust-agent-composition-v1",
-  "composition-hash": "e47047b2b46dbf9cacde00acb3d7a30ab1ebcbd75597c780ec53b55e7f87a2f3",
+  "composition-hash": "e00b2629133bf366edeefcf7f790f77c0535d8c38fce2bddeeb15a66c0771771",
   "build-kind": "library",
   "profile-name": "fixture-minimal",
   "normalized-profile": {
@@ -222,19 +222,71 @@
       "id": "fixture-api",
       "package": "rust-agent-fixture-api",
       "logical-path": "tests/fixtures/api/fixture-api",
-      "tree-digest": "92c3a91c00d95dddb72f8cf8b2e4861cbe3afca147eda0e987bc3d428195edf1",
-      "files": [
+      "tree-digest": "1c7fb2bfc3b449c6edf542722e73dab37fbeb1ef171a644ebdc0d115f7b95eea",
+      "tree-entries": [
         {
           "path": "Cargo.toml",
-          "digest": "c6d030d5208e9a6b7f19973f03a741fea138597d12711ee981456a584632f935",
-          "bytes": 494,
-          "executable": false
+          "kind": {
+            "kind": "regular-file",
+            "sha256": "c6d030d5208e9a6b7f19973f03a741fea138597d12711ee981456a584632f935",
+            "bytes": 494
+          },
+          "metadata": {
+            "contract": "read-only-epoch-v1",
+            "mode": 292,
+            "uid": 0,
+            "gid": 0,
+            "atime-nanos": 0,
+            "mtime-nanos": 0,
+            "ctime-nanos": 0,
+            "birthtime-nanos": 0,
+            "link-count": 1,
+            "device": 0,
+            "inode": 0,
+            "generation": 0
+          }
+        },
+        {
+          "path": "src",
+          "kind": {
+            "kind": "directory"
+          },
+          "metadata": {
+            "contract": "read-only-epoch-v1",
+            "mode": 365,
+            "uid": 0,
+            "gid": 0,
+            "atime-nanos": 0,
+            "mtime-nanos": 0,
+            "ctime-nanos": 0,
+            "birthtime-nanos": 0,
+            "link-count": 1,
+            "device": 0,
+            "inode": 0,
+            "generation": 0
+          }
         },
         {
           "path": "src/lib.rs",
-          "digest": "b224b8aef4be43ace5bdb9d1246309204375d28f661ea3a838b79faad0a5ff98",
-          "bytes": 3245,
-          "executable": false
+          "kind": {
+            "kind": "regular-file",
+            "sha256": "b224b8aef4be43ace5bdb9d1246309204375d28f661ea3a838b79faad0a5ff98",
+            "bytes": 3245
+          },
+          "metadata": {
+            "contract": "read-only-epoch-v1",
+            "mode": 292,
+            "uid": 0,
+            "gid": 0,
+            "atime-nanos": 0,
+            "mtime-nanos": 0,
+            "ctime-nanos": 0,
+            "birthtime-nanos": 0,
+            "link-count": 1,
+            "device": 0,
+            "inode": 0,
+            "generation": 0
+          }
         }
       ]
     },
@@ -242,19 +294,71 @@
       "id": "fixture-driver",
       "package": "rust-agent-fixture-driver",
       "logical-path": "tests/fixtures/components/fixture-driver",
-      "tree-digest": "c17198e85c89d484e0ff66efd458bb0a0ebe704f952c36c9a10a6192e486d841",
-      "files": [
+      "tree-digest": "df3111b875fc8c2abdd5e82fcff38d3ad370f5804ee9490bf7d02727dbd396c0",
+      "tree-entries": [
         {
           "path": "Cargo.toml",
-          "digest": "aafd15ea80f3472425371bc3116d262e3bb087a89a0a382a1ecbe4f1e2889fea",
-          "bytes": 465,
-          "executable": false
+          "kind": {
+            "kind": "regular-file",
+            "sha256": "aafd15ea80f3472425371bc3116d262e3bb087a89a0a382a1ecbe4f1e2889fea",
+            "bytes": 465
+          },
+          "metadata": {
+            "contract": "read-only-epoch-v1",
+            "mode": 292,
+            "uid": 0,
+            "gid": 0,
+            "atime-nanos": 0,
+            "mtime-nanos": 0,
+            "ctime-nanos": 0,
+            "birthtime-nanos": 0,
+            "link-count": 1,
+            "device": 0,
+            "inode": 0,
+            "generation": 0
+          }
+        },
+        {
+          "path": "src",
+          "kind": {
+            "kind": "directory"
+          },
+          "metadata": {
+            "contract": "read-only-epoch-v1",
+            "mode": 365,
+            "uid": 0,
+            "gid": 0,
+            "atime-nanos": 0,
+            "mtime-nanos": 0,
+            "ctime-nanos": 0,
+            "birthtime-nanos": 0,
+            "link-count": 1,
+            "device": 0,
+            "inode": 0,
+            "generation": 0
+          }
         },
         {
           "path": "src/lib.rs",
-          "digest": "cee9ac2b2cf8b66591c96272890b5634b89063b0eb5c29bfb95e6df744fc6498",
-          "bytes": 1368,
-          "executable": false
+          "kind": {
+            "kind": "regular-file",
+            "sha256": "cee9ac2b2cf8b66591c96272890b5634b89063b0eb5c29bfb95e6df744fc6498",
+            "bytes": 1368
+          },
+          "metadata": {
+            "contract": "read-only-epoch-v1",
+            "mode": 292,
+            "uid": 0,
+            "gid": 0,
+            "atime-nanos": 0,
+            "mtime-nanos": 0,
+            "ctime-nanos": 0,
+            "birthtime-nanos": 0,
+            "link-count": 1,
+            "device": 0,
+            "inode": 0,
+            "generation": 0
+          }
         }
       ]
     },
@@ -262,19 +366,71 @@
       "id": "fixture-model",
       "package": "rust-agent-fixture-model",
       "logical-path": "tests/fixtures/components/fixture-model",
-      "tree-digest": "0fdfff1d33f0614718890a701df5eef75166355378b3b7d50cf42d8e15600244",
-      "files": [
+      "tree-digest": "eb98bd973eb454f8677787e8b71083427b9cdd1abd07fcc9862798b93bc09d4f",
+      "tree-entries": [
         {
           "path": "Cargo.toml",
-          "digest": "e51b6086536fac7e0a12fa3946f378ffbe546eb464ae18f17aa91a64ebbf16de",
-          "bytes": 465,
-          "executable": false
+          "kind": {
+            "kind": "regular-file",
+            "sha256": "e51b6086536fac7e0a12fa3946f378ffbe546eb464ae18f17aa91a64ebbf16de",
+            "bytes": 465
+          },
+          "metadata": {
+            "contract": "read-only-epoch-v1",
+            "mode": 292,
+            "uid": 0,
+            "gid": 0,
+            "atime-nanos": 0,
+            "mtime-nanos": 0,
+            "ctime-nanos": 0,
+            "birthtime-nanos": 0,
+            "link-count": 1,
+            "device": 0,
+            "inode": 0,
+            "generation": 0
+          }
+        },
+        {
+          "path": "src",
+          "kind": {
+            "kind": "directory"
+          },
+          "metadata": {
+            "contract": "read-only-epoch-v1",
+            "mode": 365,
+            "uid": 0,
+            "gid": 0,
+            "atime-nanos": 0,
+            "mtime-nanos": 0,
+            "ctime-nanos": 0,
+            "birthtime-nanos": 0,
+            "link-count": 1,
+            "device": 0,
+            "inode": 0,
+            "generation": 0
+          }
         },
         {
           "path": "src/lib.rs",
-          "digest": "b8504a6d991f8e1462783232fb52d52ea7351a0286bd00da73ce1c5b02927f98",
-          "bytes": 920,
-          "executable": false
+          "kind": {
+            "kind": "regular-file",
+            "sha256": "b8504a6d991f8e1462783232fb52d52ea7351a0286bd00da73ce1c5b02927f98",
+            "bytes": 920
+          },
+          "metadata": {
+            "contract": "read-only-epoch-v1",
+            "mode": 292,
+            "uid": 0,
+            "gid": 0,
+            "atime-nanos": 0,
+            "mtime-nanos": 0,
+            "ctime-nanos": 0,
+            "birthtime-nanos": 0,
+            "link-count": 1,
+            "device": 0,
+            "inode": 0,
+            "generation": 0
+          }
         }
       ]
     },
@@ -282,19 +438,71 @@
       "id": "fixture-runtime",
       "package": "rust-agent-fixture-runtime",
       "logical-path": "tests/fixtures/runtime/fixture-runtime",
-      "tree-digest": "9d0f2b94da39506bd3361a69996d9a92aea4795edb1abd54c7306c199ab13d11",
-      "files": [
+      "tree-digest": "4005bdec814b17bfa7ae11f551404919e3ffb6bf1bb35995725fc6337602ca8c",
+      "tree-entries": [
         {
           "path": "Cargo.toml",
-          "digest": "5280eebc75fee3fa1e3b52619563f594f3c07b925770ae89af1ed41d8ea6c507",
-          "bytes": 378,
-          "executable": false
+          "kind": {
+            "kind": "regular-file",
+            "sha256": "5280eebc75fee3fa1e3b52619563f594f3c07b925770ae89af1ed41d8ea6c507",
+            "bytes": 378
+          },
+          "metadata": {
+            "contract": "read-only-epoch-v1",
+            "mode": 292,
+            "uid": 0,
+            "gid": 0,
+            "atime-nanos": 0,
+            "mtime-nanos": 0,
+            "ctime-nanos": 0,
+            "birthtime-nanos": 0,
+            "link-count": 1,
+            "device": 0,
+            "inode": 0,
+            "generation": 0
+          }
+        },
+        {
+          "path": "src",
+          "kind": {
+            "kind": "directory"
+          },
+          "metadata": {
+            "contract": "read-only-epoch-v1",
+            "mode": 365,
+            "uid": 0,
+            "gid": 0,
+            "atime-nanos": 0,
+            "mtime-nanos": 0,
+            "ctime-nanos": 0,
+            "birthtime-nanos": 0,
+            "link-count": 1,
+            "device": 0,
+            "inode": 0,
+            "generation": 0
+          }
         },
         {
           "path": "src/lib.rs",
-          "digest": "3c1dd048db25921b2b7b711e9641eae9f20e56aa6ed1cf8370e0108c65340a8f",
-          "bytes": 535,
-          "executable": false
+          "kind": {
+            "kind": "regular-file",
+            "sha256": "3c1dd048db25921b2b7b711e9641eae9f20e56aa6ed1cf8370e0108c65340a8f",
+            "bytes": 535
+          },
+          "metadata": {
+            "contract": "read-only-epoch-v1",
+            "mode": 292,
+            "uid": 0,
+            "gid": 0,
+            "atime-nanos": 0,
+            "mtime-nanos": 0,
+            "ctime-nanos": 0,
+            "birthtime-nanos": 0,
+            "link-count": 1,
+            "device": 0,
+            "inode": 0,
+            "generation": 0
+          }
         }
       ]
     },
@@ -302,19 +510,71 @@
       "id": "rust-agent-core",
       "package": "rust-agent-core",
       "logical-path": "crates/api/rust-agent-core",
-      "tree-digest": "1fe202de215af703c58e07a75b175bc9e53e7d6e0a278fbead20248dcc19333c",
-      "files": [
+      "tree-digest": "235e05a66b2bafb4055f5f6af5e914ae9875a12557fc9412e99439d10da98ab9",
+      "tree-entries": [
         {
           "path": "Cargo.toml",
-          "digest": "dbb3b067274b11bd3a36fa0749a29cefc431ecfb4bfdf11708ac90c77a69fea0",
-          "bytes": 324,
-          "executable": false
+          "kind": {
+            "kind": "regular-file",
+            "sha256": "dbb3b067274b11bd3a36fa0749a29cefc431ecfb4bfdf11708ac90c77a69fea0",
+            "bytes": 324
+          },
+          "metadata": {
+            "contract": "read-only-epoch-v1",
+            "mode": 292,
+            "uid": 0,
+            "gid": 0,
+            "atime-nanos": 0,
+            "mtime-nanos": 0,
+            "ctime-nanos": 0,
+            "birthtime-nanos": 0,
+            "link-count": 1,
+            "device": 0,
+            "inode": 0,
+            "generation": 0
+          }
+        },
+        {
+          "path": "src",
+          "kind": {
+            "kind": "directory"
+          },
+          "metadata": {
+            "contract": "read-only-epoch-v1",
+            "mode": 365,
+            "uid": 0,
+            "gid": 0,
+            "atime-nanos": 0,
+            "mtime-nanos": 0,
+            "ctime-nanos": 0,
+            "birthtime-nanos": 0,
+            "link-count": 1,
+            "device": 0,
+            "inode": 0,
+            "generation": 0
+          }
         },
         {
           "path": "src/lib.rs",
-          "digest": "88fa65b11a16c8be1e558b5eefa9654b7ab9cdc6cb6c90cfaf373f66d8cbaff4",
-          "bytes": 17179,
-          "executable": false
+          "kind": {
+            "kind": "regular-file",
+            "sha256": "88fa65b11a16c8be1e558b5eefa9654b7ab9cdc6cb6c90cfaf373f66d8cbaff4",
+            "bytes": 17179
+          },
+          "metadata": {
+            "contract": "read-only-epoch-v1",
+            "mode": 292,
+            "uid": 0,
+            "gid": 0,
+            "atime-nanos": 0,
+            "mtime-nanos": 0,
+            "ctime-nanos": 0,
+            "birthtime-nanos": 0,
+            "link-count": 1,
+            "device": 0,
+            "inode": 0,
+            "generation": 0
+          }
         }
       ]
     },
@@ -322,73 +582,309 @@
       "id": "rust-agent-runtime-api",
       "package": "rust-agent-runtime-api",
       "logical-path": "crates/api/rust-agent-runtime-api",
-      "tree-digest": "d6126accae138477bab154f4607ee21c17737dcf49c4fe4b744da1c4169dcc1d",
-      "files": [
+      "tree-digest": "e50eaef43e4d2ac51283b080ecabbed7f9a90d3c1688fc1e6db90a34a67cb8d4",
+      "tree-entries": [
         {
           "path": "Cargo.toml",
-          "digest": "e51d278f6bff808cf5bfc9dd14be2677dc7d5ae86484b61fd52543793f2848ae",
-          "bytes": 442,
-          "executable": false
+          "kind": {
+            "kind": "regular-file",
+            "sha256": "e51d278f6bff808cf5bfc9dd14be2677dc7d5ae86484b61fd52543793f2848ae",
+            "bytes": 442
+          },
+          "metadata": {
+            "contract": "read-only-epoch-v1",
+            "mode": 292,
+            "uid": 0,
+            "gid": 0,
+            "atime-nanos": 0,
+            "mtime-nanos": 0,
+            "ctime-nanos": 0,
+            "birthtime-nanos": 0,
+            "link-count": 1,
+            "device": 0,
+            "inode": 0,
+            "generation": 0
+          }
+        },
+        {
+          "path": "src",
+          "kind": {
+            "kind": "directory"
+          },
+          "metadata": {
+            "contract": "read-only-epoch-v1",
+            "mode": 365,
+            "uid": 0,
+            "gid": 0,
+            "atime-nanos": 0,
+            "mtime-nanos": 0,
+            "ctime-nanos": 0,
+            "birthtime-nanos": 0,
+            "link-count": 1,
+            "device": 0,
+            "inode": 0,
+            "generation": 0
+          }
         },
         {
           "path": "src/lib.rs",
-          "digest": "f569caa5da6c15fa5dcbf8b016bb4b97ef69cdb50b7cad4af306c12f79ddfb12",
-          "bytes": 14246,
-          "executable": false
+          "kind": {
+            "kind": "regular-file",
+            "sha256": "f569caa5da6c15fa5dcbf8b016bb4b97ef69cdb50b7cad4af306c12f79ddfb12",
+            "bytes": 14246
+          },
+          "metadata": {
+            "contract": "read-only-epoch-v1",
+            "mode": 292,
+            "uid": 0,
+            "gid": 0,
+            "atime-nanos": 0,
+            "mtime-nanos": 0,
+            "ctime-nanos": 0,
+            "birthtime-nanos": 0,
+            "link-count": 1,
+            "device": 0,
+            "inode": 0,
+            "generation": 0
+          }
+        },
+        {
+          "path": "tests",
+          "kind": {
+            "kind": "directory"
+          },
+          "metadata": {
+            "contract": "read-only-epoch-v1",
+            "mode": 365,
+            "uid": 0,
+            "gid": 0,
+            "atime-nanos": 0,
+            "mtime-nanos": 0,
+            "ctime-nanos": 0,
+            "birthtime-nanos": 0,
+            "link-count": 1,
+            "device": 0,
+            "inode": 0,
+            "generation": 0
+          }
         },
         {
           "path": "tests/privacy.rs",
-          "digest": "ac055943b9a356626e241527e005ea3674bd74b5237f5405f9e3256476fe4db5",
-          "bytes": 143,
-          "executable": false
+          "kind": {
+            "kind": "regular-file",
+            "sha256": "ac055943b9a356626e241527e005ea3674bd74b5237f5405f9e3256476fe4db5",
+            "bytes": 143
+          },
+          "metadata": {
+            "contract": "read-only-epoch-v1",
+            "mode": 292,
+            "uid": 0,
+            "gid": 0,
+            "atime-nanos": 0,
+            "mtime-nanos": 0,
+            "ctime-nanos": 0,
+            "birthtime-nanos": 0,
+            "link-count": 1,
+            "device": 0,
+            "inode": 0,
+            "generation": 0
+          }
+        },
+        {
+          "path": "tests/ui",
+          "kind": {
+            "kind": "directory"
+          },
+          "metadata": {
+            "contract": "read-only-epoch-v1",
+            "mode": 365,
+            "uid": 0,
+            "gid": 0,
+            "atime-nanos": 0,
+            "mtime-nanos": 0,
+            "ctime-nanos": 0,
+            "birthtime-nanos": 0,
+            "link-count": 1,
+            "device": 0,
+            "inode": 0,
+            "generation": 0
+          }
         },
         {
           "path": "tests/ui/forge_event_cursor.rs",
-          "digest": "dafd74e24f882306f6e7885ad7fe79879383ab9347866c2e576823d3c8194f91",
-          "bytes": 101,
-          "executable": false
+          "kind": {
+            "kind": "regular-file",
+            "sha256": "dafd74e24f882306f6e7885ad7fe79879383ab9347866c2e576823d3c8194f91",
+            "bytes": 101
+          },
+          "metadata": {
+            "contract": "read-only-epoch-v1",
+            "mode": 292,
+            "uid": 0,
+            "gid": 0,
+            "atime-nanos": 0,
+            "mtime-nanos": 0,
+            "ctime-nanos": 0,
+            "birthtime-nanos": 0,
+            "link-count": 1,
+            "device": 0,
+            "inode": 0,
+            "generation": 0
+          }
         },
         {
           "path": "tests/ui/forge_event_cursor.stderr",
-          "digest": "bbbb7de5cf0a2026fa096216af8912ea720748fc078adf31de5d2f3074614b72",
-          "bytes": 548,
-          "executable": false
+          "kind": {
+            "kind": "regular-file",
+            "sha256": "bbbb7de5cf0a2026fa096216af8912ea720748fc078adf31de5d2f3074614b72",
+            "bytes": 548
+          },
+          "metadata": {
+            "contract": "read-only-epoch-v1",
+            "mode": 292,
+            "uid": 0,
+            "gid": 0,
+            "atime-nanos": 0,
+            "mtime-nanos": 0,
+            "ctime-nanos": 0,
+            "birthtime-nanos": 0,
+            "link-count": 1,
+            "device": 0,
+            "inode": 0,
+            "generation": 0
+          }
         },
         {
           "path": "tests/ui/forge_lifecycle_reservation.rs",
-          "digest": "f00abd64cd67e46e2f1ab1aa404418789b2502da3fca158eed8750a02375a518",
-          "bytes": 827,
-          "executable": false
+          "kind": {
+            "kind": "regular-file",
+            "sha256": "f00abd64cd67e46e2f1ab1aa404418789b2502da3fca158eed8750a02375a518",
+            "bytes": 827
+          },
+          "metadata": {
+            "contract": "read-only-epoch-v1",
+            "mode": 292,
+            "uid": 0,
+            "gid": 0,
+            "atime-nanos": 0,
+            "mtime-nanos": 0,
+            "ctime-nanos": 0,
+            "birthtime-nanos": 0,
+            "link-count": 1,
+            "device": 0,
+            "inode": 0,
+            "generation": 0
+          }
         },
         {
           "path": "tests/ui/forge_lifecycle_reservation.stderr",
-          "digest": "296a3b97bec10c2cc3cdb2896af1f93b5fb2fa65719368e41c4a5573b552aa6c",
-          "bytes": 1191,
-          "executable": false
+          "kind": {
+            "kind": "regular-file",
+            "sha256": "296a3b97bec10c2cc3cdb2896af1f93b5fb2fa65719368e41c4a5573b552aa6c",
+            "bytes": 1191
+          },
+          "metadata": {
+            "contract": "read-only-epoch-v1",
+            "mode": 292,
+            "uid": 0,
+            "gid": 0,
+            "atime-nanos": 0,
+            "mtime-nanos": 0,
+            "ctime-nanos": 0,
+            "birthtime-nanos": 0,
+            "link-count": 1,
+            "device": 0,
+            "inode": 0,
+            "generation": 0
+          }
         },
         {
           "path": "tests/ui/forge_operation_id.rs",
-          "digest": "88c847ce095e2eee4f1d8939df18673d7274da4f6d00df34e47ebe9023c3fab1",
-          "bytes": 160,
-          "executable": false
+          "kind": {
+            "kind": "regular-file",
+            "sha256": "88c847ce095e2eee4f1d8939df18673d7274da4f6d00df34e47ebe9023c3fab1",
+            "bytes": 160
+          },
+          "metadata": {
+            "contract": "read-only-epoch-v1",
+            "mode": 292,
+            "uid": 0,
+            "gid": 0,
+            "atime-nanos": 0,
+            "mtime-nanos": 0,
+            "ctime-nanos": 0,
+            "birthtime-nanos": 0,
+            "link-count": 1,
+            "device": 0,
+            "inode": 0,
+            "generation": 0
+          }
         },
         {
           "path": "tests/ui/forge_operation_id.stderr",
-          "digest": "b20238fccf51fc53d8a4763469ba1a1c2dfbf6e8aa826a486344f3cb8838dd06",
-          "bytes": 532,
-          "executable": false
+          "kind": {
+            "kind": "regular-file",
+            "sha256": "b20238fccf51fc53d8a4763469ba1a1c2dfbf6e8aa826a486344f3cb8838dd06",
+            "bytes": 532
+          },
+          "metadata": {
+            "contract": "read-only-epoch-v1",
+            "mode": 292,
+            "uid": 0,
+            "gid": 0,
+            "atime-nanos": 0,
+            "mtime-nanos": 0,
+            "ctime-nanos": 0,
+            "birthtime-nanos": 0,
+            "link-count": 1,
+            "device": 0,
+            "inode": 0,
+            "generation": 0
+          }
         },
         {
           "path": "tests/ui/forge_runtime_identity.rs",
-          "digest": "1a83003edfa4cdbd3713cb06bb96496ff567bf613ed79a49d80b1a1771cab232",
-          "bytes": 150,
-          "executable": false
+          "kind": {
+            "kind": "regular-file",
+            "sha256": "1a83003edfa4cdbd3713cb06bb96496ff567bf613ed79a49d80b1a1771cab232",
+            "bytes": 150
+          },
+          "metadata": {
+            "contract": "read-only-epoch-v1",
+            "mode": 292,
+            "uid": 0,
+            "gid": 0,
+            "atime-nanos": 0,
+            "mtime-nanos": 0,
+            "ctime-nanos": 0,
+            "birthtime-nanos": 0,
+            "link-count": 1,
+            "device": 0,
+            "inode": 0,
+            "generation": 0
+          }
         },
         {
           "path": "tests/ui/forge_runtime_identity.stderr",
-          "digest": "1ded5d6a929f37630e34a9d5798465ebefcf4004bdac45e72cb783843c9d48c3",
-          "bytes": 432,
-          "executable": false
+          "kind": {
+            "kind": "regular-file",
+            "sha256": "1ded5d6a929f37630e34a9d5798465ebefcf4004bdac45e72cb783843c9d48c3",
+            "bytes": 432
+          },
+          "metadata": {
+            "contract": "read-only-epoch-v1",
+            "mode": 292,
+            "uid": 0,
+            "gid": 0,
+            "atime-nanos": 0,
+            "mtime-nanos": 0,
+            "ctime-nanos": 0,
+            "birthtime-nanos": 0,
+            "link-count": 1,
+            "device": 0,
+            "inode": 0,
+            "generation": 0
+          }
         }
       ]
     }

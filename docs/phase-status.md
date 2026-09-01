@@ -6,8 +6,8 @@ represented in `docs/invariant-tests.md` and all applicable gates pass.
 | Phase | Status | Evidence / remaining gate |
 |---|---|---|
 | 0 — repository and contract | Complete | Rust/Cargo 1.97.1 is synchronized across local toolchain targets, workspace MSRV, generated manifests and CI; workspace/deny/ADR, effect-free core/runtime contracts, checked lifecycle identities and reservation schema, closed metadata/target parsing, resource-namespace bootstrap graph, Host/runtime metadata, canonical Host Cargo unit-graph schema, privacy compile-fail tests and every Phase 0 acceptance mapping pass. The lightweight Session API remains a Phase 2 deliverable; Phase 0 has an automated absence guard so no Agent dependency is exposed early. |
-| 1A — generated graph proof | Complete | Deterministic bounded resolver, property/oracle tests, source snapshots, real Cargo graph absence/presence, manifests, locked development build, controlled build requirements, integration emission/verification, independent Native Host/type-identity tests, same-module Rust WASM Host compilation, JavaScript WASM post-link packaging/Node execution, native backend/WebView IPC isolation, the six-target library matrix and the external shared-feature Host fixture pass. |
-| 1B — Linux production build | In progress | Closed BuildExecutionPolicy/BuildEnforcementIdentity and HostBuildInputClosure schemas, typed artifact selection, exact pinned-Cargo planner invocation/unit-graph-v1 capability gates, request-bound raw-to-HostCargoUnitGraph normalization, Cargo.lock source closure/checksum/revision observations and non-deployable pre/build-host/post input receipts are implemented. A trusted unit-graph-enabled Cargo 1.97.1 runner and exact edge-semantics producer, isolated fetch executor, closure snapshot materializer/mount verifier, namespace/Landlock/seccomp backend, actual unit observer, descendant escape suite, completion-handle signer, signed production pre/build-host/post and deployable output remain required. |
+| 1A — generated graph proof | Complete | Deterministic bounded resolver, property/oracle tests, source snapshots using the shared canonical tree identity plus local mode/mtime projection checks, real Cargo graph absence/presence, manifests, locked development build, controlled build requirements, integration emission/verification, independent Native Host/type-identity tests, same-module Rust WASM Host compilation, JavaScript WASM post-link packaging/Node execution, native backend/WebView IPC isolation, the six-target library matrix and the external shared-feature Host fixture pass. |
+| 1B — Linux production build | In progress | Closed BuildExecutionPolicy/BuildEnforcementIdentity and HostBuildInputClosure schemas, typed artifact selection, exact pinned-Cargo planner invocation/unit-graph-v1 capability gates, request-bound raw-to-HostCargoUnitGraph normalization, Cargo.lock source closure/checksum/revision observations, shared `CanonicalSnapshotTree` and raw-byte-bound closure identities, a Linux local content-snapshot materializer with atomic no-clobber publication, limited mode/mtime storage re-verification, a closed expected mount-observation verifier and non-deployable pre/build-host/post input receipts are implemented. A trusted Linux mounted-view producer/backend that observes/enforces every canonical metadata field and immutable read-only access, descriptor-relative/`openat2` resistance to malicious source/parent/staging TOCTOU and same-UID staging replacement, role-typed canonical-record semantic reparse, an isolated fetch runner, a trusted unit-graph-enabled Cargo 1.97.1 planner and exact edge-semantics producer, actual unit observer, production pre/mount/post command wiring, target/config/tool probes, signed completion-handle attestation path, namespace/Landlock/seccomp enforcement, production manifests/SBOM/output identity and the descendant escape suite remain required; this phase cannot emit `deployable=true`. |
 | 2 — minimal runtime spine | Not started | Phase 1A gate passed; implementation must provide the real minimal runtime behavior and must not be represented by empty product crates. |
 | 3 — tool execution plane | Not started | Starts after the Phase 1A contract is stable. |
 | 4 — local execution providers | Not started | Real-target security regressions required. |
@@ -25,7 +25,9 @@ The Phase 0/1A baseline is intentionally development-only. Named tests cover:
 - deterministic CBOR/JCS inputs, target-fact digests and reproducible composition hashes;
 - resolver required closure, explicit disable, security denial, conflicts, bounded backtracking,
   decision exhaustion, provenance, property cases and a brute-force small-graph oracle;
-- generated source/Cargo/manifest goldens, transient Trybuild diagnostic exclusion and canonical-tree mutation detection;
+- generated source/Cargo/manifest goldens, preflight-bounded and streaming source snapshots,
+  transient tree pruning, canonical-tree mutation detection, atomic no-clobber publication and
+  fully verified exact-existing reuse;
 - real Cargo graph removal/addition of `rust-agent-fixture-fs-read`;
 - generated factory type checking and execution under a locked, offline, isolated Cargo home;
 - exact build-requirement kind authorization without runtime-effect expansion;
@@ -109,10 +111,44 @@ No test result above is evidence for Phase 1B deployability or for a Phase 2+ ru
   normalize into a domain-separated source closure. It must match the Host Cargo.lock item and
   every final Host unit package; fetched registry archive/git checkout/path snapshot observations
   require the exact locked package set and are order-independent and mutation detecting.
+- the shared closed `CanonicalSnapshotTree` schema sorts before domain-separated deterministic-CBOR
+  identity; bounds paths/entries/per-file and aggregate bytes; rejects invalid, duplicate,
+  case-fold-colliding or topologically incomplete paths; and fixes file/directory logical metadata
+  to the `ReadOnlyEpochV1` contract. Raw file SHA-256, file length and any metadata drift change
+  tree identity or fail closed;
+- schema-1 `canonical-record` items now require a separate raw `bytes-sha256` alongside their
+  semantic digest, while source-package manifests replace the old file-only records with the same
+  canonical tree entries used by Host inputs. These are corrections to unreleased development
+  contracts: old generated-composition goldens and identities, receipts, fixtures and closure
+  identities using the old shapes are intentionally invalidated, with no compatibility or
+  identity-preservation claim;
+- before staging or hashing, the Linux local snapshot materializer metadata-plans and bounds the
+  exact full-closure source set, source kind, entries, paths, per-file/aggregate bytes and union
+  overlay, then verifies raw bytes and semantic digests. It constructs a deterministic `deployable=false`
+  same-directory staging tree, projects file mode `0444`, directory mode `0555` and mtime epoch,
+  reverifies stored bytes/tree/canonical manifest plus that limited projection, publishes with
+  atomic no-clobber semantics and post-verifies the winner. An exact existing snapshot is reusable
+  only after the supplied live sources pass preflight; conflicting or mutated content is never
+  repaired or overwritten. Pre-publication rejection leaves no final destination. A failure after
+  rename is reported explicitly as published-but-verification-failed or
+  published-with-parent-durability-unknown, because deleting that published path would be unsafe;
+- the closed mount-observation verifier binds the snapshot manifest digest, logical mount root,
+  read-only claim and exact canonical entries, and rejects schema, context, entry or digest drift.
 
-This evidence establishes policy, input-closure, planner/normalizer/fetch input and observation
-contracts only. The installed stable Cargo 1.97.1 correctly fails the trusted unit-graph capability
-gate; synthetic edge semantics exercise normalization but are not production planner evidence. No
-code here can authorize a production build or produce `deployable=true` without the trusted
-unit-graph-enabled Cargo runner/edge-semantics producer, isolated fetch and snapshot materializers,
-trusted backend, actual unit observation, escape suite and signed attestation gates.
+This evidence establishes policy, input-closure, planner/normalizer/fetch-observation, local
+filesystem content-snapshot materialization and expected-observation verification contracts only.
+The backing filesystem's mode/mtime projection is not proof of logical uid/gid, atime/ctime,
+birthtime, link/device/inode/generation values or an immutable read-only mounted view. The
+installed stable Cargo 1.97.1 correctly fails the trusted unit-graph capability gate; synthetic
+edge semantics exercise normalization but are not production planner evidence. No code here can
+authorize a production build or produce `deployable=true` without a trusted Linux mounted-view
+producer/backend, descriptor-relative/`openat2` resistance to malicious source/parent/staging
+TOCTOU and same-UID staging replacement, role-typed canonical-record semantic reparse, the
+isolated fetch runner, trusted unit-graph planner and exact
+edge-semantics producer, actual unit observer, namespace/Landlock/seccomp enforcement, signed
+completion-handle attestation path and descendant escape suite. Production
+`build`/`build-host`/`verify-integration` pre/mount/post wiring and mounted-view recomputation, real
+rustc target-fact/custom-spec reproduction, canonical Cargo-config enforcement,
+toolchain/SDK/executable digest and version probes, sandboxed WASM post-link attestation, and
+production build/build-host manifests, SBOM and artifact-output identity also remain unimplemented
+and therefore cannot be used as completion evidence.

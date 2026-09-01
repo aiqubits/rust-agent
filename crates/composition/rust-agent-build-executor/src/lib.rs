@@ -13,6 +13,7 @@ mod integration;
 mod locked_sources;
 mod policy;
 mod production_policy;
+mod snapshot_materializer;
 mod topology;
 mod wasm_bundle;
 
@@ -74,6 +75,11 @@ pub use production_policy::{
 use rust_agent_composition::{
     CompositionManifest, WASM_BINDGEN_CLI_LOGICAL_ID, WASM_BINDGEN_PROTOCOL_VERSION,
     profile::BuildKind, verify_composition,
+};
+pub use snapshot_materializer::{
+    HostClosureMountObservation, HostClosureSnapshotManifest, HostClosureSnapshotSource,
+    MaterializedHostClosureItem, MaterializedHostClosureSnapshot, SnapshotMaterializationError,
+    materialize_host_closure_snapshot, verify_host_closure_snapshot,
 };
 use tempfile::TempDir;
 use thiserror::Error;
@@ -395,6 +401,7 @@ fn validate_paths(options: &DevelopmentBuildOptions) -> Result<(), DevelopmentBu
     Ok(())
 }
 
+#[cfg(any(unix, windows))]
 fn link_registry_cache(cargo_home: &Path, cache: Option<&Path>) -> Result<(), io::Error> {
     let Some(cache) = cache else {
         return Ok(());
@@ -404,6 +411,11 @@ fn link_registry_cache(cargo_home: &Path, cache: Option<&Path>) -> Result<(), io
     std::os::unix::fs::symlink(cache, destination)?;
     #[cfg(windows)]
     std::os::windows::fs::symlink_dir(cache, destination)?;
+    Ok(())
+}
+
+#[cfg(not(any(unix, windows)))]
+fn link_registry_cache(_cargo_home: &Path, _cache: Option<&Path>) -> Result<(), io::Error> {
     Ok(())
 }
 

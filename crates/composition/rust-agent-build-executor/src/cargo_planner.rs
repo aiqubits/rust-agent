@@ -830,12 +830,15 @@ mod tests {
         let mut context = context();
         context.artifact_selector.target = target;
         let requirements = BuildRequirements::default();
-        let record = |role, id, path, value| {
+        let record = |role, id, path, value: String| {
             item(
                 role,
                 id,
                 path,
-                HostBuildClosureContent::CanonicalRecord { digest: value },
+                HostBuildClosureContent::CanonicalRecord {
+                    digest: value.clone(),
+                    bytes_sha256: value,
+                },
             )
         };
         HostBuildInputClosure {
@@ -1248,7 +1251,7 @@ mod tests {
         );
         assert_eq!(
             final_request.digest(),
-            "906547b86302af2a8319aa95029d7343be0154e211cdd15e5d3a14d7db16219a"
+            "ee613603fb9fc2bfb1dbf85cde6858c4e8da9636b705cc9d4b4629e66b85bee5"
         );
 
         let standalone = CargoPlannerRequest {
@@ -1289,7 +1292,7 @@ mod tests {
         assert_eq!(verified.root_count(), 1);
         assert_eq!(
             verified.digest(),
-            "7dd5674051aa7f731a53a406dee159af35122769398253e64e870faab13317cc"
+            "1b43001a1bec2cf536cec79fef3ae2e6b86be33a9e0ae5523fd5d9caf872fd7a"
         );
 
         assert!(matches!(

@@ -6,17 +6,9 @@ use crate::{
     metadata::BuildRequirements,
     profile::{BuildKind, CompositionProfile},
     resolver::{AppHandoff, Resolution},
+    snapshot::CanonicalSnapshotEntry,
     target::Target,
 };
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct SourceFileRecord {
-    pub path: String,
-    pub digest: String,
-    pub bytes: u64,
-    pub executable: bool,
-}
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -27,7 +19,8 @@ pub struct SourcePackageRecord {
     pub logical_path: String,
     #[serde(rename = "tree-digest")]
     pub tree_digest: String,
-    pub files: Vec<SourceFileRecord>,
+    #[serde(rename = "tree-entries")]
+    pub tree_entries: Vec<CanonicalSnapshotEntry>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -63,6 +56,10 @@ pub struct CompositionIdentityPayload<'a> {
     pub profile: &'a CompositionProfile,
     pub target: &'a Target,
     pub resolution: &'a Resolution,
+    #[serde(rename = "component-runtime-effects")]
+    pub component_runtime_effects: &'a BTreeSet<String>,
+    #[serde(rename = "host-runtime-effects")]
+    pub host_runtime_effects: &'a BTreeSet<String>,
     #[serde(rename = "direct-root-build-requirements")]
     pub direct_root_build_requirements: &'a BTreeMap<String, BuildRequirements>,
     pub sources: &'a [SourcePackageRecord],

@@ -1,9 +1,11 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs, io,
+    fs::{self, File, FileTimes},
+    io::{self, BufReader, BufWriter, Read, Write},
     path::{Path, PathBuf},
     process::Command,
     sync::atomic::{AtomicU64, Ordering},
+    time::SystemTime,
 };
 
 use serde::Serialize;
@@ -11,21 +13,43 @@ use sha2::{Digest as _, Sha256};
 use thiserror::Error;
 use walkdir::WalkDir;
 
+#[cfg(any(
+    target_os = "android",
+    target_os = "ios",
+    target_os = "linux",
+    target_os = "macos"
+))]
+use rustix::fs::{CWD, RenameFlags, renameat_with};
+
 use crate::{
     canonical::{self, CanonicalError},
     catalog::{CatalogError, NormalizedCatalog},
     manifest::{
         CargoResolutionRecord, CompositionIdentityPayload, CompositionManifest,
-        GeneratedFileRecord, SecurityManifest, SourceFileRecord, SourcePackageRecord,
+        GeneratedFileRecord, SecurityManifest, SourcePackageRecord,
     },
     metadata::{BuildRequirements, CatalogDocument, HostBoundaryKind},
     profile::{BuildKind, CompositionProfile},
     resolver::{ResolutionError, resolve},
+    snapshot::{
+        CanonicalSnapshotEntry, CanonicalSnapshotEntryKind, CanonicalSnapshotError,
+        CanonicalSnapshotTree, MAX_CANONICAL_SNAPSHOT_ENTRIES, MAX_CANONICAL_SNAPSHOT_FILE_BYTES,
+        MAX_CANONICAL_SNAPSHOT_JSON_BYTES, MAX_CANONICAL_SNAPSHOT_TOTAL_FILE_BYTES,
+    },
     target::{Target, TargetError},
 };
 
 static STAGING_COUNTER: AtomicU64 = AtomicU64::new(1);
 const PINNED_RUST_VERSION: &str = env!("CARGO_PKG_RUST_VERSION");
+const MAX_SOURCE_MANIFEST_BYTES: u64 = MAX_CANONICAL_SNAPSHOT_JSON_BYTES as u64;
+const MAX_COMPOSITION_CONTROL_FILE_BYTES: u64 = MAX_CANONICAL_SNAPSHOT_JSON_BYTES as u64;
+const SNAPSHOT_COPY_BUFFER_BYTES: usize = 64 * 1024;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CompositionTreeEntryKind {
+    Directory,
+    RegularFile,
+}
 
 #[derive(Clone, Debug)]
 pub struct ComposeOptions {
@@ -65,6 +89,8 @@ pub enum ComposeError {
     Resolution(#[from] ResolutionError),
     #[error("canonical encoding failed: {0}")]
     Canonical(#[from] CanonicalError),
+    #[error("canonical source snapshot is invalid: {0}")]
+    Snapshot(#[from] CanonicalSnapshotError),
     #[error("source tree contains a symlink or unsupported file: {0}")]
     UnsupportedSourceEntry(String),
     #[error("source package is missing: {0}")]
@@ -75,6 +101,8 @@ pub enum ComposeError {
     CargoLock(String),
     #[error("existing composition at {path} does not match expected identity {expected}")]
     ExistingCompositionMismatch { path: String, expected: String },
+    #[error("existing composition at {path} failed canonical verification: {message}")]
+    ExistingCompositionCorrupt { path: String, message: String },
     #[error("Phase 1A supports product-neutral library fixture generation only: {0}")]
     UnsupportedPhase1A(String),
     #[error("composition verification failed: {0}")]
@@ -125,7 +153,7 @@ pub fn compose(options: &ComposeOptions) -> Result<GeneratedComposition, Compose
     fs::create_dir(&staging)?;
     let result = compose_in_staging(options, &catalog, &profile, &target, &resolution, &staging);
     if result.is_err() {
-        let _ = fs::remove_dir_all(&staging);
+        let _ = remove_staging_tree(&staging);
     }
     result
 }
@@ -209,11 +237,23 @@ fn compose_in_staging(
     }
     let generated_files = generated_file_records(staging, &generated_paths)?;
     let direct_root_build_requirements = direct_root_build_requirements(catalog, resolution);
+    let mut component_runtime_effects = BTreeSet::new();
+    for id in &resolution.selected_components {
+        component_runtime_effects.extend(catalog.components[id].security.iter().cloned());
+    }
+    let host_runtime_effects = resolution
+        .host_boundary
+        .as_ref()
+        .map_or_else(BTreeSet::new, |id| {
+            catalog.host_boundaries[id].security.clone()
+        });
     let payload = CompositionIdentityPayload {
         schema: 1,
         profile,
         target,
         resolution,
+        component_runtime_effects: &component_runtime_effects,
+        host_runtime_effects: &host_runtime_effects,
         direct_root_build_requirements: &direct_root_build_requirements,
         sources: &sources,
         generated_files: &generated_files,
@@ -229,16 +269,6 @@ fn compose_in_staging(
         &format!("pub const COMPOSITION_HASH: &str = \"{composition_hash}\";\n"),
     )?;
 
-    let mut component_runtime_effects = BTreeSet::new();
-    for id in &resolution.selected_components {
-        component_runtime_effects.extend(catalog.components[id].security.iter().cloned());
-    }
-    let host_runtime_effects = resolution
-        .host_boundary
-        .as_ref()
-        .map_or_else(BTreeSet::new, |id| {
-            catalog.host_boundaries[id].security.clone()
-        });
     let cargo_resolution_digest = file_digest(&staging.join("cargo-resolution.json"))?;
     let manifest = CompositionManifest {
         schema: 1,
@@ -282,24 +312,84 @@ fn compose_in_staging(
 
     let final_path = options.output_root.join(&composition_hash);
     if final_path.exists() {
-        let existing = load_manifest(&final_path)?;
-        if existing != manifest {
-            return Err(ComposeError::ExistingCompositionMismatch {
-                path: final_path.display().to_string(),
-                expected: composition_hash,
-            });
-        }
-        fs::remove_dir_all(staging)?;
-        return Ok(GeneratedComposition {
-            composition_hash,
-            path: final_path,
-            manifest,
-        });
+        return reuse_existing_composition(&final_path, staging, manifest);
     }
-    fs::rename(staging, &final_path)?;
+    if let Err(error) = publish_composition_noreplace(staging, &final_path) {
+        if fs::symlink_metadata(&final_path).is_ok() {
+            return reuse_existing_composition(&final_path, staging, manifest);
+        }
+        return Err(error.into());
+    }
     Ok(GeneratedComposition {
         composition_hash,
         path: final_path,
+        manifest,
+    })
+}
+
+#[cfg(any(
+    target_os = "android",
+    target_os = "ios",
+    target_os = "linux",
+    target_os = "macos"
+))]
+fn publish_composition_noreplace(source: &Path, destination: &Path) -> io::Result<()> {
+    renameat_with(CWD, source, CWD, destination, RenameFlags::NOREPLACE)
+        .map_err(|error| io::Error::from_raw_os_error(error.raw_os_error()))
+}
+
+#[cfg(windows)]
+fn publish_composition_noreplace(source: &Path, destination: &Path) -> io::Result<()> {
+    renamore::rename_exclusive(source, destination)
+}
+
+#[cfg(not(any(
+    target_os = "android",
+    target_os = "ios",
+    target_os = "linux",
+    target_os = "macos",
+    windows
+)))]
+fn publish_composition_noreplace(_source: &Path, _destination: &Path) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "atomic no-clobber composition publication is unsupported on this Host",
+    ))
+}
+
+fn reuse_existing_composition(
+    final_path: &Path,
+    staging: &Path,
+    manifest: CompositionManifest,
+) -> Result<GeneratedComposition, ComposeError> {
+    let metadata = fs::symlink_metadata(final_path).map_err(|error| {
+        ComposeError::ExistingCompositionCorrupt {
+            path: final_path.display().to_string(),
+            message: error.to_string(),
+        }
+    })?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(ComposeError::ExistingCompositionCorrupt {
+            path: final_path.display().to_string(),
+            message: "final identity path is not a concrete directory".into(),
+        });
+    }
+    let existing = verify_composition(final_path).map_err(|error| {
+        ComposeError::ExistingCompositionCorrupt {
+            path: final_path.display().to_string(),
+            message: error.to_string(),
+        }
+    })?;
+    if existing != manifest {
+        return Err(ComposeError::ExistingCompositionMismatch {
+            path: final_path.display().to_string(),
+            expected: manifest.composition_hash,
+        });
+    }
+    remove_staging_tree(staging)?;
+    Ok(GeneratedComposition {
+        composition_hash: manifest.composition_hash.clone(),
+        path: final_path.to_owned(),
         manifest,
     })
 }
@@ -341,20 +431,29 @@ fn direct_root_build_requirements(
 }
 
 pub fn load_manifest(path: &Path) -> Result<CompositionManifest, ComposeError> {
-    let bytes = fs::read(path.join("rust-agent-composition.json"))?;
+    let manifest_path = path.join("rust-agent-composition.json");
+    let bytes = read_composition_regular_file_bounded(
+        &manifest_path,
+        MAX_COMPOSITION_CONTROL_FILE_BYTES,
+        None,
+    )?;
     serde_json::from_slice(&bytes).map_err(|error| ComposeError::ManifestNormalization {
-        path: path
-            .join("rust-agent-composition.json")
-            .display()
-            .to_string(),
+        path: manifest_path.display().to_string(),
         message: error.to_string(),
     })
 }
 
 pub fn verify_composition(path: &Path) -> Result<CompositionManifest, ComposeError> {
-    if !path.is_absolute() || !path.is_dir() {
+    if !path.is_absolute() {
         return Err(ComposeError::Verification(format!(
             "composition path must be an absolute directory: {}",
+            path.display()
+        )));
+    }
+    let root_metadata = fs::symlink_metadata(path)?;
+    if root_metadata.file_type().is_symlink() || !root_metadata.is_dir() {
+        return Err(ComposeError::Verification(format!(
+            "composition path must be a concrete directory: {}",
             path.display()
         )));
     }
@@ -364,18 +463,44 @@ pub fn verify_composition(path: &Path) -> Result<CompositionManifest, ComposeErr
             "unknown manifest schema or algorithm".into(),
         ));
     }
-    if manifest.build_kind != manifest.normalized_profile.build_kind
+    if manifest.normalized_profile.schema != 1
+        || manifest.resolution.schema != 1
+        || manifest.cargo_resolution.schema != 1
+        || manifest.build_kind != manifest.normalized_profile.build_kind
         || manifest.profile != manifest.normalized_profile.name
         || manifest.target != manifest.normalized_target.triple
         || manifest.target_fact_digest != manifest.normalized_target.target_fact_digest
+        || manifest.normalized_profile.target != manifest.target
+        || manifest.normalized_profile.environment != manifest.normalized_target.environment
+        || manifest.normalized_profile.runtime_adapter != manifest.runtime_adapter
+        || manifest.normalized_profile.host_boundary != manifest.host_boundary
+        || manifest.resolution.profile != manifest.profile
+        || manifest.resolution.target != manifest.target
+        || manifest.resolution.target_fact_digest != manifest.target_fact_digest
         || manifest.selected_components != manifest.resolution.selected_components
         || manifest.runtime_adapter != manifest.resolution.runtime_adapter
         || manifest.host_boundary != manifest.resolution.host_boundary
+        || manifest.app_handoff != manifest.resolution.app_handoff
         || manifest.compiled_runtime_effects != manifest.resolution.compiled_runtime_effects
         || manifest.build_requirements != manifest.resolution.build_requirements
+        || manifest.cargo_resolution.target != manifest.target
+        || manifest.cargo_resolution.target_fact_digest != manifest.target_fact_digest
+        || manifest.cargo_resolution.resolver != "2"
+        || !manifest.cargo_resolution.offline
+        || !manifest.cargo_resolution.isolated_cargo_home
+        || manifest.cargo_resolution.ancestor_config != "forbidden"
+        || manifest.deployable
     {
         return Err(ComposeError::Verification(
             "manifest projection differs from normalized profile, target, or resolution".into(),
+        ));
+    }
+    let mut runtime_effect_union = manifest.component_runtime_effects.clone();
+    runtime_effect_union.extend(manifest.host_runtime_effects.iter().cloned());
+    if runtime_effect_union != manifest.compiled_runtime_effects {
+        return Err(ComposeError::Verification(
+            "Component and Host runtime effects do not equal the compiled runtime-effect union"
+                .into(),
         ));
     }
     let mut expected_roots = BTreeSet::from([
@@ -421,11 +546,109 @@ pub fn verify_composition(path: &Path) -> Result<CompositionManifest, ComposeErr
             "direct root build requirements do not equal the authorized union".into(),
         ));
     }
-    let cargo_resolution_bytes = fs::read(path.join("cargo-resolution.json"))?;
-    let cargo_resolution: CargoResolutionRecord = serde_json::from_slice(&cargo_resolution_bytes)
-        .map_err(|error| {
-        ComposeError::Verification(format!("invalid cargo-resolution.json: {error}"))
-    })?;
+
+    let mut expected_tree = BTreeMap::new();
+    for directory in [".cargo", "sources", "src", "vendor"] {
+        insert_expected_composition_entry(
+            &mut expected_tree,
+            directory,
+            CompositionTreeEntryKind::Directory,
+        )?;
+    }
+    for file in [
+        "Cargo.lock",
+        "rust-agent-composition.json",
+        "rust-agent-security.json",
+        "src/identity.rs",
+    ] {
+        insert_expected_composition_entry(
+            &mut expected_tree,
+            file,
+            CompositionTreeEntryKind::RegularFile,
+        )?;
+    }
+
+    let expected_generated_paths = expected_generated_file_paths(manifest.build_kind);
+    let actual_generated_paths = manifest
+        .generated_files
+        .iter()
+        .map(|file| file.path.clone())
+        .collect::<BTreeSet<_>>();
+    if actual_generated_paths.len() != manifest.generated_files.len()
+        || actual_generated_paths != expected_generated_paths
+    {
+        return Err(ComposeError::Verification(
+            "generated file records are duplicate, missing, or unexpected".into(),
+        ));
+    }
+    for file in &manifest.generated_files {
+        validate_composition_relative_path(&file.path)?;
+        if file.bytes > MAX_COMPOSITION_CONTROL_FILE_BYTES || !is_sha256_hex(&file.digest) {
+            return Err(ComposeError::Verification(format!(
+                "generated file record `{}` exceeds bounds or has an invalid digest",
+                file.path
+            )));
+        }
+        insert_expected_composition_entry(
+            &mut expected_tree,
+            &file.path,
+            CompositionTreeEntryKind::RegularFile,
+        )?;
+    }
+
+    let mut source_ids = BTreeSet::new();
+    let mut source_paths = BTreeSet::new();
+    for package in &manifest.sources {
+        validate_composition_relative_path(&package.logical_path)?;
+        if !source_ids.insert(package.id.clone())
+            || !source_paths.insert(package.logical_path.clone())
+        {
+            return Err(ComposeError::Verification(
+                "source package ids and logical paths must be unique".into(),
+            ));
+        }
+        let expected_snapshot = CanonicalSnapshotTree::from_entries(package.tree_entries.clone())?;
+        if expected_snapshot.entries() != package.tree_entries.as_slice()
+            || expected_snapshot.digest() != package.tree_digest
+        {
+            return Err(ComposeError::Verification(format!(
+                "source snapshot manifest `{}` is not canonical",
+                package.logical_path
+            )));
+        }
+        let package_root = format!("sources/{}", package.logical_path);
+        insert_expected_composition_entry(
+            &mut expected_tree,
+            &package_root,
+            CompositionTreeEntryKind::Directory,
+        )?;
+        for entry in &package.tree_entries {
+            let path = format!("{package_root}/{}", entry.path);
+            let kind = match &entry.kind {
+                CanonicalSnapshotEntryKind::Directory => CompositionTreeEntryKind::Directory,
+                CanonicalSnapshotEntryKind::RegularFile { .. } => {
+                    CompositionTreeEntryKind::RegularFile
+                }
+            };
+            insert_expected_composition_entry(&mut expected_tree, &path, kind)?;
+        }
+    }
+    verify_composition_tree_topology(path, &expected_tree)?;
+
+    let cargo_resolution_bytes = read_composition_regular_file_bounded(
+        &path.join("cargo-resolution.json"),
+        MAX_COMPOSITION_CONTROL_FILE_BYTES,
+        None,
+    )?;
+    let cargo_resolution: CargoResolutionRecord =
+        match serde_json::from_slice(&cargo_resolution_bytes) {
+            Ok(record) => record,
+            Err(error) => {
+                return Err(ComposeError::Verification(format!(
+                    "invalid cargo-resolution.json: {error}"
+                )));
+            }
+        };
     if cargo_resolution != manifest.cargo_resolution
         || sha256_hex(&cargo_resolution_bytes) != manifest.cargo_resolution_digest
     {
@@ -433,68 +656,52 @@ pub fn verify_composition(path: &Path) -> Result<CompositionManifest, ComposeErr
             "Cargo resolution record drifted".into(),
         ));
     }
-    if file_digest(&path.join("Cargo.lock"))? != manifest.cargo_lock_digest {
+    if hash_composition_regular_file_bounded(
+        &path.join("Cargo.lock"),
+        MAX_COMPOSITION_CONTROL_FILE_BYTES,
+        None,
+    )?
+    .0 != manifest.cargo_lock_digest
+    {
         return Err(ComposeError::Verification("Cargo.lock drifted".into()));
     }
     for file in &manifest.generated_files {
-        let bytes = fs::read(path.join(&file.path))?;
-        if bytes.len() as u64 != file.bytes || sha256_hex(&bytes) != file.digest {
+        let file_path = path.join(&file.path);
+        let (digest, bytes) = hash_composition_regular_file_bounded(
+            &file_path,
+            MAX_COMPOSITION_CONTROL_FILE_BYTES,
+            Some(file.bytes),
+        )?;
+        if bytes != file.bytes || digest != file.digest {
             return Err(ComposeError::Verification(format!(
                 "generated file `{}` drifted",
                 file.path
             )));
         }
     }
-    let mut allowed_files: BTreeSet<String> = manifest
-        .generated_files
-        .iter()
-        .map(|file| file.path.clone())
-        .collect();
-    allowed_files.extend([
-        "Cargo.lock".into(),
-        "rust-agent-composition.json".into(),
-        "rust-agent-security.json".into(),
-        "src/identity.rs".into(),
-    ]);
     for package in &manifest.sources {
         let root = path.join("sources").join(&package.logical_path);
-        let actual = source_file_records(&root)?;
-        if actual != package.files {
+        let actual = source_snapshot_tree(&root)?;
+        if actual.entries() != package.tree_entries {
             return Err(ComposeError::Verification(format!(
                 "source snapshot `{}` drifted",
                 package.logical_path
             )));
         }
-        let digest = hex::encode(canonical::domain_hash(
-            b"rust-agent-snapshot-tree-v1\0",
-            &actual,
-        )?);
-        if digest != package.tree_digest {
+        if actual.digest() != package.tree_digest {
             return Err(ComposeError::Verification(format!(
                 "source snapshot digest `{}` drifted",
                 package.logical_path
             )));
         }
-        allowed_files.extend(
-            package
-                .files
-                .iter()
-                .map(|file| format!("sources/{}/{}", package.logical_path, file.path)),
-        );
-    }
-    let actual_files = all_tree_files(path)?;
-    if actual_files != allowed_files {
-        let unexpected: Vec<_> = actual_files.difference(&allowed_files).cloned().collect();
-        let missing: Vec<_> = allowed_files.difference(&actual_files).cloned().collect();
-        return Err(ComposeError::Verification(format!(
-            "composition tree differs from manifest; unexpected={unexpected:?}, missing={missing:?}"
-        )));
     }
     let payload = CompositionIdentityPayload {
         schema: 1,
         profile: &manifest.normalized_profile,
         target: &manifest.normalized_target,
         resolution: &manifest.resolution,
+        component_runtime_effects: &manifest.component_runtime_effects,
+        host_runtime_effects: &manifest.host_runtime_effects,
         direct_root_build_requirements: &manifest.direct_root_build_requirements,
         sources: &manifest.sources,
         generated_files: &manifest.generated_files,
@@ -514,15 +721,24 @@ pub fn verify_composition(path: &Path) -> Result<CompositionManifest, ComposeErr
         "pub const COMPOSITION_HASH: &str = \"{}\";\n",
         manifest.composition_hash
     );
-    if fs::read(path.join("src/identity.rs"))? != identity_source.as_bytes() {
+    if read_composition_regular_file_bounded(
+        &path.join("src/identity.rs"),
+        MAX_COMPOSITION_CONTROL_FILE_BYTES,
+        Some(identity_source.len() as u64),
+    )? != identity_source.as_bytes()
+    {
         return Err(ComposeError::Verification(
             "derived identity source drifted".into(),
         ));
     }
-    let security: SecurityManifest = serde_json::from_slice(&fs::read(
-        path.join("rust-agent-security.json"),
-    )?)
-    .map_err(|error| ComposeError::Verification(format!("invalid security manifest: {error}")))?;
+    let security_bytes = read_composition_regular_file_bounded(
+        &path.join("rust-agent-security.json"),
+        MAX_COMPOSITION_CONTROL_FILE_BYTES,
+        None,
+    )?;
+    let security: SecurityManifest = serde_json::from_slice(&security_bytes).map_err(|error| {
+        ComposeError::Verification(format!("invalid security manifest: {error}"))
+    })?;
     let expected_security = SecurityManifest {
         schema: 1,
         composition_hash: manifest.composition_hash.clone(),
@@ -539,9 +755,69 @@ pub fn verify_composition(path: &Path) -> Result<CompositionManifest, ComposeErr
     Ok(manifest)
 }
 
-fn all_tree_files(root: &Path) -> Result<BTreeSet<String>, ComposeError> {
-    let mut files = BTreeSet::new();
-    for entry in WalkDir::new(root).sort_by_file_name() {
+fn expected_generated_file_paths(build_kind: BuildKind) -> BTreeSet<String> {
+    let mut paths = BTreeSet::from([
+        ".cargo/config.toml".into(),
+        "Cargo.toml".into(),
+        "cargo-resolution.json".into(),
+        "src/lib.rs".into(),
+    ]);
+    if build_kind == BuildKind::Wasm {
+        paths.insert("src/wasm.rs".into());
+    }
+    paths
+}
+
+fn validate_composition_relative_path(path: &str) -> Result<(), ComposeError> {
+    let candidate = Path::new(path);
+    if path.is_empty()
+        || path.contains('\\')
+        || candidate.is_absolute()
+        || !candidate
+            .components()
+            .all(|component| matches!(component, std::path::Component::Normal(_)))
+    {
+        return Err(ComposeError::Verification(format!(
+            "invalid composition-relative path `{path}`"
+        )));
+    }
+    Ok(())
+}
+
+fn insert_expected_composition_entry(
+    entries: &mut BTreeMap<String, CompositionTreeEntryKind>,
+    path: &str,
+    kind: CompositionTreeEntryKind,
+) -> Result<(), ComposeError> {
+    validate_composition_relative_path(path)?;
+    let mut offset = 0;
+    while let Some(index) = path[offset..].find('/') {
+        let end = offset + index;
+        let parent = &path[..end];
+        match entries.insert(parent.to_owned(), CompositionTreeEntryKind::Directory) {
+            Some(CompositionTreeEntryKind::RegularFile) => {
+                return Err(ComposeError::Verification(format!(
+                    "composition path `{path}` has regular-file parent `{parent}`"
+                )));
+            }
+            Some(CompositionTreeEntryKind::Directory) | None => {}
+        }
+        offset = end + 1;
+    }
+    match entries.insert(path.to_owned(), kind) {
+        Some(previous) if previous != kind => Err(ComposeError::Verification(format!(
+            "composition path `{path}` has conflicting entry kinds"
+        ))),
+        Some(_) | None => Ok(()),
+    }
+}
+
+fn verify_composition_tree_topology(
+    root: &Path,
+    expected: &BTreeMap<String, CompositionTreeEntryKind>,
+) -> Result<(), ComposeError> {
+    let mut seen = BTreeSet::new();
+    for entry in WalkDir::new(root).sort_by_file_name().into_iter().skip(1) {
         let entry = entry.map_err(|error| io::Error::other(error.to_string()))?;
         let metadata = fs::symlink_metadata(entry.path())?;
         if metadata.file_type().is_symlink() {
@@ -549,51 +825,83 @@ fn all_tree_files(root: &Path) -> Result<BTreeSet<String>, ComposeError> {
                 entry.path().display().to_string(),
             ));
         }
-        if metadata.is_file() {
-            let relative = entry
-                .path()
-                .strip_prefix(root)
-                .expect("walked path is below root")
-                .to_str()
-                .ok_or_else(|| {
-                    ComposeError::UnsupportedSourceEntry(entry.path().display().to_string())
-                })?
-                .replace('\\', "/");
-            files.insert(relative);
-        } else if !metadata.is_dir() {
+        let kind = if metadata.is_file() {
+            CompositionTreeEntryKind::RegularFile
+        } else if metadata.is_dir() {
+            CompositionTreeEntryKind::Directory
+        } else {
             return Err(ComposeError::UnsupportedSourceEntry(
                 entry.path().display().to_string(),
             ));
+        };
+        let relative = entry
+            .path()
+            .strip_prefix(root)
+            .expect("walked path is below composition root")
+            .to_str()
+            .ok_or_else(|| {
+                ComposeError::UnsupportedSourceEntry(entry.path().display().to_string())
+            })?
+            .replace('\\', "/");
+        if expected.get(&relative) != Some(&kind) {
+            return Err(ComposeError::Verification(format!(
+                "composition tree contains unexpected or mistyped entry `{relative}`"
+            )));
         }
+        seen.insert(relative);
     }
-    Ok(files)
+    if seen.len() != expected.len() {
+        let missing = expected
+            .keys()
+            .filter(|path| !seen.contains(*path))
+            .take(16)
+            .cloned()
+            .collect::<Vec<_>>();
+        return Err(ComposeError::Verification(format!(
+            "composition tree is missing expected entries {missing:?}"
+        )));
+    }
+    Ok(())
 }
 
-fn source_file_records(root: &Path) -> Result<Vec<SourceFileRecord>, ComposeError> {
-    if !root.is_dir() {
+#[derive(Debug)]
+struct SourceSnapshotVerificationEntry {
+    path: PathBuf,
+    relative: String,
+    bytes: Option<u64>,
+}
+
+fn source_snapshot_tree(root: &Path) -> Result<CanonicalSnapshotTree, ComposeError> {
+    let root_metadata = fs::symlink_metadata(root)?;
+    if root_metadata.file_type().is_symlink() || !root_metadata.is_dir() {
         return Err(ComposeError::Verification(format!(
             "missing source root {}",
             root.display()
         )));
     }
-    let mut records = Vec::new();
-    for entry in WalkDir::new(root).sort_by_file_name() {
+    verify_source_snapshot_storage_projection(root, true)?;
+    let mut plan = Vec::new();
+    let mut total_file_bytes = 0_u64;
+    for entry in WalkDir::new(root).sort_by_file_name().into_iter().skip(1) {
         let entry = entry.map_err(|error| io::Error::other(error.to_string()))?;
+        if plan.len() == MAX_CANONICAL_SNAPSHOT_ENTRIES {
+            return Err(CanonicalSnapshotError::TooManyEntries {
+                actual: plan.len() + 1,
+                maximum: MAX_CANONICAL_SNAPSHOT_ENTRIES,
+            }
+            .into());
+        }
         let metadata = fs::symlink_metadata(entry.path())?;
         if metadata.file_type().is_symlink() {
             return Err(ComposeError::UnsupportedSourceEntry(
                 entry.path().display().to_string(),
             ));
         }
-        if metadata.is_dir() {
-            continue;
-        }
-        if !metadata.is_file() {
+        if !metadata.is_file() && !metadata.is_dir() {
             return Err(ComposeError::UnsupportedSourceEntry(
                 entry.path().display().to_string(),
             ));
         }
-        let bytes = fs::read(entry.path())?;
         let relative = entry
             .path()
             .strip_prefix(root)
@@ -603,15 +911,201 @@ fn source_file_records(root: &Path) -> Result<Vec<SourceFileRecord>, ComposeErro
                 ComposeError::UnsupportedSourceEntry(entry.path().display().to_string())
             })?
             .replace('\\', "/");
-        records.push(SourceFileRecord {
-            path: relative,
-            digest: sha256_hex(&bytes),
-            bytes: bytes.len() as u64,
-            executable: is_executable(&metadata),
+        verify_source_snapshot_storage_projection(entry.path(), metadata.is_dir())?;
+        let bytes = if metadata.is_dir() {
+            None
+        } else {
+            account_snapshot_file_bytes(&relative, metadata.len(), &mut total_file_bytes)?;
+            Some(metadata.len())
+        };
+        plan.push(SourceSnapshotVerificationEntry {
+            path: entry.path().to_owned(),
+            relative,
+            bytes,
         });
     }
-    records.sort_by(|left, right| left.path.cmp(&right.path));
-    Ok(records)
+
+    let mut entries = Vec::with_capacity(plan.len());
+    for entry in plan {
+        let directory = entry.bytes.is_none();
+        verify_source_snapshot_storage_projection(&entry.path, directory)?;
+        if let Some(expected_bytes) = entry.bytes {
+            let (digest, bytes) = hash_snapshot_file(&entry.path, expected_bytes)?;
+            entries.push(CanonicalSnapshotEntry::regular_file(
+                entry.relative,
+                digest,
+                bytes,
+            ));
+        } else {
+            entries.push(CanonicalSnapshotEntry::directory(entry.relative));
+        }
+    }
+    verify_source_snapshot_storage_projection(root, true)?;
+    Ok(CanonicalSnapshotTree::from_entries(entries)?)
+}
+
+fn hash_snapshot_file(path: &Path, expected_bytes: u64) -> Result<(String, u64), ComposeError> {
+    if expected_bytes > MAX_CANONICAL_SNAPSHOT_FILE_BYTES {
+        return Err(CanonicalSnapshotError::FileTooLarge {
+            path: path.display().to_string(),
+            actual: expected_bytes,
+            maximum: MAX_CANONICAL_SNAPSHOT_FILE_BYTES,
+        }
+        .into());
+    }
+    let before = fs::symlink_metadata(path)?;
+    if before.file_type().is_symlink() || !before.is_file() || before.len() != expected_bytes {
+        return Err(ComposeError::UnsupportedSourceEntry(
+            path.display().to_string(),
+        ));
+    }
+    let file = File::open(path)?;
+    let handle_before = file.metadata()?;
+    if !handle_before.is_file()
+        || handle_before.len() != before.len()
+        || handle_before.modified()? != before.modified()?
+    {
+        return Err(ComposeError::Verification(format!(
+            "source snapshot file `{}` changed before hashing",
+            path.display()
+        )));
+    }
+    let mut reader = BufReader::new(file).take(MAX_CANONICAL_SNAPSHOT_FILE_BYTES + 1);
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0_u8; 64 * 1024];
+    let mut bytes = 0_u64;
+    loop {
+        let read = reader.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        bytes = bytes.checked_add(read as u64).ok_or_else(|| {
+            ComposeError::Verification(format!(
+                "source snapshot file `{}` exceeds schema bounds",
+                path.display()
+            ))
+        })?;
+        hasher.update(&buffer[..read]);
+    }
+    let file = reader.into_inner().into_inner();
+    let handle_after = file.metadata()?;
+    let path_after = fs::symlink_metadata(path)?;
+    if bytes != expected_bytes
+        || handle_after.len() != before.len()
+        || handle_after.modified()? != before.modified()?
+        || path_after.file_type().is_symlink()
+        || !path_after.is_file()
+        || path_after.len() != before.len()
+        || path_after.modified()? != before.modified()?
+    {
+        return Err(ComposeError::Verification(format!(
+            "source snapshot file `{}` changed while hashing",
+            path.display()
+        )));
+    }
+    Ok((hex::encode(hasher.finalize()), bytes))
+}
+
+fn seal_source_snapshot_storage_projection(root: &Path) -> Result<(), ComposeError> {
+    let mut directories = Vec::new();
+    for entry in WalkDir::new(root).sort_by_file_name() {
+        let entry = entry.map_err(|error| io::Error::other(error.to_string()))?;
+        let metadata = fs::symlink_metadata(entry.path())?;
+        if metadata.file_type().is_symlink() || (!metadata.is_file() && !metadata.is_dir()) {
+            return Err(ComposeError::UnsupportedSourceEntry(
+                entry.path().display().to_string(),
+            ));
+        }
+        if metadata.is_dir() {
+            directories.push(entry.path().to_owned());
+        } else {
+            set_snapshot_epoch(entry.path())?;
+            set_snapshot_permissions(entry.path(), false)?;
+        }
+    }
+    directories.sort_by_key(|path| std::cmp::Reverse(path.components().count()));
+    for directory in directories {
+        set_snapshot_epoch(&directory)?;
+        set_snapshot_permissions(&directory, true)?;
+    }
+    Ok(())
+}
+
+fn set_snapshot_epoch(path: &Path) -> io::Result<()> {
+    open_metadata_handle(path)?.set_times(
+        FileTimes::new()
+            .set_accessed(SystemTime::UNIX_EPOCH)
+            .set_modified(SystemTime::UNIX_EPOCH),
+    )
+}
+
+#[cfg(windows)]
+fn open_metadata_handle(path: &Path) -> io::Result<File> {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    const FILE_WRITE_ATTRIBUTES: u32 = 0x0000_0100;
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+
+    File::options()
+        .access_mode(FILE_WRITE_ATTRIBUTES)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+        .open(path)
+}
+
+#[cfg(not(windows))]
+fn open_metadata_handle(path: &Path) -> io::Result<File> {
+    File::open(path)
+}
+
+#[cfg(unix)]
+fn set_snapshot_permissions(path: &Path, directory: bool) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mode = if directory { 0o555 } else { 0o444 };
+    fs::set_permissions(path, fs::Permissions::from_mode(mode))
+}
+
+#[cfg(not(unix))]
+fn set_snapshot_permissions(path: &Path, _directory: bool) -> io::Result<()> {
+    let mut permissions = fs::metadata(path)?.permissions();
+    permissions.set_readonly(true);
+    fs::set_permissions(path, permissions)
+}
+
+fn verify_source_snapshot_storage_projection(
+    path: &Path,
+    directory: bool,
+) -> Result<(), ComposeError> {
+    let metadata = fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink()
+        || metadata.is_dir() != directory
+        || metadata.modified()? != SystemTime::UNIX_EPOCH
+    {
+        return Err(ComposeError::Verification(format!(
+            "source snapshot metadata drifted at `{}`",
+            path.display()
+        )));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let expected = if directory { 0o555 } else { 0o444 };
+        if metadata.permissions().mode() & 0o7777 != expected {
+            return Err(ComposeError::Verification(format!(
+                "source snapshot metadata drifted at `{}`",
+                path.display()
+            )));
+        }
+    }
+    #[cfg(not(unix))]
+    if !metadata.permissions().readonly() {
+        return Err(ComposeError::Verification(format!(
+            "source snapshot metadata drifted at `{}`",
+            path.display()
+        )));
+    }
+    Ok(())
 }
 
 #[derive(Clone, Debug)]
@@ -700,9 +1194,16 @@ fn selected_packages_require_registry(
 ) -> Result<bool, ComposeError> {
     for package in selected_packages(catalog, resolution)? {
         let manifest_path = workspace_root.join(&package.path).join("Cargo.toml");
-        let input = fs::read_to_string(&manifest_path)?;
+        let manifest_bytes =
+            read_bounded_snapshot_source_file(&manifest_path, MAX_SOURCE_MANIFEST_BYTES)?;
+        let input = std::str::from_utf8(&manifest_bytes).map_err(|error| {
+            ComposeError::ManifestNormalization {
+                path: manifest_path.display().to_string(),
+                message: error.to_string(),
+            }
+        })?;
         let document: toml::Value =
-            toml::from_str(&input).map_err(|error| ComposeError::ManifestNormalization {
+            toml::from_str(input).map_err(|error| ComposeError::ManifestNormalization {
                 path: manifest_path.display().to_string(),
                 message: error.to_string(),
             })?;
@@ -744,6 +1245,21 @@ fn dependency_sections_require_registry(table: &toml::Table) -> bool {
         })
 }
 
+#[derive(Debug)]
+struct SnapshotPackagePlanEntry {
+    source: PathBuf,
+    relative: PathBuf,
+    logical_path: String,
+    content: SnapshotPackagePlanContent,
+}
+
+#[derive(Debug)]
+enum SnapshotPackagePlanContent {
+    Directory,
+    RegularFile { bytes: u64 },
+    NormalizedManifest { bytes: Vec<u8> },
+}
+
 fn snapshot_package(
     workspace_root: &Path,
     source_root: &Path,
@@ -752,25 +1268,80 @@ fn snapshot_package(
     logical_path: &str,
 ) -> Result<SourcePackageRecord, ComposeError> {
     let source = workspace_root.join(logical_path);
-    if !source.is_dir() {
+    let source_metadata = fs::symlink_metadata(&source).map_err(|error| {
+        if error.kind() == io::ErrorKind::NotFound {
+            ComposeError::MissingSourcePackage(source.display().to_string())
+        } else {
+            error.into()
+        }
+    })?;
+    if source_metadata.file_type().is_symlink() || !source_metadata.is_dir() {
         return Err(ComposeError::MissingSourcePackage(
             source.display().to_string(),
         ));
     }
+    let plan = plan_snapshot_package(&source)?;
     let destination = source_root.join(logical_path);
+    if fs::symlink_metadata(&destination).is_ok() {
+        return Err(ComposeError::Verification(format!(
+            "source snapshot destination already exists: {}",
+            destination.display()
+        )));
+    }
     fs::create_dir_all(&destination)?;
-    let mut records = Vec::new();
-    for entry in WalkDir::new(&source).sort_by_file_name() {
+    let result = (|| {
+        let copied_tree = materialize_snapshot_package_plan(&source, &destination, &plan)?;
+        seal_source_snapshot_storage_projection(&destination)?;
+        let tree = source_snapshot_tree(&destination)?;
+        if tree != copied_tree {
+            return Err(ComposeError::Verification(format!(
+                "source snapshot changed while materializing `{}`",
+                source.display()
+            )));
+        }
+        Ok(SourcePackageRecord {
+            id: id.to_owned(),
+            package: package.to_owned(),
+            logical_path: logical_path.to_owned(),
+            tree_digest: tree.digest().to_owned(),
+            tree_entries: tree.entries().to_vec(),
+        })
+    })();
+    if result.is_err() {
+        let _ = remove_staging_tree(&destination);
+    }
+    result
+}
+
+fn plan_snapshot_package(source: &Path) -> Result<Vec<SnapshotPackagePlanEntry>, ComposeError> {
+    let mut plan = Vec::new();
+    let mut validation_entries = Vec::new();
+    let mut total_file_bytes = 0_u64;
+    let walker = WalkDir::new(source)
+        .sort_by_file_name()
+        .into_iter()
+        .filter_entry(|entry| {
+            entry.path() == source
+                || entry
+                    .path()
+                    .strip_prefix(source)
+                    .is_ok_and(|relative| !snapshot_path_is_transient(relative))
+        });
+    for entry in walker {
         let entry = entry.map_err(|error| io::Error::other(error.to_string()))?;
         let relative = entry
             .path()
-            .strip_prefix(&source)
+            .strip_prefix(source)
             .expect("walked path is below source package");
         if relative.as_os_str().is_empty() {
             continue;
         }
-        if snapshot_path_is_transient(relative) {
-            continue;
+        if plan.len() == MAX_CANONICAL_SNAPSHOT_ENTRIES {
+            return Err(CanonicalSnapshotError::TooManyEntries {
+                actual: plan.len() + 1,
+                maximum: MAX_CANONICAL_SNAPSHOT_ENTRIES,
+            }
+            .into());
         }
         let metadata = fs::symlink_metadata(entry.path())?;
         if metadata.file_type().is_symlink() {
@@ -778,50 +1349,229 @@ fn snapshot_package(
                 entry.path().display().to_string(),
             ));
         }
-        let target = destination.join(relative);
-        if metadata.is_dir() {
-            fs::create_dir_all(&target)?;
-            continue;
-        }
-        if !metadata.is_file() {
+        if !metadata.is_file() && !metadata.is_dir() {
             return Err(ComposeError::UnsupportedSourceEntry(
                 entry.path().display().to_string(),
             ));
         }
-        let bytes = if relative == Path::new("Cargo.toml") {
-            normalize_snapshot_manifest(entry.path())?
-        } else {
-            fs::read(entry.path())?
-        };
-        if let Some(parent) = target.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        fs::write(&target, &bytes)?;
-        let path = relative
+        let logical_entry_path = relative
             .to_str()
             .ok_or_else(|| {
                 ComposeError::UnsupportedSourceEntry(entry.path().display().to_string())
             })?
             .replace('\\', "/");
-        records.push(SourceFileRecord {
-            path,
-            digest: sha256_hex(&bytes),
-            bytes: bytes.len() as u64,
-            executable: is_executable(&metadata),
+        let content = if metadata.is_dir() {
+            validation_entries.push(CanonicalSnapshotEntry::directory(
+                logical_entry_path.clone(),
+            ));
+            SnapshotPackagePlanContent::Directory
+        } else if relative == Path::new("Cargo.toml") {
+            let bytes = normalize_snapshot_manifest(entry.path())?;
+            account_snapshot_file_bytes(
+                &logical_entry_path,
+                bytes.len() as u64,
+                &mut total_file_bytes,
+            )?;
+            validation_entries.push(CanonicalSnapshotEntry::regular_file(
+                logical_entry_path.clone(),
+                sha256_hex(&bytes),
+                bytes.len() as u64,
+            ));
+            SnapshotPackagePlanContent::NormalizedManifest { bytes }
+        } else {
+            account_snapshot_file_bytes(
+                &logical_entry_path,
+                metadata.len(),
+                &mut total_file_bytes,
+            )?;
+            validation_entries.push(CanonicalSnapshotEntry::regular_file(
+                logical_entry_path.clone(),
+                "0".repeat(64),
+                metadata.len(),
+            ));
+            SnapshotPackagePlanContent::RegularFile {
+                bytes: metadata.len(),
+            }
+        };
+        plan.push(SnapshotPackagePlanEntry {
+            source: entry.path().to_owned(),
+            relative: relative.to_owned(),
+            logical_path: logical_entry_path,
+            content,
         });
     }
-    records.sort_by(|left, right| left.path.cmp(&right.path));
-    let tree_digest = hex::encode(canonical::domain_hash(
-        b"rust-agent-snapshot-tree-v1\0",
-        &records,
-    )?);
-    Ok(SourcePackageRecord {
-        id: id.to_owned(),
-        package: package.to_owned(),
-        logical_path: logical_path.to_owned(),
-        tree_digest,
-        files: records,
-    })
+    CanonicalSnapshotTree::from_entries(validation_entries)?;
+    Ok(plan)
+}
+
+fn account_snapshot_file_bytes(
+    path: &str,
+    bytes: u64,
+    total: &mut u64,
+) -> Result<(), ComposeError> {
+    if bytes > MAX_CANONICAL_SNAPSHOT_FILE_BYTES {
+        return Err(CanonicalSnapshotError::FileTooLarge {
+            path: path.into(),
+            actual: bytes,
+            maximum: MAX_CANONICAL_SNAPSHOT_FILE_BYTES,
+        }
+        .into());
+    }
+    let next = total
+        .checked_add(bytes)
+        .ok_or(CanonicalSnapshotError::TotalBytesTooLarge {
+            actual: u64::MAX,
+            maximum: MAX_CANONICAL_SNAPSHOT_TOTAL_FILE_BYTES,
+        })?;
+    if next > MAX_CANONICAL_SNAPSHOT_TOTAL_FILE_BYTES {
+        return Err(CanonicalSnapshotError::TotalBytesTooLarge {
+            actual: next,
+            maximum: MAX_CANONICAL_SNAPSHOT_TOTAL_FILE_BYTES,
+        }
+        .into());
+    }
+    *total = next;
+    Ok(())
+}
+
+fn materialize_snapshot_package_plan(
+    source_root: &Path,
+    destination: &Path,
+    plan: &[SnapshotPackagePlanEntry],
+) -> Result<CanonicalSnapshotTree, ComposeError> {
+    let root_metadata = fs::symlink_metadata(source_root)?;
+    if root_metadata.file_type().is_symlink() || !root_metadata.is_dir() {
+        return Err(ComposeError::UnsupportedSourceEntry(
+            source_root.display().to_string(),
+        ));
+    }
+    let mut copied_entries = Vec::with_capacity(plan.len());
+    for entry in plan {
+        let target = destination.join(&entry.relative);
+        match &entry.content {
+            SnapshotPackagePlanContent::Directory => {
+                let metadata = fs::symlink_metadata(&entry.source)?;
+                if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                    return Err(ComposeError::UnsupportedSourceEntry(
+                        entry.source.display().to_string(),
+                    ));
+                }
+                fs::create_dir_all(&target)?;
+                copied_entries.push(CanonicalSnapshotEntry::directory(
+                    entry.logical_path.clone(),
+                ));
+            }
+            SnapshotPackagePlanContent::RegularFile { bytes } => {
+                if let Some(parent) = target.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                let (digest, actual_bytes) =
+                    copy_snapshot_source_file(&entry.source, &target, *bytes)?;
+                copied_entries.push(CanonicalSnapshotEntry::regular_file(
+                    entry.logical_path.clone(),
+                    digest,
+                    actual_bytes,
+                ));
+            }
+            SnapshotPackagePlanContent::NormalizedManifest { bytes } => {
+                let current = normalize_snapshot_manifest(&entry.source)?;
+                if current != *bytes {
+                    return Err(ComposeError::Verification(format!(
+                        "source manifest `{}` changed while snapshotting",
+                        entry.source.display()
+                    )));
+                }
+                if let Some(parent) = target.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                let file = File::options().write(true).create_new(true).open(&target)?;
+                let mut writer = BufWriter::new(file);
+                writer.write_all(bytes)?;
+                writer.flush()?;
+                copied_entries.push(CanonicalSnapshotEntry::regular_file(
+                    entry.logical_path.clone(),
+                    sha256_hex(bytes),
+                    bytes.len() as u64,
+                ));
+            }
+        }
+    }
+    Ok(CanonicalSnapshotTree::from_entries(copied_entries)?)
+}
+
+fn copy_snapshot_source_file(
+    source: &Path,
+    destination: &Path,
+    expected_bytes: u64,
+) -> Result<(String, u64), ComposeError> {
+    let before = fs::symlink_metadata(source)?;
+    if before.file_type().is_symlink()
+        || !before.is_file()
+        || before.len() != expected_bytes
+        || expected_bytes > MAX_CANONICAL_SNAPSHOT_FILE_BYTES
+    {
+        return Err(ComposeError::UnsupportedSourceEntry(
+            source.display().to_string(),
+        ));
+    }
+    let source_file = File::open(source)?;
+    let handle_before = source_file.metadata()?;
+    if !handle_before.is_file()
+        || handle_before.len() != before.len()
+        || handle_before.modified()? != before.modified()?
+    {
+        return Err(ComposeError::Verification(format!(
+            "source snapshot file `{}` changed before copying",
+            source.display()
+        )));
+    }
+    let target_file = File::options()
+        .write(true)
+        .create_new(true)
+        .open(destination)?;
+    let mut reader = BufReader::new(source_file);
+    let mut writer = BufWriter::new(target_file);
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0_u8; SNAPSHOT_COPY_BUFFER_BYTES];
+    let mut copied = 0_u64;
+    loop {
+        let read = reader.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        let next = copied.checked_add(read as u64).ok_or_else(|| {
+            ComposeError::Verification(format!(
+                "source snapshot file `{}` exceeds schema bounds",
+                source.display()
+            ))
+        })?;
+        if next > expected_bytes || next > MAX_CANONICAL_SNAPSHOT_FILE_BYTES {
+            return Err(ComposeError::Verification(format!(
+                "source snapshot file `{}` changed size while copying",
+                source.display()
+            )));
+        }
+        writer.write_all(&buffer[..read])?;
+        hasher.update(&buffer[..read]);
+        copied = next;
+    }
+    writer.flush()?;
+    let handle_after = reader.get_ref().metadata()?;
+    let path_after = fs::symlink_metadata(source)?;
+    if copied != expected_bytes
+        || handle_after.len() != before.len()
+        || handle_after.modified()? != before.modified()?
+        || path_after.file_type().is_symlink()
+        || !path_after.is_file()
+        || path_after.len() != before.len()
+        || path_after.modified()? != before.modified()?
+    {
+        return Err(ComposeError::Verification(format!(
+            "source snapshot file `{}` changed while copying",
+            source.display()
+        )));
+    }
+    Ok((hex::encode(hasher.finalize()), copied))
 }
 
 fn snapshot_path_is_transient(relative: &Path) -> bool {
@@ -836,9 +1586,14 @@ fn snapshot_path_is_transient(relative: &Path) -> bool {
 }
 
 fn normalize_snapshot_manifest(path: &Path) -> Result<Vec<u8>, ComposeError> {
-    let input = fs::read_to_string(path)?;
+    let input = read_bounded_snapshot_source_file(path, MAX_SOURCE_MANIFEST_BYTES)?;
+    let input =
+        std::str::from_utf8(&input).map_err(|error| ComposeError::ManifestNormalization {
+            path: path.display().to_string(),
+            message: error.to_string(),
+        })?;
     let mut value: toml::Value =
-        toml::from_str(&input).map_err(|error| ComposeError::ManifestNormalization {
+        toml::from_str(input).map_err(|error| ComposeError::ManifestNormalization {
             path: path.display().to_string(),
             message: error.to_string(),
         })?;
@@ -882,6 +1637,200 @@ fn normalize_snapshot_manifest(path: &Path) -> Result<Vec<u8>, ComposeError> {
         output.push('\n');
     }
     Ok(output.into_bytes())
+}
+
+fn read_bounded_snapshot_source_file(path: &Path, maximum: u64) -> Result<Vec<u8>, ComposeError> {
+    let before = fs::symlink_metadata(path)?;
+    if before.file_type().is_symlink() || !before.is_file() {
+        return Err(ComposeError::UnsupportedSourceEntry(
+            path.display().to_string(),
+        ));
+    }
+    if before.len() > maximum {
+        return Err(CanonicalSnapshotError::FileTooLarge {
+            path: path.display().to_string(),
+            actual: before.len(),
+            maximum,
+        }
+        .into());
+    }
+    let file = File::open(path)?;
+    let handle_before = file.metadata()?;
+    if !handle_before.is_file()
+        || handle_before.len() != before.len()
+        || handle_before.modified()? != before.modified()?
+    {
+        return Err(ComposeError::Verification(format!(
+            "source snapshot file `{}` changed before reading",
+            path.display()
+        )));
+    }
+    let mut reader = BufReader::new(file).take(maximum + 1);
+    let mut bytes = Vec::with_capacity(
+        usize::try_from(before.len())
+            .unwrap_or(usize::MAX)
+            .min(MAX_CANONICAL_SNAPSHOT_JSON_BYTES),
+    );
+    reader.read_to_end(&mut bytes)?;
+    let file = reader.into_inner().into_inner();
+    let handle_after = file.metadata()?;
+    let path_after = fs::symlink_metadata(path)?;
+    if bytes.len() as u64 > maximum {
+        return Err(CanonicalSnapshotError::FileTooLarge {
+            path: path.display().to_string(),
+            actual: bytes.len() as u64,
+            maximum,
+        }
+        .into());
+    }
+    if handle_after.len() != before.len()
+        || handle_after.modified()? != before.modified()?
+        || path_after.file_type().is_symlink()
+        || !path_after.is_file()
+        || path_after.len() != before.len()
+        || path_after.modified()? != before.modified()?
+        || bytes.len() as u64 != before.len()
+    {
+        return Err(ComposeError::Verification(format!(
+            "source snapshot file `{}` changed while reading",
+            path.display()
+        )));
+    }
+    Ok(bytes)
+}
+
+fn composition_regular_file_metadata(
+    path: &Path,
+    maximum: u64,
+    expected_bytes: Option<u64>,
+) -> Result<fs::Metadata, ComposeError> {
+    let metadata = fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(ComposeError::Verification(format!(
+            "composition input `{}` must be a concrete regular file",
+            path.display()
+        )));
+    }
+    if metadata.len() > maximum {
+        return Err(ComposeError::Verification(format!(
+            "composition input `{}` has {} bytes; maximum is {maximum}",
+            path.display(),
+            metadata.len()
+        )));
+    }
+    if let Some(expected) = expected_bytes
+        && metadata.len() != expected
+    {
+        return Err(ComposeError::Verification(format!(
+            "composition input `{}` has {} bytes; expected {expected}",
+            path.display(),
+            metadata.len()
+        )));
+    }
+    Ok(metadata)
+}
+
+fn read_composition_regular_file_bounded(
+    path: &Path,
+    maximum: u64,
+    expected_bytes: Option<u64>,
+) -> Result<Vec<u8>, ComposeError> {
+    let before = composition_regular_file_metadata(path, maximum, expected_bytes)?;
+    let file = File::open(path)?;
+    let handle_before = file.metadata()?;
+    if !handle_before.is_file()
+        || handle_before.len() != before.len()
+        || handle_before.modified()? != before.modified()?
+    {
+        return Err(ComposeError::Verification(format!(
+            "composition input `{}` changed before reading",
+            path.display()
+        )));
+    }
+    let mut reader = BufReader::new(file).take(maximum.saturating_add(1));
+    let mut bytes = Vec::with_capacity(
+        usize::try_from(before.len())
+            .unwrap_or(usize::MAX)
+            .min(MAX_CANONICAL_SNAPSHOT_JSON_BYTES),
+    );
+    reader.read_to_end(&mut bytes)?;
+    let file = reader.into_inner().into_inner();
+    let handle_after = file.metadata()?;
+    let path_after = fs::symlink_metadata(path)?;
+    if bytes.len() as u64 > maximum
+        || bytes.len() as u64 != before.len()
+        || handle_after.len() != before.len()
+        || handle_after.modified()? != before.modified()?
+        || path_after.file_type().is_symlink()
+        || !path_after.is_file()
+        || path_after.len() != before.len()
+        || path_after.modified()? != before.modified()?
+    {
+        return Err(ComposeError::Verification(format!(
+            "composition input `{}` changed or exceeded its bound while reading",
+            path.display()
+        )));
+    }
+    Ok(bytes)
+}
+
+fn hash_composition_regular_file_bounded(
+    path: &Path,
+    maximum: u64,
+    expected_bytes: Option<u64>,
+) -> Result<(String, u64), ComposeError> {
+    let before = composition_regular_file_metadata(path, maximum, expected_bytes)?;
+    let file = File::open(path)?;
+    let handle_before = file.metadata()?;
+    if !handle_before.is_file()
+        || handle_before.len() != before.len()
+        || handle_before.modified()? != before.modified()?
+    {
+        return Err(ComposeError::Verification(format!(
+            "composition input `{}` changed before hashing",
+            path.display()
+        )));
+    }
+    let mut reader = BufReader::new(file).take(maximum.saturating_add(1));
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0_u8; SNAPSHOT_COPY_BUFFER_BYTES];
+    let mut bytes = 0_u64;
+    loop {
+        let read = reader.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        bytes = bytes.checked_add(read as u64).ok_or_else(|| {
+            ComposeError::Verification(format!(
+                "composition input `{}` exceeds its byte bound",
+                path.display()
+            ))
+        })?;
+        if bytes > maximum {
+            return Err(ComposeError::Verification(format!(
+                "composition input `{}` exceeds its byte bound",
+                path.display()
+            )));
+        }
+        hasher.update(&buffer[..read]);
+    }
+    let file = reader.into_inner().into_inner();
+    let handle_after = file.metadata()?;
+    let path_after = fs::symlink_metadata(path)?;
+    if bytes != before.len()
+        || handle_after.len() != before.len()
+        || handle_after.modified()? != before.modified()?
+        || path_after.file_type().is_symlink()
+        || !path_after.is_file()
+        || path_after.len() != before.len()
+        || path_after.modified()? != before.modified()?
+    {
+        return Err(ComposeError::Verification(format!(
+            "composition input `{}` changed while hashing",
+            path.display()
+        )));
+    }
+    Ok((hex::encode(hasher.finalize()), bytes))
 }
 
 fn generate_cargo_toml(
@@ -1126,9 +2075,15 @@ fn generate_lockfile(options: &ComposeOptions, staging: &Path) -> Result<(), Com
 fn locked_cargo_sources(
     lockfile: &Path,
 ) -> Result<(BTreeMap<String, String>, BTreeSet<String>), ComposeError> {
-    let input = fs::read_to_string(lockfile)?;
+    let input_bytes =
+        read_composition_regular_file_bounded(lockfile, MAX_COMPOSITION_CONTROL_FILE_BYTES, None)?;
+    let input =
+        std::str::from_utf8(&input_bytes).map_err(|error| ComposeError::ManifestNormalization {
+            path: lockfile.display().to_string(),
+            message: error.to_string(),
+        })?;
     let document: toml::Value =
-        toml::from_str(&input).map_err(|error| ComposeError::ManifestNormalization {
+        toml::from_str(input).map_err(|error| ComposeError::ManifestNormalization {
             path: lockfile.display().to_string(),
             message: error.to_string(),
         })?;
@@ -1173,11 +2128,15 @@ fn generated_file_records(
 ) -> Result<Vec<GeneratedFileRecord>, ComposeError> {
     let mut records = Vec::new();
     for path in paths {
-        let bytes = fs::read(staging.join(path))?;
+        let (digest, bytes) = hash_composition_regular_file_bounded(
+            &staging.join(path),
+            MAX_COMPOSITION_CONTROL_FILE_BYTES,
+            None,
+        )?;
         records.push(GeneratedFileRecord {
             path: (*path).to_owned(),
-            digest: sha256_hex(&bytes),
-            bytes: bytes.len() as u64,
+            digest,
+            bytes,
         });
     }
     records.sort_by(|left, right| left.path.cmp(&right.path));
@@ -1207,6 +2166,7 @@ fn validate_options(options: &ComposeOptions) -> Result<(), ComposeError> {
     Ok(())
 }
 
+#[cfg(any(unix, windows))]
 fn link_registry_cache(cargo_home: &Path, cache: Option<&Path>) -> Result<(), ComposeError> {
     let Some(cache) = cache else {
         return Ok(());
@@ -1216,6 +2176,11 @@ fn link_registry_cache(cargo_home: &Path, cache: Option<&Path>) -> Result<(), Co
     std::os::unix::fs::symlink(cache, destination)?;
     #[cfg(windows)]
     std::os::windows::fs::symlink_dir(cache, destination)?;
+    Ok(())
+}
+
+#[cfg(not(any(unix, windows)))]
+fn link_registry_cache(_cargo_home: &Path, _cache: Option<&Path>) -> Result<(), ComposeError> {
     Ok(())
 }
 
@@ -1238,6 +2203,33 @@ fn unique_staging(output_root: &Path) -> PathBuf {
     ))
 }
 
+fn remove_staging_tree(path: &Path) -> io::Result<()> {
+    make_staging_tree_owner_writable(path)?;
+    fs::remove_dir_all(path)
+}
+
+fn make_staging_tree_owner_writable(root: &Path) -> io::Result<()> {
+    for entry in WalkDir::new(root).follow_links(false) {
+        let entry = entry.map_err(|error| io::Error::other(error.to_string()))?;
+        let metadata = fs::symlink_metadata(entry.path())?;
+        if metadata.file_type().is_symlink() {
+            continue;
+        }
+        let mut permissions = metadata.permissions();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            let owner_access = if metadata.is_dir() { 0o700 } else { 0o600 };
+            permissions.set_mode(permissions.mode() | owner_access);
+        }
+        #[cfg(not(unix))]
+        permissions.set_readonly(false);
+        fs::set_permissions(entry.path(), permissions)?;
+    }
+    Ok(())
+}
+
 fn write_text(path: &Path, value: &str) -> Result<(), ComposeError> {
     debug_assert!(value.ends_with('\n'));
     fs::write(path, value.as_bytes())?;
@@ -1247,31 +2239,31 @@ fn write_text(path: &Path, value: &str) -> Result<(), ComposeError> {
 fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<(), ComposeError> {
     let mut bytes = serde_json::to_vec_pretty(value).map_err(CanonicalError::Serialize)?;
     bytes.push(b'\n');
+    if bytes.len() as u64 > MAX_COMPOSITION_CONTROL_FILE_BYTES {
+        return Err(ComposeError::Verification(format!(
+            "composition control file `{}` has {} bytes; maximum is {MAX_COMPOSITION_CONTROL_FILE_BYTES}",
+            path.display(),
+            bytes.len()
+        )));
+    }
     fs::write(path, bytes)?;
     Ok(())
 }
 
 fn file_digest(path: &Path) -> Result<String, ComposeError> {
-    Ok(sha256_hex(&fs::read(path)?))
+    Ok(hash_composition_regular_file_bounded(path, MAX_COMPOSITION_CONTROL_FILE_BYTES, None)?.0)
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
 }
 
+fn is_sha256_hex(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
 fn rust_ident(value: &str) -> String {
     value.replace(['-', ':'], "_")
-}
-
-#[cfg(unix)]
-fn is_executable(metadata: &fs::Metadata) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-    metadata.permissions().mode() & 0o111 != 0
-}
-
-#[cfg(not(unix))]
-fn is_executable(_metadata: &fs::Metadata) -> bool {
-    false
 }
 
 #[cfg(test)]
@@ -1325,6 +2317,30 @@ mod tests {
         cargo_home.join("registry").canonicalize().unwrap()
     }
 
+    fn write_snapshot_fixture(root: &Path, name: &str) -> PathBuf {
+        let package = root.join(name);
+        fs::create_dir_all(package.join("src")).unwrap();
+        fs::write(
+            package.join("Cargo.toml"),
+            format!(
+                "[package]\nname = {name:?}\nversion = \"0.1.0\"\nedition = \"2024\"\nrust-version = \"{PINNED_RUST_VERSION}\"\nlicense = \"MIT\"\n"
+            ),
+        )
+        .unwrap();
+        fs::write(package.join("src/lib.rs"), b"pub fn fixture() {}\n").unwrap();
+        package
+    }
+
+    fn assert_no_composition_staging(output_root: &Path) {
+        assert!(fs::read_dir(output_root).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".staging-")
+        }));
+    }
+
     #[test]
     fn regeneration_is_deterministic() {
         let temp = TempDir::new().unwrap();
@@ -1334,6 +2350,437 @@ mod tests {
         assert_eq!(first.composition_hash, second.composition_hash);
         assert_eq!(first.manifest, second.manifest);
         assert_eq!(first.path, second.path);
+    }
+
+    #[test]
+    fn existing_composition_reuse_rejects_tampered_snapshot_bytes_without_repair() {
+        let temp = TempDir::new().unwrap();
+        let options = options(&temp, "tests/fixtures/profiles/minimal.toml");
+        let generated = compose(&options).unwrap();
+        let package = generated
+            .manifest
+            .sources
+            .iter()
+            .find(|package| {
+                package
+                    .tree_entries
+                    .iter()
+                    .any(|entry| entry.path == "src/lib.rs")
+            })
+            .unwrap();
+        let source_file = generated
+            .path
+            .join("sources")
+            .join(&package.logical_path)
+            .join("src/lib.rs");
+        let original = fs::read(&source_file).unwrap();
+        let mut mutated = original.clone();
+        mutated[0] ^= 1;
+        let mut permissions = fs::metadata(&source_file).unwrap().permissions();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            permissions.set_mode(permissions.mode() | 0o200);
+        }
+        #[cfg(not(unix))]
+        permissions.set_readonly(false);
+        fs::set_permissions(&source_file, permissions).unwrap();
+        fs::write(&source_file, &mutated).unwrap();
+        set_snapshot_epoch(&source_file).unwrap();
+        set_snapshot_permissions(&source_file, false).unwrap();
+
+        assert!(matches!(
+            compose(&options),
+            Err(ComposeError::ExistingCompositionCorrupt { .. })
+        ));
+        assert_eq!(fs::read(&source_file).unwrap(), mutated);
+        assert_no_composition_staging(&options.output_root);
+
+        make_staging_tree_owner_writable(&generated.path).unwrap();
+    }
+
+    #[test]
+    fn composition_verification_rejects_deployable_and_handoff_projection_forgery() {
+        let temp = TempDir::new().unwrap();
+        let generated = compose(&options(&temp, "tests/fixtures/profiles/minimal.toml")).unwrap();
+        let manifest_path = generated.path.join("rust-agent-composition.json");
+        let original = fs::read(&manifest_path).unwrap();
+        let mut manifest: serde_json::Value = serde_json::from_slice(&original).unwrap();
+
+        manifest["deployable"] = serde_json::Value::Bool(true);
+        fs::write(
+            &manifest_path,
+            serde_json::to_vec_pretty(&manifest).unwrap(),
+        )
+        .unwrap();
+        assert!(matches!(
+            verify_composition(&generated.path),
+            Err(ComposeError::Verification(message))
+                if message.contains("manifest projection")
+        ));
+
+        manifest = serde_json::from_slice(&original).unwrap();
+        manifest["app-handoff"] = serde_json::Value::String("concurrent".into());
+        fs::write(
+            &manifest_path,
+            serde_json::to_vec_pretty(&manifest).unwrap(),
+        )
+        .unwrap();
+        assert!(matches!(
+            verify_composition(&generated.path),
+            Err(ComposeError::Verification(message))
+                if message.contains("manifest projection")
+        ));
+
+        fs::write(&manifest_path, original).unwrap();
+        verify_composition(&generated.path).unwrap();
+        make_staging_tree_owner_writable(&generated.path).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn composition_control_file_reads_reject_symlinks_and_oversized_regular_files() {
+        use std::os::unix::fs::symlink;
+
+        let temp = TempDir::new().unwrap();
+        let composition = temp.path().join("composition");
+        let outside = temp.path().join("outside.json");
+        fs::create_dir(&composition).unwrap();
+        fs::write(&outside, b"{}\n").unwrap();
+        let manifest = composition.join("rust-agent-composition.json");
+        symlink(&outside, &manifest).unwrap();
+
+        assert!(matches!(
+            load_manifest(&composition),
+            Err(ComposeError::Verification(message))
+                if message.contains("concrete regular file")
+        ));
+
+        fs::remove_file(&manifest).unwrap();
+        File::create(&manifest)
+            .unwrap()
+            .set_len(MAX_COMPOSITION_CONTROL_FILE_BYTES + 1)
+            .unwrap();
+        assert!(matches!(
+            load_manifest(&composition),
+            Err(ComposeError::Verification(message))
+                if message.contains("maximum")
+        ));
+    }
+
+    #[test]
+    fn composition_verification_bounds_lockfile_before_hashing() {
+        let temp = TempDir::new().unwrap();
+        let generated = compose(&options(&temp, "tests/fixtures/profiles/minimal.toml")).unwrap();
+        File::options()
+            .write(true)
+            .open(generated.path.join("Cargo.lock"))
+            .unwrap()
+            .set_len(MAX_COMPOSITION_CONTROL_FILE_BYTES + 1)
+            .unwrap();
+
+        assert!(matches!(
+            verify_composition(&generated.path),
+            Err(ComposeError::Verification(message))
+                if message.contains("Cargo.lock") && message.contains("maximum")
+        ));
+        make_staging_tree_owner_writable(&generated.path).unwrap();
+    }
+
+    #[test]
+    fn composition_verification_binds_complete_directory_topology() {
+        let temp = TempDir::new().unwrap();
+        let generated = compose(&options(&temp, "tests/fixtures/profiles/minimal.toml")).unwrap();
+        let extra = generated.path.join("unexpected-empty-directory");
+        fs::create_dir(&extra).unwrap();
+        assert!(matches!(
+            verify_composition(&generated.path),
+            Err(ComposeError::Verification(message))
+                if message.contains("unexpected-empty-directory")
+        ));
+
+        fs::remove_dir(&extra).unwrap();
+        fs::remove_dir(generated.path.join("vendor")).unwrap();
+        assert!(matches!(
+            verify_composition(&generated.path),
+            Err(ComposeError::Verification(message))
+                if message.contains("missing expected entries") && message.contains("vendor")
+        ));
+
+        fs::create_dir(generated.path.join("vendor")).unwrap();
+        verify_composition(&generated.path).unwrap();
+        make_staging_tree_owner_writable(&generated.path).unwrap();
+    }
+
+    #[test]
+    fn composition_verification_rejects_nested_schema_and_resolution_projection_forgery() {
+        let temp = TempDir::new().unwrap();
+        let generated = compose(&options(&temp, "tests/fixtures/profiles/minimal.toml")).unwrap();
+        let manifest_path = generated.path.join("rust-agent-composition.json");
+        let original: serde_json::Value =
+            serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+        let mut forgeries = Vec::new();
+
+        let mut profile_schema = original.clone();
+        profile_schema["normalized-profile"]["schema"] = serde_json::json!(2);
+        forgeries.push(profile_schema);
+        let mut resolution_schema = original.clone();
+        resolution_schema["resolution"]["schema"] = serde_json::json!(2);
+        forgeries.push(resolution_schema);
+        let mut cargo_schema = original.clone();
+        cargo_schema["cargo-resolution"]["schema"] = serde_json::json!(2);
+        forgeries.push(cargo_schema);
+        for field in ["profile", "target", "target-fact-digest"] {
+            let mut resolution_projection = original.clone();
+            resolution_projection["resolution"][field] = serde_json::json!("forged");
+            forgeries.push(resolution_projection);
+        }
+
+        for forgery in forgeries {
+            write_json(&manifest_path, &forgery).unwrap();
+            assert!(matches!(
+                verify_composition(&generated.path),
+                Err(ComposeError::Verification(message))
+                    if message.contains("manifest projection")
+            ));
+        }
+
+        write_json(&manifest_path, &original).unwrap();
+        verify_composition(&generated.path).unwrap();
+        make_staging_tree_owner_writable(&generated.path).unwrap();
+    }
+
+    #[test]
+    fn composition_effect_attribution_is_union_checked_and_identity_bound() {
+        let temp = TempDir::new().unwrap();
+        let generated = compose(&options(&temp, "tests/fixtures/profiles/with-fs.toml")).unwrap();
+        let manifest_path = generated.path.join("rust-agent-composition.json");
+        let original: serde_json::Value =
+            serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+
+        let mut missing_effect = original.clone();
+        missing_effect["component-runtime-effects"] = serde_json::json!([]);
+        write_json(&manifest_path, &missing_effect).unwrap();
+        assert!(matches!(
+            verify_composition(&generated.path),
+            Err(ComposeError::Verification(message))
+                if message.contains("runtime effects")
+        ));
+
+        let mut reattributed_effect = original.clone();
+        reattributed_effect["component-runtime-effects"] = serde_json::json!([]);
+        reattributed_effect["host-runtime-effects"] = serde_json::json!(["read-local"]);
+        write_json(&manifest_path, &reattributed_effect).unwrap();
+        assert!(matches!(
+            verify_composition(&generated.path),
+            Err(ComposeError::Verification(message))
+                if message.contains("composition identity mismatch")
+        ));
+
+        write_json(&manifest_path, &original).unwrap();
+        verify_composition(&generated.path).unwrap();
+        make_staging_tree_owner_writable(&generated.path).unwrap();
+    }
+
+    #[cfg(any(
+        target_os = "android",
+        target_os = "ios",
+        target_os = "linux",
+        target_os = "macos",
+        windows
+    ))]
+    #[test]
+    fn composition_publication_never_replaces_an_existing_empty_directory() {
+        let temp = TempDir::new().unwrap();
+        let source = temp.path().join("source");
+        let destination = temp.path().join("destination");
+        fs::create_dir(&source).unwrap();
+        fs::create_dir(&destination).unwrap();
+        fs::write(source.join("source-marker"), b"source").unwrap();
+
+        assert!(publish_composition_noreplace(&source, &destination).is_err());
+        assert!(source.join("source-marker").is_file());
+        assert!(destination.is_dir());
+        assert!(fs::read_dir(destination).unwrap().next().is_none());
+    }
+
+    #[test]
+    fn snapshot_preflight_rejects_oversized_file_without_creating_destination() {
+        let temp = TempDir::new().unwrap();
+        let package = write_snapshot_fixture(temp.path(), "fixture");
+        File::create(package.join("oversized.bin"))
+            .unwrap()
+            .set_len(MAX_CANONICAL_SNAPSHOT_FILE_BYTES + 1)
+            .unwrap();
+        let snapshot_root = temp.path().join("snapshots");
+
+        assert!(matches!(
+            snapshot_package(
+                temp.path(),
+                &snapshot_root,
+                "fixture",
+                "fixture",
+                "fixture"
+            ),
+            Err(ComposeError::Snapshot(CanonicalSnapshotError::FileTooLarge {
+                actual,
+                maximum,
+                ..
+            })) if actual == MAX_CANONICAL_SNAPSHOT_FILE_BYTES + 1
+                && maximum == MAX_CANONICAL_SNAPSHOT_FILE_BYTES
+        ));
+        assert!(!snapshot_root.join("fixture").exists());
+    }
+
+    #[test]
+    fn snapshot_preflight_rejects_aggregate_overflow_without_copying() {
+        let temp = TempDir::new().unwrap();
+        let package = write_snapshot_fixture(temp.path(), "fixture");
+        for name in ["a.bin", "b.bin", "c.bin", "d.bin"] {
+            File::create(package.join(name))
+                .unwrap()
+                .set_len(MAX_CANONICAL_SNAPSHOT_FILE_BYTES)
+                .unwrap();
+        }
+        let snapshot_root = temp.path().join("snapshots");
+
+        assert!(matches!(
+            snapshot_package(
+                temp.path(),
+                &snapshot_root,
+                "fixture",
+                "fixture",
+                "fixture"
+            ),
+            Err(ComposeError::Snapshot(
+                CanonicalSnapshotError::TotalBytesTooLarge { maximum, .. }
+            )) if maximum == MAX_CANONICAL_SNAPSHOT_TOTAL_FILE_BYTES
+        ));
+        assert!(!snapshot_root.join("fixture").exists());
+    }
+
+    #[test]
+    fn snapshot_verification_rejects_aggregate_overflow_before_hashing_sparse_files() {
+        let temp = TempDir::new().unwrap();
+        let package = write_snapshot_fixture(temp.path(), "fixture");
+        for name in ["a.bin", "b.bin", "c.bin", "d.bin"] {
+            File::create(package.join(name))
+                .unwrap()
+                .set_len(MAX_CANONICAL_SNAPSHOT_FILE_BYTES)
+                .unwrap();
+        }
+        seal_source_snapshot_storage_projection(&package).unwrap();
+
+        assert!(matches!(
+            source_snapshot_tree(&package),
+            Err(ComposeError::Snapshot(
+                CanonicalSnapshotError::TotalBytesTooLarge { maximum, .. }
+            )) if maximum == MAX_CANONICAL_SNAPSHOT_TOTAL_FILE_BYTES
+        ));
+        make_staging_tree_owner_writable(&package).unwrap();
+    }
+
+    #[test]
+    fn snapshot_manifest_read_is_bounded_before_parsing_or_copying() {
+        let temp = TempDir::new().unwrap();
+        let package = temp.path().join("fixture");
+        fs::create_dir_all(&package).unwrap();
+        File::create(package.join("Cargo.toml"))
+            .unwrap()
+            .set_len(MAX_SOURCE_MANIFEST_BYTES + 1)
+            .unwrap();
+        let snapshot_root = temp.path().join("snapshots");
+
+        assert!(matches!(
+            snapshot_package(
+                temp.path(),
+                &snapshot_root,
+                "fixture",
+                "fixture",
+                "fixture"
+            ),
+            Err(ComposeError::Snapshot(CanonicalSnapshotError::FileTooLarge {
+                actual,
+                maximum,
+                ..
+            })) if actual == MAX_SOURCE_MANIFEST_BYTES + 1
+                && maximum == MAX_SOURCE_MANIFEST_BYTES
+        ));
+        assert!(!snapshot_root.join("fixture").exists());
+    }
+
+    #[test]
+    fn transient_trees_are_pruned_before_snapshot_resource_checks() {
+        let temp = TempDir::new().unwrap();
+        let package = write_snapshot_fixture(temp.path(), "fixture");
+        for relative in ["target/huge.bin", ".git/huge.bin", "wip/huge.bin"] {
+            let path = package.join(relative);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            File::create(path)
+                .unwrap()
+                .set_len(MAX_CANONICAL_SNAPSHOT_FILE_BYTES + 1)
+                .unwrap();
+        }
+        let snapshot_root = temp.path().join("snapshots");
+        let record =
+            snapshot_package(temp.path(), &snapshot_root, "fixture", "fixture", "fixture").unwrap();
+
+        assert!(
+            record
+                .tree_entries
+                .iter()
+                .all(|entry| !entry.path.starts_with("target/")
+                    && !entry.path.starts_with(".git/")
+                    && !entry.path.starts_with("wip/"))
+        );
+        make_staging_tree_owner_writable(&snapshot_root).unwrap();
+    }
+
+    #[test]
+    fn snapshot_streaming_copy_preserves_multibuffer_bytes_and_digest() {
+        let temp = TempDir::new().unwrap();
+        let package = write_snapshot_fixture(temp.path(), "fixture");
+        let bytes = (0..(SNAPSHOT_COPY_BUFFER_BYTES * 2 + 17))
+            .map(|index| u8::try_from(index % 251).unwrap())
+            .collect::<Vec<_>>();
+        fs::write(package.join("payload.bin"), &bytes).unwrap();
+        let snapshot_root = temp.path().join("snapshots");
+        let record =
+            snapshot_package(temp.path(), &snapshot_root, "fixture", "fixture", "fixture").unwrap();
+
+        let payload = record
+            .tree_entries
+            .iter()
+            .find(|entry| entry.path == "payload.bin")
+            .unwrap();
+        assert!(matches!(
+            &payload.kind,
+            CanonicalSnapshotEntryKind::RegularFile { sha256, bytes: actual }
+                if sha256 == &sha256_hex(&bytes) && *actual == bytes.len() as u64
+        ));
+        assert_eq!(
+            fs::read(snapshot_root.join("fixture/payload.bin")).unwrap(),
+            bytes
+        );
+        make_staging_tree_owner_writable(&snapshot_root).unwrap();
+    }
+
+    #[test]
+    fn snapshot_epoch_opens_files_and_directories() {
+        let temp = TempDir::new().unwrap();
+        let directory = temp.path().join("directory");
+        let file = temp.path().join("file");
+        fs::create_dir(&directory).unwrap();
+        fs::write(&file, b"file").unwrap();
+
+        for path in [&file, &directory] {
+            set_snapshot_epoch(path).unwrap();
+            assert_eq!(
+                fs::symlink_metadata(path).unwrap().modified().unwrap(),
+                SystemTime::UNIX_EPOCH
+            );
+        }
     }
 
     #[test]
@@ -1368,13 +2815,117 @@ mod tests {
 
         assert_eq!(
             record
-                .files
+                .tree_entries
                 .iter()
-                .map(|file| file.path.as_str())
+                .map(|entry| entry.path.as_str())
                 .collect::<Vec<_>>(),
-            ["Cargo.toml", "src/lib.rs"]
+            ["Cargo.toml", "src", "src/lib.rs"]
         );
+        let tree = CanonicalSnapshotTree::from_entries(record.tree_entries.clone()).unwrap();
+        assert_eq!(record.tree_digest, tree.digest());
+        assert!(record.tree_entries.iter().all(|entry| match &entry.kind {
+            CanonicalSnapshotEntryKind::Directory => entry.metadata.mode == 0o555,
+            CanonicalSnapshotEntryKind::RegularFile { .. } => entry.metadata.mode == 0o444,
+        }));
         assert!(!snapshot_root.join("fixture/wip").exists());
+    }
+
+    #[test]
+    fn source_snapshot_uses_shared_contract_and_rejects_storage_metadata_drift() {
+        use std::time::Duration;
+
+        fn assert_metadata_drift(root: &Path) {
+            assert!(matches!(
+                source_snapshot_tree(root),
+                Err(ComposeError::Verification(message)) if message.contains("metadata drifted")
+            ));
+        }
+
+        let temp = TempDir::new().unwrap();
+        let package = temp.path().join("fixture");
+        fs::create_dir_all(package.join("src")).unwrap();
+        fs::write(
+            package.join("Cargo.toml"),
+            format!(
+                "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\nedition = \"2024\"\nrust-version = \"{PINNED_RUST_VERSION}\"\nlicense = \"MIT\"\n"
+            ),
+        )
+        .unwrap();
+        fs::write(package.join("src/lib.rs"), "pub fn fixture() {}\n").unwrap();
+
+        let snapshot_root = temp.path().join("snapshots");
+        let record =
+            snapshot_package(temp.path(), &snapshot_root, "fixture", "fixture", "fixture").unwrap();
+        let root = snapshot_root.join("fixture");
+        let actual = source_snapshot_tree(&root).unwrap();
+        assert_eq!(actual.entries(), record.tree_entries);
+        assert_eq!(actual.digest(), record.tree_digest);
+
+        let file = root.join("src/lib.rs");
+        let directory = root.join("src");
+        for path in [&file, &directory] {
+            open_metadata_handle(path)
+                .unwrap()
+                .set_times(
+                    FileTimes::new()
+                        .set_accessed(SystemTime::UNIX_EPOCH)
+                        .set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(1)),
+                )
+                .unwrap();
+            assert_metadata_drift(&root);
+            set_snapshot_epoch(path).unwrap();
+            source_snapshot_tree(&root).unwrap();
+        }
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            for (path, drifted_mode, directory) in
+                [(&file, 0o644, false), (&directory, 0o755, true)]
+            {
+                fs::set_permissions(path, fs::Permissions::from_mode(drifted_mode)).unwrap();
+                assert_metadata_drift(&root);
+                set_snapshot_permissions(path, directory).unwrap();
+                source_snapshot_tree(&root).unwrap();
+            }
+        }
+
+        make_staging_tree_owner_writable(&snapshot_root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn readonly_source_snapshot_staging_cleanup_restores_owner_write() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = TempDir::new().unwrap();
+        let staging = temp.path().join("staging");
+        let nested = staging.join("sources/package/src");
+        fs::create_dir_all(&nested).unwrap();
+        let file = nested.join("lib.rs");
+        fs::write(&file, b"pub fn fixture() {}\n").unwrap();
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o444)).unwrap();
+        for directory in [
+            &nested,
+            &staging.join("sources/package"),
+            &staging.join("sources"),
+            &staging,
+        ] {
+            fs::set_permissions(directory, fs::Permissions::from_mode(0o555)).unwrap();
+        }
+
+        make_staging_tree_owner_writable(&staging).unwrap();
+        assert_eq!(
+            fs::metadata(&file).unwrap().permissions().mode() & 0o600,
+            0o600
+        );
+        assert_eq!(
+            fs::metadata(&nested).unwrap().permissions().mode() & 0o700,
+            0o700
+        );
+        remove_staging_tree(&staging).unwrap();
+        assert!(!staging.exists());
     }
 
     #[test]

@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
+pub use rust_agent_composition::snapshot::CanonicalSnapshotMetadataContract;
 use rust_agent_composition::{canonical, metadata::BuildRequirements};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -52,12 +53,6 @@ pub struct HostBuildClosureItem {
     pub content: HostBuildClosureContent,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum CanonicalSnapshotMetadataContract {
-    ReadOnlyEpochV1,
-}
-
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum HostBuildClosureItemRole {
@@ -89,6 +84,8 @@ pub enum HostBuildClosureContent {
     },
     CanonicalRecord {
         digest: String,
+        #[serde(rename = "bytes-sha256")]
+        bytes_sha256: String,
     },
     SignedEvidence {
         #[serde(rename = "bytes-digest")]
@@ -203,6 +200,8 @@ pub enum HostBuildInputClosureError {
     InvalidLogicalPath(String),
     #[error("duplicate closure item id or logical path: {0}")]
     DuplicateItem(String),
+    #[error("closure item logical paths have a case-fold collision: `{first}` and `{second}`")]
+    LogicalPathCaseCollision { first: String, second: String },
     #[error("closure item `{id}` has content incompatible with role {role:?}")]
     ItemContentMismatch {
         id: String,
@@ -523,6 +522,7 @@ fn normalize_items(
 ) -> Result<Vec<NormalizedHostBuildClosureItem>, HostBuildInputClosureError> {
     let mut ids = BTreeSet::new();
     let mut paths = BTreeSet::new();
+    let mut folded_paths = BTreeMap::new();
     let mut counts = BTreeMap::<HostBuildClosureItemRole, usize>::new();
     let mut items = Vec::with_capacity(raw_items.len());
     for raw in raw_items {
@@ -541,6 +541,13 @@ fn normalize_items(
             return Err(HostBuildInputClosureError::DuplicateItem(
                 raw.logical_path.clone(),
             ));
+        }
+        let folded = raw.logical_path.to_ascii_lowercase();
+        if let Some(first) = folded_paths.insert(folded, raw.logical_path.clone()) {
+            return Err(HostBuildInputClosureError::LogicalPathCaseCollision {
+                first,
+                second: raw.logical_path.clone(),
+            });
         }
         if !role_accepts_content(raw.role, &raw.content) {
             return Err(HostBuildInputClosureError::ItemContentMismatch {
@@ -830,7 +837,10 @@ fn content_has_valid_digests(content: &HostBuildClosureContent) -> bool {
     match content {
         HostBuildClosureContent::File { sha256 } => is_digest(sha256),
         HostBuildClosureContent::SnapshotTree { tree_digest } => is_digest(tree_digest),
-        HostBuildClosureContent::CanonicalRecord { digest } => is_digest(digest),
+        HostBuildClosureContent::CanonicalRecord {
+            digest,
+            bytes_sha256,
+        } => is_digest(digest) && is_digest(bytes_sha256),
         HostBuildClosureContent::SignedEvidence {
             bytes_digest,
             reviewer_policy: _,
@@ -848,7 +858,7 @@ fn content_primary_digest(content: &HostBuildClosureContent) -> &str {
     match content {
         HostBuildClosureContent::File { sha256 } => sha256,
         HostBuildClosureContent::SnapshotTree { tree_digest } => tree_digest,
-        HostBuildClosureContent::CanonicalRecord { digest } => digest,
+        HostBuildClosureContent::CanonicalRecord { digest, .. } => digest,
         HostBuildClosureContent::SignedEvidence { bytes_digest, .. } => bytes_digest,
     }
 }
@@ -881,12 +891,17 @@ fn is_cargo_name(value: &str) -> bool {
 }
 
 fn is_logical_closure_path(value: &str) -> bool {
-    value.starts_with(CLOSURE_LOGICAL_ROOT)
-        && !value.ends_with('/')
+    !value.is_empty()
+        && value.len() <= 4096
+        && value.is_ascii()
         && value
-            .split('/')
-            .skip(1)
-            .all(|component| !component.is_empty() && !matches!(component, "." | ".."))
+            .bytes()
+            .all(|byte| byte.is_ascii_graphic() && byte != b'\\')
+        && value.starts_with(CLOSURE_LOGICAL_ROOT)
+        && !value.ends_with('/')
+        && value.split('/').skip(1).all(|component| {
+            !component.is_empty() && component.len() <= 255 && !matches!(component, "." | "..")
+        })
 }
 
 fn declared_tool_version(value: &str) -> &str {
