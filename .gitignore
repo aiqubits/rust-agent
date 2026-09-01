@@ -23,7 +23,5 @@ target/
 .env
 /config.toml
 
-rust-agent.md
-
 AINS/
 deepseek-harness/

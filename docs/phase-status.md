@@ -7,7 +7,7 @@ represented in `docs/invariant-tests.md` and all applicable gates pass.
 |---|---|---|
 | 0 — repository and contract | Complete | Rust/Cargo 1.97.1 is synchronized across local toolchain targets, workspace MSRV, generated manifests and CI; workspace/deny/ADR, effect-free core/runtime contracts, checked lifecycle identities and reservation schema, closed metadata/target parsing, resource-namespace bootstrap graph, Host/runtime metadata, canonical Host Cargo unit-graph schema, privacy compile-fail tests and every Phase 0 acceptance mapping pass. The lightweight Session API remains a Phase 2 deliverable; Phase 0 has an automated absence guard so no Agent dependency is exposed early. |
 | 1A — generated graph proof | Complete | Deterministic bounded resolver, property/oracle tests, source snapshots, real Cargo graph absence/presence, manifests, locked development build, controlled build requirements, integration emission/verification, independent Native Host/type-identity tests, same-module Rust WASM Host compilation, JavaScript WASM post-link packaging/Node execution, native backend/WebView IPC isolation, the six-target library matrix and the external shared-feature Host fixture pass. |
-| 1B — Linux production build | In progress | Closed BuildExecutionPolicy/BuildEnforcementIdentity and HostBuildInputClosure schemas, typed artifact selection, exact pinned-Cargo planner invocation/unit-graph-v1 capability gates, Cargo.lock source closure/checksum/revision observations and non-deployable pre/build-host/post input receipts are implemented. A trusted unit-graph-enabled Cargo 1.97.1 runner and raw-to-HostCargoUnitGraph normalizer, isolated fetch executor, closure snapshot materializer/mount verifier, namespace/Landlock/seccomp backend, actual unit observer, descendant escape suite, completion-handle signer, signed production pre/build-host/post and deployable output remain required. |
+| 1B — Linux production build | In progress | Closed BuildExecutionPolicy/BuildEnforcementIdentity and HostBuildInputClosure schemas, typed artifact selection, exact pinned-Cargo planner invocation/unit-graph-v1 capability gates, request-bound raw-to-HostCargoUnitGraph normalization, Cargo.lock source closure/checksum/revision observations and non-deployable pre/build-host/post input receipts are implemented. A trusted unit-graph-enabled Cargo 1.97.1 runner and exact edge-semantics producer, isolated fetch executor, closure snapshot materializer/mount verifier, namespace/Landlock/seccomp backend, actual unit observer, descendant escape suite, completion-handle signer, signed production pre/build-host/post and deployable output remain required. |
 | 2 — minimal runtime spine | Not started | Phase 1A gate passed; implementation must provide the real minimal runtime behavior and must not be represented by empty product crates. |
 | 3 — tool execution plane | Not started | Starts after the Phase 1A contract is stable. |
 | 4 — local execution providers | Not started | Real-target security regressions required. |
@@ -94,17 +94,25 @@ No test result above is evidence for Phase 1B deployability or for a Phase 2+ ru
   Host closure aggregate, target, profile, selector, panic strategy, Rust/Cargo 1.97.1 identity,
   isolated logical environment and fixed `--locked --offline --unit-graph -Z unstable-options`
   argv from the normalized closure. The unit-graph-v1 envelope is closed, bounded, context
-  checked, acyclic and mutation detecting;
+  checked, request-bound, acyclic and mutation detecting;
   stable Cargo's unavailable interface is an explicit unsupported result and never falls back to
   `cargo metadata` or executes build.rs;
+- verified raw unit graphs normalize into canonical `HostCargoUnitGraph` only when the Host input
+  closure matches the planner request, its Cargo.lock matches the normalized source closure,
+  path/registry/git package ids resolve to the exact locked source identities, the single root
+  matches the typed artifact selector and a closed request/envelope-bound edge-semantics record
+  covers every raw edge exactly once. Cross-compile build scripts, proc macros and their transitive
+  units remain in the BuildHost domain while artifact and normal target dependencies remain in the
+  Target domain; closure, lock, source, root, target kind, edge identity/kind/domain or sidecar
+  schema drift fails closed;
 - Cargo.lock v4 registry checksums, HTTPS git precise revisions and path snapshot tree identities
   normalize into a domain-separated source closure. It must match the Host Cargo.lock item and
   every final Host unit package; fetched registry archive/git checkout/path snapshot observations
   require the exact locked package set and are order-independent and mutation detecting.
 
-This evidence establishes policy, input-closure, planner/fetch input and observation contracts
-only. The installed stable Cargo 1.97.1 correctly fails the trusted unit-graph capability gate; it
-is not production planner evidence. No code here can authorize a production build or produce
-`deployable=true` without the trusted unit-graph-enabled Cargo runner/normalizer, isolated fetch
-and snapshot materializers, trusted backend, actual unit observation, escape suite and signed
-attestation gates.
+This evidence establishes policy, input-closure, planner/normalizer/fetch input and observation
+contracts only. The installed stable Cargo 1.97.1 correctly fails the trusted unit-graph capability
+gate; synthetic edge semantics exercise normalization but are not production planner evidence. No
+code here can authorize a production build or produce `deployable=true` without the trusted
+unit-graph-enabled Cargo runner/edge-semantics producer, isolated fetch and snapshot materializers,
+trusted backend, actual unit observation, escape suite and signed attestation gates.

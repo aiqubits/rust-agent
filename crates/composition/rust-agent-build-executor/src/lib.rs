@@ -27,8 +27,9 @@ pub use artifact::{
     WasmPostprocessorManifest,
 };
 pub use cargo_planner::{
-    CargoPlannerError, CargoPlannerGraphRoot, CargoPlannerInvocation, CargoPlannerRequest,
-    NormalizedCargoPlannerRequest, VerifiedCargoUnitGraphEnvelope,
+    CargoPlannerEdgeSemantic, CargoPlannerEdgeSemantics, CargoPlannerError, CargoPlannerGraphRoot,
+    CargoPlannerInvocation, CargoPlannerRequest, CargoUnitGraphNormalizationError,
+    NormalizedCargoPlannerRequest, VerifiedCargoUnitGraphEnvelope, normalize_cargo_unit_graph,
 };
 pub use cargo_unit_graph::{
     CargoCompilationKind, CargoCompileMode, CargoCrateKind, CargoDependencyKind,
