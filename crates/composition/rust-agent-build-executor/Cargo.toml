@@ -1,6 +1,6 @@
 [package]
 name = "rust-agent-build-executor"
-description = "Locked Phase 1A development build and integration verifier"
+description = "Build policy contracts, development executor and integration verifier"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

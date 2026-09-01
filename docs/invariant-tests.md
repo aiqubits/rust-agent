@@ -49,3 +49,15 @@ implementation exists.
 | Raw/postprocessor identity and every WASM output are covered by artifact records, CycloneDX SBOM, recomputed manifest/output digests and a committed byte-growth/absolute size budget | `wasm_bundle::javascript_wasm_bundle_is_closed_verified_and_executable_end_to_end` |
 | Development output cannot claim deployability | `e2e::compose_build_inspect_emit_verify_end_to_end`, `e2e::javascript_wasm_compose_build_and_inspect_end_to_end` |
 | CLI compose/build/inspect/emit/verify workflows include native-library and JavaScript-WASM builds, and registry-backed composition fails without its explicit offline cache | `e2e::compose_build_inspect_emit_verify_end_to_end`, `e2e::javascript_wasm_compose_build_and_inspect_end_to_end`, `e2e::registry_backed_compose_requires_explicit_cache_end_to_end` |
+
+## Phase 1B (in progress)
+
+| Contract | Automated evidence |
+|---|---|
+| Linux production policy is a closed schema and rejects unsupported Host/backend-adjacent surfaces, invalid executor identities/trust graphs, redirects, ambient environment roles, Host-path values, unpinned Rust/Cargo and non-inheriting derived executables | `production_policy::production_policy_rejects_untrusted_or_ambient_surfaces`, `production_policy::attestation_trust_graph_and_closed_toml_fail_closed` |
+| Complete policy identity includes concrete runner/fetch/trust mapping, while BuildEnforcementIdentity is path-free/trust-free and binds selected build inputs plus exact target facts, Cargo resolution/config, profile, artifact, panic, rustc settings and prefix-remap schema | `production_policy::policy_and_enforcement_identity_have_separate_stable_domains`, `production_policy::production_policy_rejects_untrusted_or_ambient_surfaces` |
+| Production policy normalization is order-independent and both schema domain digests are frozen | `production_policy::normalization_is_order_independent_and_schema_digest_is_frozen` |
+| Build requirements select a minimal typed executable/read-input/environment projection; missing or cross-kind mappings fail closed | `production_policy::requirement_resolution_is_typed_and_minimal` |
+
+These tests do not cover or imply the still-missing production sandbox, escape suite, trusted
+completion handle, signed executor attestation or deployable artifact path.

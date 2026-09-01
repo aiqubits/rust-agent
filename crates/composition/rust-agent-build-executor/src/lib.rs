@@ -1,10 +1,15 @@
-//! Locked development-only build executor for Phase 1A.
+//! Build policy contracts plus the locked development-only Phase 1A executor.
+//!
+//! The Phase 1B production policy types in this crate do not themselves make a
+//! build deployable. A production backend must still supply verified confinement,
+//! unit observation, escape-suite evidence and a trusted completion attestation.
 
 mod artifact;
 mod cargo_unit_graph;
 mod host_feature;
 mod integration;
 mod policy;
+mod production_policy;
 mod topology;
 mod wasm_bundle;
 
@@ -37,6 +42,15 @@ pub use integration::{
 pub use policy::{
     BuildEnvironment, BuildExecutable, BuildExecutionPolicy, BuildPolicyError, BuildReadInput,
     VerifiedBuildExecutable,
+};
+pub use production_policy::{
+    BuildEnforcementContext, BuildEnforcementEnvironment, BuildEnforcementExecutable,
+    BuildEnforcementIdentity, BuildEnforcementReadInput, BuildEnforcementToolchain,
+    BuildPanicStrategy, DerivedExecutablePolicy, NormalizedProductionBuildPolicy,
+    ProductionAttestationPolicy, ProductionBuildExecutionPolicy, ProductionBuildPolicyError,
+    ProductionEnvironment, ProductionExecutable, ProductionFetchPolicy, ProductionFileIdentity,
+    ProductionReadInput, ProductionSandboxBackend, ProductionToolIdentity, ProductionToolchain,
+    ProductionTreeIdentity, SigningHelper, TrustedReviewerPolicy, TrustedSigner,
 };
 use rust_agent_composition::{
     CompositionManifest, WASM_BINDGEN_CLI_LOGICAL_ID, WASM_BINDGEN_PROTOCOL_VERSION,
