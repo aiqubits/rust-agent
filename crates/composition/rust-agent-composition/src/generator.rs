@@ -23,20 +23,28 @@ use rustix::fs::{CWD, RenameFlags, renameat_with};
 
 use crate::{
     canonical::{self, CanonicalError},
+    cargo_context::{
+        CargoConfigIsolationError, reject_ambient_cargo_config_for_planned_path,
+        verify_cargo_config_isolation,
+    },
     catalog::{CatalogError, NormalizedCatalog},
+    custom_target::{
+        CustomTargetSpecError, CustomTargetSpecRecord, MAX_CUSTOM_TARGET_SPEC_BYTES,
+        verify_custom_target_snapshot,
+    },
     manifest::{
         CargoResolutionRecord, CompositionIdentityPayload, CompositionManifest,
         GeneratedFileRecord, SecurityManifest, SourcePackageRecord,
     },
-    metadata::{BuildRequirements, CatalogDocument, HostBoundaryKind},
-    profile::{BuildKind, CompositionProfile},
+    metadata::{BuildRequirements, CatalogDocument, HostBoundaryKind, MAX_CATALOG_DOCUMENT_BYTES},
+    profile::{BuildKind, CompositionProfile, MAX_PROFILE_DOCUMENT_BYTES},
     resolver::{ResolutionError, resolve},
     snapshot::{
         CanonicalSnapshotEntry, CanonicalSnapshotEntryKind, CanonicalSnapshotError,
         CanonicalSnapshotTree, MAX_CANONICAL_SNAPSHOT_ENTRIES, MAX_CANONICAL_SNAPSHOT_FILE_BYTES,
         MAX_CANONICAL_SNAPSHOT_JSON_BYTES, MAX_CANONICAL_SNAPSHOT_TOTAL_FILE_BYTES,
     },
-    target::{Target, TargetError},
+    target::{MAX_CANONICAL_TARGET_FACTS_RECORD_BYTES, Target, TargetError, TargetFactsRecord},
 };
 
 static STAGING_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -60,6 +68,7 @@ pub struct ComposeOptions {
     pub rustc_path: PathBuf,
     pub cargo_path: PathBuf,
     pub registry_cache_path: Option<PathBuf>,
+    pub custom_target_spec_path: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -75,6 +84,12 @@ pub enum ComposeError {
     NonAbsolutePath(String),
     #[error("composition input escapes the workspace: {0}")]
     InputOutsideWorkspace(String),
+    #[error("composition input `{path}` has {actual} bytes; maximum is {maximum}")]
+    InputTooLarge {
+        path: String,
+        actual: u64,
+        maximum: u64,
+    },
     #[error("I/O failed while composing: {0}")]
     Io(#[from] io::Error),
     #[error("catalog TOML is invalid: {0}")]
@@ -85,6 +100,8 @@ pub enum ComposeError {
     Catalog(#[from] CatalogError),
     #[error("target is invalid: {0}")]
     Target(#[from] TargetError),
+    #[error("custom target spec is invalid: {0}")]
+    CustomTargetSpec(#[from] CustomTargetSpecError),
     #[error("composition cannot be resolved: {0}")]
     Resolution(#[from] ResolutionError),
     #[error("canonical encoding failed: {0}")]
@@ -109,12 +126,24 @@ pub enum ComposeError {
     Verification(String),
     #[error("explicit Cargo registry cache is invalid: {0}")]
     InvalidRegistryCache(String),
+    #[error("Cargo resolution context is not isolated: {0}")]
+    CargoConfigIsolation(#[from] CargoConfigIsolationError),
 }
 
 pub fn compose(options: &ComposeOptions) -> Result<GeneratedComposition, ComposeError> {
     validate_options(options)?;
-    let catalog_bytes = read_workspace_input(&options.workspace_root, &options.catalog_path)?;
-    let profile_bytes = read_workspace_input(&options.workspace_root, &options.profile_path)?;
+    reject_ambient_cargo_config_for_planned_path(&options.workspace_root)?;
+    reject_ambient_cargo_config_for_planned_path(&options.output_root)?;
+    let catalog_bytes = read_workspace_input(
+        &options.workspace_root,
+        &options.catalog_path,
+        MAX_CATALOG_DOCUMENT_BYTES,
+    )?;
+    let profile_bytes = read_workspace_input(
+        &options.workspace_root,
+        &options.profile_path,
+        MAX_PROFILE_DOCUMENT_BYTES,
+    )?;
     let document =
         CatalogDocument::from_toml(std::str::from_utf8(&catalog_bytes).map_err(|error| {
             ComposeError::ManifestNormalization {
@@ -138,20 +167,44 @@ pub fn compose(options: &ComposeOptions) -> Result<GeneratedComposition, Compose
             profile.build_kind
         )));
     }
-    let target = Target::query(&options.rustc_path, &profile.target, profile.environment)?;
-    let resolution = resolve(&catalog, &profile, &target)?;
-    let requires_registry = profile.build_kind == BuildKind::Wasm
-        || selected_packages_require_registry(&options.workspace_root, &catalog, &resolution)?;
-    if requires_registry && options.registry_cache_path.is_none() {
-        return Err(ComposeError::InvalidRegistryCache(
-            "composition Cargo graph requires an explicit offline registry cache".into(),
-        ));
-    }
-
+    let custom_target_spec = options
+        .custom_target_spec_path
+        .as_ref()
+        .map(|path| prepare_custom_target_spec(&options.workspace_root, path, &profile.target))
+        .transpose()?;
     fs::create_dir_all(&options.output_root)?;
     let staging = unique_staging(&options.output_root);
     fs::create_dir(&staging)?;
-    let result = compose_in_staging(options, &catalog, &profile, &target, &resolution, &staging);
+    let result = (|| {
+        let target = if let Some(spec) = &custom_target_spec {
+            materialize_custom_target_spec(staging.as_path(), spec)?;
+            Target::query_with_custom_spec(
+                &options.rustc_path,
+                profile.environment,
+                &spec.record,
+                &staging.join(&spec.record.snapshot_path),
+            )?
+        } else {
+            Target::query(&options.rustc_path, &profile.target, profile.environment)?
+        };
+        let resolution = resolve(&catalog, &profile, &target)?;
+        let requires_registry = profile.build_kind == BuildKind::Wasm
+            || selected_packages_require_registry(&options.workspace_root, &catalog, &resolution)?;
+        if requires_registry && options.registry_cache_path.is_none() {
+            return Err(ComposeError::InvalidRegistryCache(
+                "composition Cargo graph requires an explicit offline registry cache".into(),
+            ));
+        }
+        compose_in_staging(
+            options,
+            &catalog,
+            &profile,
+            &target,
+            &resolution,
+            custom_target_spec.as_ref().map(|spec| &spec.record),
+            &staging,
+        )
+    })();
     if result.is_err() {
         let _ = remove_staging_tree(&staging);
     }
@@ -164,8 +217,12 @@ fn compose_in_staging(
     profile: &CompositionProfile,
     target: &Target,
     resolution: &crate::resolver::Resolution,
+    custom_target_spec: Option<&CustomTargetSpecRecord>,
     staging: &Path,
 ) -> Result<GeneratedComposition, ComposeError> {
+    let target_facts = TargetFactsRecord::from_target(target)?;
+    write_canonical_target_facts(&staging.join("target-facts.json"), &target_facts)?;
+
     let source_root = staging.join("sources");
     fs::create_dir_all(&source_root)?;
     let package_inputs = selected_packages(catalog, resolution)?;
@@ -205,18 +262,19 @@ fn compose_in_staging(
 
     write_text(
         &staging.join(".cargo/config.toml"),
-        &format!(
-            "[build]\ntarget = {:?}\n\n[net]\noffline = true\n",
-            target.triple
-        ),
+        &generate_cargo_config(target, custom_target_spec),
     )?;
 
-    generate_lockfile(options, staging)?;
+    generate_lockfile(options, staging, custom_target_spec)?;
     let (registries, git_sources) = locked_cargo_sources(&staging.join("Cargo.lock"))?;
     let cargo_resolution = CargoResolutionRecord {
         schema: 1,
         target: target.triple.clone(),
+        cargo_target_input: custom_target_spec
+            .map_or_else(|| target.triple.clone(), |spec| spec.snapshot_path.clone()),
         target_fact_digest: target.target_fact_digest.clone(),
+        custom_target_spec_digest: custom_target_spec
+            .map(|spec| spec.custom_target_spec_digest.clone()),
         resolver: "2".into(),
         offline: true,
         isolated_cargo_home: true,
@@ -229,11 +287,15 @@ fn compose_in_staging(
     let mut generated_paths = vec![
         "Cargo.toml",
         "cargo-resolution.json",
+        "target-facts.json",
         ".cargo/config.toml",
         "src/lib.rs",
     ];
     if profile.build_kind == BuildKind::Wasm {
         generated_paths.push("src/wasm.rs");
+    }
+    if let Some(spec) = custom_target_spec {
+        generated_paths.push(&spec.snapshot_path);
     }
     let generated_files = generated_file_records(staging, &generated_paths)?;
     let direct_root_build_requirements = direct_root_build_requirements(catalog, resolution);
@@ -251,6 +313,8 @@ fn compose_in_staging(
         schema: 1,
         profile,
         target,
+        target_facts: &target_facts,
+        custom_target_spec,
         resolution,
         component_runtime_effects: &component_runtime_effects,
         host_runtime_effects: &host_runtime_effects,
@@ -280,6 +344,8 @@ fn compose_in_staging(
         target: target.triple.clone(),
         normalized_target: target.clone(),
         target_fact_digest: target.target_fact_digest.clone(),
+        target_facts,
+        custom_target_spec: custom_target_spec.cloned(),
         selected_components: resolution.selected_components.clone(),
         runtime_adapter: resolution.runtime_adapter.clone(),
         host_boundary: resolution.host_boundary.clone(),
@@ -320,9 +386,28 @@ fn compose_in_staging(
         }
         return Err(error.into());
     }
+    finish_published_composition(&final_path, manifest)
+}
+
+fn finish_published_composition(
+    final_path: &Path,
+    manifest: CompositionManifest,
+) -> Result<GeneratedComposition, ComposeError> {
+    let published = verify_composition(final_path).map_err(|error| {
+        ComposeError::ExistingCompositionCorrupt {
+            path: final_path.display().to_string(),
+            message: format!("post-publication verification failed: {error}"),
+        }
+    })?;
+    if published != manifest {
+        return Err(ComposeError::ExistingCompositionMismatch {
+            path: final_path.display().to_string(),
+            expected: manifest.composition_hash,
+        });
+    }
     Ok(GeneratedComposition {
-        composition_hash,
-        path: final_path,
+        composition_hash: manifest.composition_hash.clone(),
+        path: final_path.to_owned(),
         manifest,
     })
 }
@@ -437,13 +522,54 @@ pub fn load_manifest(path: &Path) -> Result<CompositionManifest, ComposeError> {
         MAX_COMPOSITION_CONTROL_FILE_BYTES,
         None,
     )?;
-    serde_json::from_slice(&bytes).map_err(|error| ComposeError::ManifestNormalization {
-        path: manifest_path.display().to_string(),
-        message: error.to_string(),
-    })
+    let manifest: CompositionManifest =
+        serde_json::from_slice(&bytes).map_err(|error| ComposeError::ManifestNormalization {
+            path: manifest_path.display().to_string(),
+            message: error.to_string(),
+        })?;
+    let canonical = deterministic_json_bytes(&manifest).map_err(|error| {
+        ComposeError::ManifestNormalization {
+            path: manifest_path.display().to_string(),
+            message: error.to_string(),
+        }
+    })?;
+    if bytes != canonical {
+        return Err(ComposeError::ManifestNormalization {
+            path: manifest_path.display().to_string(),
+            message: "manifest bytes are not the exact deterministic generator JSON encoding"
+                .into(),
+        });
+    }
+    manifest
+        .resolution
+        .verify_canonical_semantics(&manifest.normalized_profile, &manifest.normalized_target)
+        .map_err(|error| ComposeError::ManifestNormalization {
+            path: manifest_path.display().to_string(),
+            message: format!("resolution semantics are invalid: {error}"),
+        })?;
+    Ok(manifest)
 }
 
+fn deterministic_json_bytes<T: Serialize>(value: &T) -> Result<Vec<u8>, CanonicalError> {
+    let mut bytes = serde_json::to_vec_pretty(value).map_err(CanonicalError::Serialize)?;
+    bytes.push(b'\n');
+    Ok(bytes)
+}
+
+/// Verifies a published content-addressed composition, including its hash basename.
 pub fn verify_composition(path: &Path) -> Result<CompositionManifest, ComposeError> {
+    verify_composition_with_location_policy(path, true)
+}
+
+/// Verifies an emitted integration copy whose destination name is integrator-owned.
+pub fn verify_emitted_composition(path: &Path) -> Result<CompositionManifest, ComposeError> {
+    verify_composition_with_location_policy(path, false)
+}
+
+fn verify_composition_with_location_policy(
+    path: &Path,
+    require_content_addressed_basename: bool,
+) -> Result<CompositionManifest, ComposeError> {
     if !path.is_absolute() {
         return Err(ComposeError::Verification(format!(
             "composition path must be an absolute directory: {}",
@@ -458,11 +584,32 @@ pub fn verify_composition(path: &Path) -> Result<CompositionManifest, ComposeErr
         )));
     }
     let manifest = load_manifest(path)?;
+    if require_content_addressed_basename
+        && path.file_name().and_then(std::ffi::OsStr::to_str)
+            != Some(manifest.composition_hash.as_str())
+    {
+        return Err(ComposeError::Verification(format!(
+            "composition directory basename must equal its composition hash: {}",
+            manifest.composition_hash
+        )));
+    }
     if manifest.schema != 1 || manifest.algorithm != "sha256-rust-agent-composition-v1" {
         return Err(ComposeError::Verification(
             "unknown manifest schema or algorithm".into(),
         ));
     }
+    manifest.normalized_target.verify().map_err(|error| {
+        ComposeError::Verification(format!("canonical target facts are invalid: {error}"))
+    })?;
+    let expected_target_facts = TargetFactsRecord::from_target(&manifest.normalized_target)
+        .map_err(|error| {
+            ComposeError::Verification(format!(
+                "manifest target-facts projection is invalid: {error}"
+            ))
+        })?;
+    let manifest_target_fact_digest = manifest.target_facts.semantic_digest().map_err(|error| {
+        ComposeError::Verification(format!("manifest target-facts record is invalid: {error}"))
+    })?;
     if manifest.normalized_profile.schema != 1
         || manifest.resolution.schema != 1
         || manifest.cargo_resolution.schema != 1
@@ -470,6 +617,17 @@ pub fn verify_composition(path: &Path) -> Result<CompositionManifest, ComposeErr
         || manifest.profile != manifest.normalized_profile.name
         || manifest.target != manifest.normalized_target.triple
         || manifest.target_fact_digest != manifest.normalized_target.target_fact_digest
+        || manifest.target_facts != expected_target_facts
+        || manifest_target_fact_digest != manifest.target_fact_digest
+        || manifest.normalized_target.custom_target_spec_digest
+            != manifest
+                .custom_target_spec
+                .as_ref()
+                .map(|spec| spec.custom_target_spec_digest.clone())
+        || manifest
+            .custom_target_spec
+            .as_ref()
+            .is_some_and(|spec| spec.logical_triple != manifest.target)
         || manifest.normalized_profile.target != manifest.target
         || manifest.normalized_profile.environment != manifest.normalized_target.environment
         || manifest.normalized_profile.runtime_adapter != manifest.runtime_adapter
@@ -484,7 +642,17 @@ pub fn verify_composition(path: &Path) -> Result<CompositionManifest, ComposeErr
         || manifest.compiled_runtime_effects != manifest.resolution.compiled_runtime_effects
         || manifest.build_requirements != manifest.resolution.build_requirements
         || manifest.cargo_resolution.target != manifest.target
+        || manifest.cargo_resolution.cargo_target_input
+            != manifest.custom_target_spec.as_ref().map_or_else(
+                || manifest.target.clone(),
+                |spec| spec.snapshot_path.clone(),
+            )
         || manifest.cargo_resolution.target_fact_digest != manifest.target_fact_digest
+        || manifest.cargo_resolution.custom_target_spec_digest
+            != manifest
+                .custom_target_spec
+                .as_ref()
+                .map(|spec| spec.custom_target_spec_digest.clone())
         || manifest.cargo_resolution.resolver != "2"
         || !manifest.cargo_resolution.offline
         || !manifest.cargo_resolution.isolated_cargo_home
@@ -493,6 +661,49 @@ pub fn verify_composition(path: &Path) -> Result<CompositionManifest, ComposeErr
     {
         return Err(ComposeError::Verification(
             "manifest projection differs from normalized profile, target, or resolution".into(),
+        ));
+    }
+    if !manifest
+        .sources
+        .windows(2)
+        .all(|pair| pair[0].id < pair[1].id)
+    {
+        return Err(ComposeError::Verification(
+            "source package records are not in strict canonical id order".into(),
+        ));
+    }
+    if !manifest
+        .generated_files
+        .windows(2)
+        .all(|pair| pair[0].path < pair[1].path)
+    {
+        return Err(ComposeError::Verification(
+            "generated file records are not in strict canonical path order".into(),
+        ));
+    }
+    let target_facts_bytes = read_composition_regular_file_bounded(
+        &path.join("target-facts.json"),
+        MAX_CANONICAL_TARGET_FACTS_RECORD_BYTES as u64,
+        None,
+    )?;
+    let stored_target_facts =
+        TargetFactsRecord::from_json(&target_facts_bytes).map_err(|error| {
+            ComposeError::Verification(format!("target-facts.json is invalid: {error}"))
+        })?;
+    let canonical_target_facts =
+        canonical_target_facts_bytes(&stored_target_facts).map_err(|error| {
+            ComposeError::Verification(format!(
+                "target-facts.json canonical encoding failed: {error}"
+            ))
+        })?;
+    if target_facts_bytes != canonical_target_facts {
+        return Err(ComposeError::Verification(
+            "target-facts.json is not the exact RFC 8785 canonical encoding".into(),
+        ));
+    }
+    if stored_target_facts != manifest.target_facts {
+        return Err(ComposeError::Verification(
+            "target-facts.json differs from the manifest target-facts record".into(),
         ));
     }
     let mut runtime_effect_union = manifest.component_runtime_effects.clone();
@@ -555,6 +766,13 @@ pub fn verify_composition(path: &Path) -> Result<CompositionManifest, ComposeErr
             CompositionTreeEntryKind::Directory,
         )?;
     }
+    if manifest.custom_target_spec.is_some() {
+        insert_expected_composition_entry(
+            &mut expected_tree,
+            "targets",
+            CompositionTreeEntryKind::Directory,
+        )?;
+    }
     for file in [
         "Cargo.lock",
         "rust-agent-composition.json",
@@ -568,7 +786,8 @@ pub fn verify_composition(path: &Path) -> Result<CompositionManifest, ComposeErr
         )?;
     }
 
-    let expected_generated_paths = expected_generated_file_paths(manifest.build_kind);
+    let expected_generated_paths =
+        expected_generated_file_paths(manifest.build_kind, manifest.custom_target_spec.as_ref());
     let actual_generated_paths = manifest
         .generated_files
         .iter()
@@ -649,6 +868,17 @@ pub fn verify_composition(path: &Path) -> Result<CompositionManifest, ComposeErr
                 )));
             }
         };
+    let expected_cargo_resolution_bytes = deterministic_json_bytes(&manifest.cargo_resolution)
+        .map_err(|error| {
+            ComposeError::Verification(format!(
+                "Cargo resolution deterministic encoding failed: {error}"
+            ))
+        })?;
+    if cargo_resolution_bytes != expected_cargo_resolution_bytes {
+        return Err(ComposeError::Verification(
+            "Cargo resolution record drifted from its exact deterministic encoding".into(),
+        ));
+    }
     if cargo_resolution != manifest.cargo_resolution
         || sha256_hex(&cargo_resolution_bytes) != manifest.cargo_resolution_digest
     {
@@ -656,14 +886,47 @@ pub fn verify_composition(path: &Path) -> Result<CompositionManifest, ComposeErr
             "Cargo resolution record drifted".into(),
         ));
     }
-    if hash_composition_regular_file_bounded(
-        &path.join("Cargo.lock"),
+    let expected_cargo_config = generate_cargo_config(
+        &manifest.normalized_target,
+        manifest.custom_target_spec.as_ref(),
+    );
+    if read_composition_regular_file_bounded(
+        &path.join(".cargo/config.toml"),
+        MAX_COMPOSITION_CONTROL_FILE_BYTES,
+        Some(expected_cargo_config.len() as u64),
+    )? != expected_cargo_config.as_bytes()
+    {
+        return Err(ComposeError::Verification(
+            "generated Cargo config differs from the canonical target input".into(),
+        ));
+    }
+    if let Some(spec) = &manifest.custom_target_spec {
+        let bytes = read_composition_regular_file_bounded(
+            &path.join(&spec.snapshot_path),
+            MAX_CUSTOM_TARGET_SPEC_BYTES,
+            None,
+        )?;
+        spec.verify(&bytes).map_err(|error| {
+            ComposeError::Verification(format!("custom target spec snapshot is invalid: {error}"))
+        })?;
+    }
+    let cargo_lock_path = path.join("Cargo.lock");
+    let cargo_lock_bytes = read_composition_regular_file_bounded(
+        &cargo_lock_path,
         MAX_COMPOSITION_CONTROL_FILE_BYTES,
         None,
-    )?
-    .0 != manifest.cargo_lock_digest
-    {
+    )?;
+    if sha256_hex(&cargo_lock_bytes) != manifest.cargo_lock_digest {
         return Err(ComposeError::Verification("Cargo.lock drifted".into()));
+    }
+    let (locked_registries, locked_git_sources) =
+        locked_cargo_sources_from_bytes(&cargo_lock_path, &cargo_lock_bytes)?;
+    if locked_registries != manifest.cargo_resolution.registries
+        || locked_git_sources != manifest.cargo_resolution.git_sources
+    {
+        return Err(ComposeError::Verification(
+            "Cargo resolution source projection differs from Cargo.lock".into(),
+        ));
     }
     for file in &manifest.generated_files {
         let file_path = path.join(&file.path);
@@ -699,6 +962,8 @@ pub fn verify_composition(path: &Path) -> Result<CompositionManifest, ComposeErr
         schema: 1,
         profile: &manifest.normalized_profile,
         target: &manifest.normalized_target,
+        target_facts: &manifest.target_facts,
+        custom_target_spec: manifest.custom_target_spec.as_ref(),
         resolution: &manifest.resolution,
         component_runtime_effects: &manifest.component_runtime_effects,
         host_runtime_effects: &manifest.host_runtime_effects,
@@ -747,23 +1012,36 @@ pub fn verify_composition(path: &Path) -> Result<CompositionManifest, ComposeErr
         compiled_runtime_effects: manifest.compiled_runtime_effects.clone(),
         build_requirements: manifest.build_requirements.clone(),
     };
-    if security != expected_security {
+    let expected_security_bytes =
+        deterministic_json_bytes(&expected_security).map_err(|error| {
+            ComposeError::Verification(format!(
+                "security manifest deterministic encoding failed: {error}"
+            ))
+        })?;
+    if security != expected_security || security_bytes != expected_security_bytes {
         return Err(ComposeError::Verification(
-            "security manifest drifted".into(),
+            "security manifest drifted from its exact deterministic derived encoding".into(),
         ));
     }
     Ok(manifest)
 }
 
-fn expected_generated_file_paths(build_kind: BuildKind) -> BTreeSet<String> {
+fn expected_generated_file_paths(
+    build_kind: BuildKind,
+    custom_target_spec: Option<&CustomTargetSpecRecord>,
+) -> BTreeSet<String> {
     let mut paths = BTreeSet::from([
         ".cargo/config.toml".into(),
         "Cargo.toml".into(),
         "cargo-resolution.json".into(),
+        "target-facts.json".into(),
         "src/lib.rs".into(),
     ]);
     if build_kind == BuildKind::Wasm {
         paths.insert("src/wasm.rs".into());
+    }
+    if let Some(spec) = custom_target_spec {
+        paths.insert(spec.snapshot_path.clone());
     }
     paths
 }
@@ -1113,6 +1391,114 @@ struct PackageInput {
     id: String,
     package: String,
     path: String,
+}
+
+#[derive(Clone, Debug)]
+struct PreparedCustomTargetSpec {
+    record: CustomTargetSpecRecord,
+    bytes: Vec<u8>,
+}
+
+fn prepare_custom_target_spec(
+    workspace_root: &Path,
+    path: &Path,
+    logical_triple: &str,
+) -> Result<PreparedCustomTargetSpec, ComposeError> {
+    let canonical_workspace = workspace_root.canonicalize()?;
+    let relative = path
+        .strip_prefix(&canonical_workspace)
+        .map_err(|_| ComposeError::InputOutsideWorkspace(path.display().to_string()))?;
+    if relative.as_os_str().is_empty()
+        || !relative
+            .components()
+            .all(|component| matches!(component, std::path::Component::Normal(_)))
+    {
+        return Err(ComposeError::InputOutsideWorkspace(
+            path.display().to_string(),
+        ));
+    }
+    let mut current = canonical_workspace.clone();
+    for component in relative.components() {
+        current.push(component.as_os_str());
+        let metadata = fs::symlink_metadata(&current)?;
+        if metadata.file_type().is_symlink() {
+            return Err(ComposeError::UnsupportedSourceEntry(
+                current.display().to_string(),
+            ));
+        }
+    }
+    let canonical_path = path.canonicalize()?;
+    if !canonical_path.starts_with(&canonical_workspace) {
+        return Err(ComposeError::InputOutsideWorkspace(
+            path.display().to_string(),
+        ));
+    }
+    let before = fs::symlink_metadata(&canonical_path)?;
+    if !before.is_file() || before.len() > MAX_CUSTOM_TARGET_SPEC_BYTES {
+        if before.len() > MAX_CUSTOM_TARGET_SPEC_BYTES {
+            return Err(CustomTargetSpecError::TooLarge {
+                actual: before.len(),
+                maximum: MAX_CUSTOM_TARGET_SPEC_BYTES,
+            }
+            .into());
+        }
+        return Err(ComposeError::UnsupportedSourceEntry(
+            canonical_path.display().to_string(),
+        ));
+    }
+    let file = File::open(&canonical_path)?;
+    let handle_before = file.metadata()?;
+    if !handle_before.is_file()
+        || handle_before.len() != before.len()
+        || handle_before.modified()? != before.modified()?
+    {
+        return Err(ComposeError::Verification(format!(
+            "custom target spec `{}` changed before reading",
+            canonical_path.display()
+        )));
+    }
+    let mut reader = BufReader::new(file).take(MAX_CUSTOM_TARGET_SPEC_BYTES + 1);
+    let capacity = usize::try_from(before.len()).map_err(|_| CustomTargetSpecError::TooLarge {
+        actual: before.len(),
+        maximum: MAX_CUSTOM_TARGET_SPEC_BYTES,
+    })?;
+    let mut bytes = Vec::with_capacity(capacity);
+    reader.read_to_end(&mut bytes)?;
+    let file = reader.into_inner().into_inner();
+    let handle_after = file.metadata()?;
+    let path_after = fs::symlink_metadata(&canonical_path)?;
+    if bytes.len() as u64 != before.len()
+        || handle_after.len() != before.len()
+        || handle_after.modified()? != before.modified()?
+        || path_after.file_type().is_symlink()
+        || !path_after.is_file()
+        || path_after.len() != before.len()
+        || path_after.modified()? != before.modified()?
+    {
+        return Err(ComposeError::Verification(format!(
+            "custom target spec `{}` changed or exceeded its bound while reading",
+            canonical_path.display()
+        )));
+    }
+    let record = CustomTargetSpecRecord::from_raw_bytes(logical_triple, &bytes)?;
+    Ok(PreparedCustomTargetSpec { record, bytes })
+}
+
+fn materialize_custom_target_spec(
+    staging: &Path,
+    spec: &PreparedCustomTargetSpec,
+) -> Result<(), ComposeError> {
+    let destination = staging.join(&spec.record.snapshot_path);
+    if fs::symlink_metadata(&destination).is_ok() {
+        return Err(ComposeError::Verification(format!(
+            "custom target snapshot destination already exists: {}",
+            destination.display()
+        )));
+    }
+    fs::create_dir(staging.join("targets"))?;
+    fs::write(&destination, &spec.bytes)?;
+    verify_custom_target_snapshot(&spec.record, &destination)?;
+    Ok(())
 }
 
 fn selected_packages(
@@ -1888,6 +2274,15 @@ fn generate_cargo_toml(
     output
 }
 
+fn generate_cargo_config(
+    target: &Target,
+    custom_target_spec: Option<&CustomTargetSpecRecord>,
+) -> String {
+    let cargo_target_input =
+        custom_target_spec.map_or(target.triple.as_str(), |spec| spec.snapshot_path.as_str());
+    format!("[build]\ntarget = {cargo_target_input:?}\n\n[net]\noffline = true\n")
+}
+
 fn generate_lib_rs(
     catalog: &NormalizedCatalog,
     resolution: &crate::resolver::Resolution,
@@ -2036,7 +2431,15 @@ fn generate_wasm_rs(
     ))
 }
 
-fn generate_lockfile(options: &ComposeOptions, staging: &Path) -> Result<(), ComposeError> {
+fn generate_lockfile(
+    options: &ComposeOptions,
+    staging: &Path,
+    custom_target_spec: Option<&CustomTargetSpecRecord>,
+) -> Result<(), ComposeError> {
+    verify_cargo_config_isolation(staging, &staging.join(".cargo/config.toml"))?;
+    let custom_snapshot_before = custom_target_spec
+        .map(|spec| verify_custom_target_snapshot(spec, &staging.join(&spec.snapshot_path)))
+        .transpose()?;
     let cargo_home = staging.with_extension(format!(
         "cargo-home-{}-{}",
         std::process::id(),
@@ -2060,8 +2463,17 @@ fn generate_lockfile(options: &ComposeOptions, staging: &Path) -> Result<(), Com
                 .parent()
                 .unwrap_or_else(|| Path::new("/")),
         )
-        .output()?;
-    fs::remove_dir_all(&cargo_home)?;
+        .output();
+    let custom_snapshot_after = custom_target_spec
+        .map(|spec| verify_custom_target_snapshot(spec, &staging.join(&spec.snapshot_path)))
+        .transpose();
+    let cleanup = fs::remove_dir_all(&cargo_home);
+    let custom_snapshot_after = custom_snapshot_after?;
+    if let (Some(before), Some(after)) = (&custom_snapshot_before, &custom_snapshot_after) {
+        before.ensure_unchanged(after, "Cargo lockfile generation")?;
+    }
+    cleanup?;
+    let output = output?;
     if !output.status.success() {
         return Err(ComposeError::CargoLock(format!(
             "{}{}",
@@ -2077,8 +2489,15 @@ fn locked_cargo_sources(
 ) -> Result<(BTreeMap<String, String>, BTreeSet<String>), ComposeError> {
     let input_bytes =
         read_composition_regular_file_bounded(lockfile, MAX_COMPOSITION_CONTROL_FILE_BYTES, None)?;
+    locked_cargo_sources_from_bytes(lockfile, &input_bytes)
+}
+
+fn locked_cargo_sources_from_bytes(
+    lockfile: &Path,
+    input_bytes: &[u8],
+) -> Result<(BTreeMap<String, String>, BTreeSet<String>), ComposeError> {
     let input =
-        std::str::from_utf8(&input_bytes).map_err(|error| ComposeError::ManifestNormalization {
+        std::str::from_utf8(input_bytes).map_err(|error| ComposeError::ManifestNormalization {
             path: lockfile.display().to_string(),
             message: error.to_string(),
         })?;
@@ -2156,6 +2575,11 @@ fn validate_options(options: &ComposeOptions) -> Result<(), ComposeError> {
             return Err(ComposeError::NonAbsolutePath(path.display().to_string()));
         }
     }
+    if let Some(path) = &options.custom_target_spec_path
+        && !path.is_absolute()
+    {
+        return Err(ComposeError::NonAbsolutePath(path.display().to_string()));
+    }
     if let Some(cache) = &options.registry_cache_path
         && (!cache.is_absolute() || !cache.is_dir())
     {
@@ -2184,15 +2608,170 @@ fn link_registry_cache(_cargo_home: &Path, _cache: Option<&Path>) -> Result<(), 
     Ok(())
 }
 
-fn read_workspace_input(workspace: &Path, path: &Path) -> Result<Vec<u8>, ComposeError> {
+fn read_workspace_input(
+    workspace: &Path,
+    path: &Path,
+    maximum: usize,
+) -> Result<Vec<u8>, ComposeError> {
+    let (canonical_path, before_metadata) = resolve_workspace_input(workspace, path)?;
+    let before_identity = workspace_input_identity(&before_metadata);
+    let maximum_bytes = u64::try_from(maximum).unwrap_or(u64::MAX);
+    if before_metadata.len() > maximum_bytes {
+        return Err(ComposeError::InputTooLarge {
+            path: path.display().to_string(),
+            actual: before_metadata.len(),
+            maximum: maximum_bytes,
+        });
+    }
+    let mut file = File::open(&canonical_path)?;
+    ensure_workspace_input_identity(path, &before_identity, &file.metadata()?)?;
+    let bytes = read_bounded_workspace_input(&mut file, path, maximum, maximum_bytes)?;
+    ensure_workspace_input_identity(path, &before_identity, &file.metadata()?)?;
+
+    let (path_after, path_after_metadata) = resolve_workspace_input(workspace, path)?;
+    if path_after != canonical_path {
+        return Err(ComposeError::Verification(format!(
+            "workspace input `{}` changed its resolved path while reading",
+            path.display()
+        )));
+    }
+    ensure_workspace_input_identity(path, &before_identity, &path_after_metadata)?;
+
+    let mut reopened = File::open(&path_after)?;
+    ensure_workspace_input_identity(path, &before_identity, &reopened.metadata()?)?;
+    let reopened_bytes = read_bounded_workspace_input(&mut reopened, path, maximum, maximum_bytes)?;
+    ensure_workspace_input_identity(path, &before_identity, &reopened.metadata()?)?;
+    if reopened_bytes != bytes {
+        return Err(ComposeError::Verification(format!(
+            "workspace input `{}` changed while reading",
+            path.display()
+        )));
+    }
+    let (final_path, final_metadata) = resolve_workspace_input(workspace, path)?;
+    if final_path != canonical_path {
+        return Err(ComposeError::Verification(format!(
+            "workspace input `{}` changed its resolved path while reading",
+            path.display()
+        )));
+    }
+    ensure_workspace_input_identity(path, &before_identity, &final_metadata)?;
+    Ok(bytes)
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct WorkspaceInputIdentity {
+    bytes: u64,
+    modified: Option<SystemTime>,
+    #[cfg(unix)]
+    device: u64,
+    #[cfg(unix)]
+    inode: u64,
+    #[cfg(unix)]
+    changed_seconds: i64,
+    #[cfg(unix)]
+    changed_nanoseconds: i64,
+}
+
+fn resolve_workspace_input(
+    workspace: &Path,
+    path: &Path,
+) -> Result<(PathBuf, fs::Metadata), ComposeError> {
     let canonical_workspace = workspace.canonicalize()?;
-    let canonical_path = path.canonicalize()?;
-    if !canonical_path.starts_with(&canonical_workspace) || !canonical_path.is_file() {
+    let relative = path
+        .strip_prefix(&canonical_workspace)
+        .map_err(|_| ComposeError::InputOutsideWorkspace(path.display().to_string()))?;
+    if relative.as_os_str().is_empty()
+        || !relative
+            .components()
+            .all(|component| matches!(component, std::path::Component::Normal(_)))
+    {
         return Err(ComposeError::InputOutsideWorkspace(
             path.display().to_string(),
         ));
     }
-    Ok(fs::read(canonical_path)?)
+
+    let mut current = canonical_workspace.clone();
+    let component_count = relative.components().count();
+    let mut final_metadata = None;
+    for (index, component) in relative.components().enumerate() {
+        current.push(component.as_os_str());
+        let metadata = fs::symlink_metadata(&current)?;
+        if metadata.file_type().is_symlink() {
+            return Err(ComposeError::UnsupportedSourceEntry(
+                current.display().to_string(),
+            ));
+        }
+        let is_final = index + 1 == component_count;
+        if (is_final && !metadata.is_file()) || (!is_final && !metadata.is_dir()) {
+            return Err(ComposeError::UnsupportedSourceEntry(
+                current.display().to_string(),
+            ));
+        }
+        if is_final {
+            final_metadata = Some(metadata);
+        }
+    }
+    let canonical_path = current.canonicalize()?;
+    if !canonical_path.starts_with(&canonical_workspace) {
+        return Err(ComposeError::InputOutsideWorkspace(
+            path.display().to_string(),
+        ));
+    }
+    Ok((
+        canonical_path,
+        final_metadata.expect("a non-empty relative path has a final component"),
+    ))
+}
+
+fn workspace_input_identity(metadata: &fs::Metadata) -> WorkspaceInputIdentity {
+    #[cfg(unix)]
+    use std::os::unix::fs::MetadataExt as _;
+
+    WorkspaceInputIdentity {
+        bytes: metadata.len(),
+        modified: metadata.modified().ok(),
+        #[cfg(unix)]
+        device: metadata.dev(),
+        #[cfg(unix)]
+        inode: metadata.ino(),
+        #[cfg(unix)]
+        changed_seconds: metadata.ctime(),
+        #[cfg(unix)]
+        changed_nanoseconds: metadata.ctime_nsec(),
+    }
+}
+
+fn ensure_workspace_input_identity(
+    path: &Path,
+    expected: &WorkspaceInputIdentity,
+    metadata: &fs::Metadata,
+) -> Result<(), ComposeError> {
+    if !metadata.is_file() || workspace_input_identity(metadata) != *expected {
+        return Err(ComposeError::Verification(format!(
+            "workspace input `{}` changed while reading",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
+fn read_bounded_workspace_input(
+    file: &mut File,
+    path: &Path,
+    maximum: usize,
+    maximum_bytes: u64,
+) -> Result<Vec<u8>, ComposeError> {
+    let mut reader = BufReader::new(file).take(maximum_bytes.saturating_add(1));
+    let mut bytes = Vec::with_capacity(maximum.min(8 * 1024));
+    reader.read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > maximum_bytes {
+        return Err(ComposeError::InputTooLarge {
+            path: path.display().to_string(),
+            actual: bytes.len() as u64,
+            maximum: maximum_bytes,
+        });
+    }
+    Ok(bytes)
 }
 
 fn unique_staging(output_root: &Path) -> PathBuf {
@@ -2236,9 +2815,30 @@ fn write_text(path: &Path, value: &str) -> Result<(), ComposeError> {
     Ok(())
 }
 
+fn canonical_target_facts_bytes(record: &TargetFactsRecord) -> Result<Vec<u8>, ComposeError> {
+    record.validate()?;
+    let bytes = canonical::jcs_bytes(record)?;
+    if bytes.len() > MAX_CANONICAL_TARGET_FACTS_RECORD_BYTES {
+        return Err(ComposeError::Target(
+            TargetError::TargetFactsRecordTooLarge {
+                actual: bytes.len(),
+                maximum: MAX_CANONICAL_TARGET_FACTS_RECORD_BYTES,
+            },
+        ));
+    }
+    Ok(bytes)
+}
+
+fn write_canonical_target_facts(
+    path: &Path,
+    record: &TargetFactsRecord,
+) -> Result<(), ComposeError> {
+    fs::write(path, canonical_target_facts_bytes(record)?)?;
+    Ok(())
+}
+
 fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<(), ComposeError> {
-    let mut bytes = serde_json::to_vec_pretty(value).map_err(CanonicalError::Serialize)?;
-    bytes.push(b'\n');
+    let bytes = deterministic_json_bytes(value)?;
     if bytes.len() as u64 > MAX_COMPOSITION_CONTROL_FILE_BYTES {
         return Err(ComposeError::Verification(format!(
             "composition control file `{}` has {} bytes; maximum is {MAX_COMPOSITION_CONTROL_FILE_BYTES}",
@@ -2305,8 +2905,66 @@ mod tests {
             rustc_path: tool("rustc"),
             cargo_path: tool("cargo"),
             registry_cache_path: None,
+            custom_target_spec_path: None,
             workspace_root: root,
         }
+    }
+
+    fn reseal_with_cargo_resolution_bytes(
+        path: &Path,
+        manifest: &mut CompositionManifest,
+        cargo_resolution_bytes: &[u8],
+    ) -> PathBuf {
+        fs::write(path.join("cargo-resolution.json"), cargo_resolution_bytes).unwrap();
+        manifest.cargo_resolution_digest = sha256_hex(cargo_resolution_bytes);
+        let generated_record = manifest
+            .generated_files
+            .iter_mut()
+            .find(|record| record.path == "cargo-resolution.json")
+            .unwrap();
+        generated_record.digest = sha256_hex(cargo_resolution_bytes);
+        generated_record.bytes = cargo_resolution_bytes.len() as u64;
+        let payload = CompositionIdentityPayload {
+            schema: 1,
+            profile: &manifest.normalized_profile,
+            target: &manifest.normalized_target,
+            target_facts: &manifest.target_facts,
+            custom_target_spec: manifest.custom_target_spec.as_ref(),
+            resolution: &manifest.resolution,
+            component_runtime_effects: &manifest.component_runtime_effects,
+            host_runtime_effects: &manifest.host_runtime_effects,
+            direct_root_build_requirements: &manifest.direct_root_build_requirements,
+            sources: &manifest.sources,
+            generated_files: &manifest.generated_files,
+            cargo_lock_digest: &manifest.cargo_lock_digest,
+            cargo_resolution: &manifest.cargo_resolution,
+        };
+        manifest.composition_hash =
+            hex::encode(canonical::domain_hash(b"rust-agent-composition-v1\0", &payload).unwrap());
+        write_text(
+            &path.join("src/identity.rs"),
+            &format!(
+                "pub const COMPOSITION_HASH: &str = {:?};\n",
+                manifest.composition_hash
+            ),
+        )
+        .unwrap();
+        write_json(
+            &path.join("rust-agent-security.json"),
+            &SecurityManifest {
+                schema: 1,
+                composition_hash: manifest.composition_hash.clone(),
+                component_runtime_effects: manifest.component_runtime_effects.clone(),
+                host_runtime_effects: manifest.host_runtime_effects.clone(),
+                compiled_runtime_effects: manifest.compiled_runtime_effects.clone(),
+                build_requirements: manifest.build_requirements.clone(),
+            },
+        )
+        .unwrap();
+        write_json(&path.join("rust-agent-composition.json"), manifest).unwrap();
+        let resealed_path = path.parent().unwrap().join(&manifest.composition_hash);
+        fs::rename(path, &resealed_path).unwrap();
+        resealed_path
     }
 
     fn registry_cache() -> PathBuf {
@@ -2315,6 +2973,408 @@ mod tests {
             .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".cargo")))
             .expect("Cargo home must be discoverable");
         cargo_home.join("registry").canonicalize().unwrap()
+    }
+
+    #[cfg(unix)]
+    fn write_executable(path: &Path, source: &str) {
+        use std::os::unix::fs::PermissionsExt;
+
+        fs::write(path, source).unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    #[cfg(unix)]
+    fn custom_target_tools(temp: &Path) -> (PathBuf, PathBuf, PathBuf) {
+        let rustc = temp.join("fake-rustc");
+        let cargo = temp.join("fake-cargo");
+        let rustc_log = temp.join("rustc-args.log");
+        write_executable(
+            &rustc,
+            &format!(
+                concat!(
+                    "#!/bin/sh\n",
+                    "IFS= read -r observed < \"$4\"\n",
+                    "[ -n \"$observed\" ] || exit 41\n",
+                    "printf 'rustc-args:%s\\nrustc-spec:%s\\n' \"$*\" \"$observed\" >> {:?}\n",
+                    "printf '%s\\n' 'panic=\"unwind\"' 'target_abi=\"\"' ",
+                    "'target_arch=\"x86_64\"' 'target_endian=\"little\"' ",
+                    "'target_env=\"gnu\"' 'target_family=\"unix\"' ",
+                    "'target_os=\"linux\"' 'target_pointer_width=\"64\"' ",
+                    "'target_vendor=\"unknown\"' 'unix'\n"
+                ),
+                rustc_log,
+            ),
+        );
+        write_executable(
+            &cargo,
+            &format!(
+                concat!(
+                    "#!/bin/sh\n",
+                    "manifest=\nconfig=\nnext=\n",
+                    "for arg in \"$@\"; do\n",
+                    "  if [ \"$next\" = manifest ]; then manifest=\"$arg\"; next=; continue; fi\n",
+                    "  if [ \"$next\" = config ]; then config=\"$arg\"; next=; continue; fi\n",
+                    "  if [ \"$arg\" = \"--manifest-path\" ]; then next=manifest; fi\n",
+                    "  if [ \"$arg\" = \"--config\" ]; then next=config; fi\n",
+                    "done\n",
+                    "[ -n \"$manifest\" ] && [ -n \"$config\" ] || exit 31\n",
+                    "found=0\n",
+                    "while IFS= read -r line; do\n",
+                    "  [ \"$line\" = 'target = \"targets/x86_64-unknown-linux-gnu.json\"' ] && found=1\n",
+                    "done < \"$config\"\n",
+                    "[ \"$found\" = 1 ] || exit 32\n",
+                    "snapshot=\"${{manifest%/*}}/targets/x86_64-unknown-linux-gnu.json\"\n",
+                    "IFS= read -r observed < \"$snapshot\"\n",
+                    "[ -n \"$observed\" ] || exit 34\n",
+                    "printf 'cargo-spec:%s\\n' \"$observed\" >> {:?}\n",
+                    "printf '# generated by bounded custom-target fixture\\nversion = 4\\n' ",
+                    "> \"${{manifest%/*}}/Cargo.lock\"\n"
+                ),
+                rustc_log,
+            ),
+        );
+        (rustc, cargo, rustc_log)
+    }
+
+    #[cfg(unix)]
+    fn custom_target_options(
+        workspace_root: &Path,
+        temp: &Path,
+        spec: &Path,
+        output: &str,
+    ) -> (ComposeOptions, PathBuf) {
+        let (rustc, cargo, rustc_log) = custom_target_tools(temp);
+        (
+            ComposeOptions {
+                workspace_root: workspace_root.to_owned(),
+                catalog_path: workspace_root.join("tests/fixtures/catalog.toml"),
+                profile_path: workspace_root.join("tests/fixtures/profiles/minimal.toml"),
+                output_root: temp.join(output),
+                rustc_path: rustc,
+                cargo_path: cargo,
+                registry_cache_path: None,
+                custom_target_spec_path: Some(spec.to_owned()),
+            },
+            rustc_log,
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn custom_target_spec_snapshot_binds_raw_and_canonical_identity() {
+        let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../..")
+            .canonicalize()
+            .unwrap();
+        fs::create_dir_all(workspace.join("target/custom-target-tests")).unwrap();
+        let temp = TempDir::new_in(workspace.join("target/custom-target-tests")).unwrap();
+        let compact_path = temp.path().join("compact.json");
+        let spaced_path = temp.path().join("spaced.json");
+        let compact = br#"{"arch":"x86_64","target-pointer-width":"64"}"#;
+        let spaced = br#"{ "target-pointer-width": "64", "arch": "x86_64" }"#;
+        fs::write(&compact_path, compact).unwrap();
+        fs::write(&spaced_path, spaced).unwrap();
+
+        let (compact_options, rustc_log) =
+            custom_target_options(&workspace, temp.path(), &compact_path, "compact-output");
+        let compact_generated = compose(&compact_options).unwrap();
+        let compact_record = compact_generated
+            .manifest
+            .custom_target_spec
+            .as_ref()
+            .unwrap();
+        assert_eq!(
+            fs::read(compact_generated.path.join(&compact_record.snapshot_path)).unwrap(),
+            compact
+        );
+        assert_eq!(
+            compact_generated
+                .manifest
+                .normalized_target
+                .custom_target_spec_digest
+                .as_deref(),
+            Some(compact_record.custom_target_spec_digest.as_str())
+        );
+        assert_eq!(
+            compact_generated
+                .manifest
+                .cargo_resolution
+                .cargo_target_input,
+            compact_record.snapshot_path
+        );
+        assert_eq!(
+            fs::read_to_string(compact_generated.path.join(".cargo/config.toml")).unwrap(),
+            format!(
+                "[build]\ntarget = {:?}\n\n[net]\noffline = true\n",
+                compact_record.snapshot_path
+            )
+        );
+        let invocation = fs::read_to_string(&rustc_log).unwrap();
+        assert!(invocation.contains("rustc-args:--print cfg --target"));
+        assert!(invocation.contains(".staging-"));
+        assert!(invocation.contains("/targets/x86_64-unknown-linux-gnu.json"));
+        assert!(invocation.contains(&format!("rustc-spec:{}", String::from_utf8_lossy(compact))));
+        assert!(invocation.contains(&format!("cargo-spec:{}", String::from_utf8_lossy(compact))));
+
+        fs::remove_file(&compact_path).unwrap();
+        verify_composition(&compact_generated.path).unwrap();
+
+        let (spaced_options, _) =
+            custom_target_options(&workspace, temp.path(), &spaced_path, "spaced-output");
+        let spaced_generated = compose(&spaced_options).unwrap();
+        let spaced_record = spaced_generated
+            .manifest
+            .custom_target_spec
+            .as_ref()
+            .unwrap();
+        assert_ne!(
+            compact_record.raw_bytes_sha256,
+            spaced_record.raw_bytes_sha256
+        );
+        assert_eq!(
+            compact_record.canonical_json_sha256,
+            spaced_record.canonical_json_sha256
+        );
+        assert_ne!(
+            compact_record.custom_target_spec_digest,
+            spaced_record.custom_target_spec_digest
+        );
+        assert_ne!(
+            compact_generated.composition_hash,
+            spaced_generated.composition_hash
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn invalid_custom_target_inputs_fail_before_rustc_or_cargo() {
+        use std::os::unix::fs::symlink;
+
+        let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../..")
+            .canonicalize()
+            .unwrap();
+        fs::create_dir_all(workspace.join("target/custom-target-tests")).unwrap();
+        let temp = TempDir::new_in(workspace.join("target/custom-target-tests")).unwrap();
+        let invalid = [
+            (
+                "duplicate.json",
+                br#"{"arch":"x86_64","arch":"aarch64"}"#.as_slice(),
+            ),
+            ("float.json", br#"{"number":1.25}"#.as_slice()),
+            ("nonobject.json", br"[]".as_slice()),
+        ];
+        for (index, (name, bytes)) in invalid.into_iter().enumerate() {
+            let path = temp.path().join(name);
+            fs::write(&path, bytes).unwrap();
+            let (options, rustc_log) =
+                custom_target_options(&workspace, temp.path(), &path, &format!("invalid-{index}"));
+            assert!(matches!(
+                compose(&options),
+                Err(ComposeError::CustomTargetSpec(_))
+            ));
+            assert!(!rustc_log.exists());
+            assert!(!options.output_root.exists());
+        }
+
+        let oversized = temp.path().join("oversized.json");
+        File::create(&oversized)
+            .unwrap()
+            .set_len(MAX_CUSTOM_TARGET_SPEC_BYTES + 1)
+            .unwrap();
+        let (options, rustc_log) =
+            custom_target_options(&workspace, temp.path(), &oversized, "oversized-output");
+        assert!(matches!(
+            compose(&options),
+            Err(ComposeError::CustomTargetSpec(
+                CustomTargetSpecError::TooLarge { .. }
+            ))
+        ));
+        assert!(!rustc_log.exists());
+
+        let outside = TempDir::new().unwrap();
+        let outside_spec = outside.path().join("outside.json");
+        fs::write(&outside_spec, b"{}").unwrap();
+        let (options, rustc_log) =
+            custom_target_options(&workspace, temp.path(), &outside_spec, "outside-output");
+        assert!(matches!(
+            compose(&options),
+            Err(ComposeError::InputOutsideWorkspace(_))
+        ));
+        assert!(!rustc_log.exists());
+
+        let real = temp.path().join("real.json");
+        let link = temp.path().join("link.json");
+        fs::write(&real, b"{}").unwrap();
+        symlink(&real, &link).unwrap();
+        let (options, rustc_log) =
+            custom_target_options(&workspace, temp.path(), &link, "symlink-output");
+        assert!(matches!(
+            compose(&options),
+            Err(ComposeError::UnsupportedSourceEntry(_))
+        ));
+        assert!(!rustc_log.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn custom_target_lockfile_prioritizes_snapshot_drift_over_cargo_failure() {
+        let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../..")
+            .canonicalize()
+            .unwrap();
+        fs::create_dir_all(workspace.join("target/custom-target-tests")).unwrap();
+        let temp = TempDir::new_in(workspace.join("target/custom-target-tests")).unwrap();
+        let spec_path = temp.path().join("target.json");
+        let cargo_marker = temp.path().join("cargo-started");
+        fs::write(&spec_path, br#"{"arch":"x86_64"}"#).unwrap();
+        let (options, _) =
+            custom_target_options(&workspace, temp.path(), &spec_path, "drift-output");
+        write_executable(
+            &options.cargo_path,
+            &format!(
+                concat!(
+                    "#!/bin/sh\n",
+                    ": > {:?}\n",
+                    "printf '{{\"arch\":\"aarch64\"}}' > ",
+                    "\"$PWD/targets/x86_64-unknown-linux-gnu.json\"\n",
+                    "exit 29\n"
+                ),
+                cargo_marker,
+            ),
+        );
+
+        let result = compose(&options);
+        assert!(cargo_marker.exists());
+        assert!(matches!(
+            result,
+            Err(ComposeError::CustomTargetSpec(
+                CustomTargetSpecError::SnapshotChanged(_)
+                    | CustomTargetSpecError::IdentityMismatch(_)
+            ))
+        ));
+        assert!(fs::read_dir(&options.output_root).unwrap().next().is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn custom_target_snapshot_and_cargo_config_tampering_fail_verification() {
+        let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../..")
+            .canonicalize()
+            .unwrap();
+        fs::create_dir_all(workspace.join("target/custom-target-tests")).unwrap();
+        let temp = TempDir::new_in(workspace.join("target/custom-target-tests")).unwrap();
+        let spec_path = temp.path().join("target.json");
+        fs::write(&spec_path, br#"{"arch":"x86_64"}"#).unwrap();
+        let (options, _) =
+            custom_target_options(&workspace, temp.path(), &spec_path, "tamper-output");
+        let generated = compose(&options).unwrap();
+        let record = generated.manifest.custom_target_spec.as_ref().unwrap();
+        let snapshot = generated.path.join(&record.snapshot_path);
+        let original = fs::read(&snapshot).unwrap();
+
+        fs::write(&snapshot, br#"{"arch":"aarch64"}"#).unwrap();
+        assert!(matches!(
+            verify_composition(&generated.path),
+            Err(ComposeError::Verification(message))
+                if message.contains("custom target spec snapshot")
+        ));
+        fs::write(&snapshot, original).unwrap();
+
+        let manifest_path = generated.path.join("rust-agent-composition.json");
+        let original_manifest = fs::read(&manifest_path).unwrap();
+        let mut mismatched_logical_target = generated.manifest.clone();
+        let mismatched_spec = mismatched_logical_target
+            .custom_target_spec
+            .as_mut()
+            .unwrap();
+        mismatched_spec.logical_triple = "other-unknown-none".into();
+        mismatched_spec.snapshot_path = "targets/other-unknown-none.json".into();
+        write_json(&manifest_path, &mismatched_logical_target).unwrap();
+        assert!(matches!(
+            verify_composition(&generated.path),
+            Err(ComposeError::Verification(message))
+                if message.contains("manifest projection")
+        ));
+        fs::write(&manifest_path, original_manifest).unwrap();
+
+        let forged_config = generate_cargo_config(
+            &generated.manifest.normalized_target,
+            generated.manifest.custom_target_spec.as_ref(),
+        )
+        .replace("targets/", "sources/");
+        fs::write(
+            generated.path.join(".cargo/config.toml"),
+            forged_config.as_bytes(),
+        )
+        .unwrap();
+        let mut resealed = generated.manifest.clone();
+        let config_record = resealed
+            .generated_files
+            .iter_mut()
+            .find(|file| file.path == ".cargo/config.toml")
+            .unwrap();
+        config_record.digest = sha256_hex(forged_config.as_bytes());
+        config_record.bytes = forged_config.len() as u64;
+        let payload = CompositionIdentityPayload {
+            schema: 1,
+            profile: &resealed.normalized_profile,
+            target: &resealed.normalized_target,
+            target_facts: &resealed.target_facts,
+            custom_target_spec: resealed.custom_target_spec.as_ref(),
+            resolution: &resealed.resolution,
+            component_runtime_effects: &resealed.component_runtime_effects,
+            host_runtime_effects: &resealed.host_runtime_effects,
+            direct_root_build_requirements: &resealed.direct_root_build_requirements,
+            sources: &resealed.sources,
+            generated_files: &resealed.generated_files,
+            cargo_lock_digest: &resealed.cargo_lock_digest,
+            cargo_resolution: &resealed.cargo_resolution,
+        };
+        resealed.composition_hash =
+            hex::encode(canonical::domain_hash(b"rust-agent-composition-v1\0", &payload).unwrap());
+        write_text(
+            &generated.path.join("src/identity.rs"),
+            &format!(
+                "pub const COMPOSITION_HASH: &str = {:?};\n",
+                resealed.composition_hash
+            ),
+        )
+        .unwrap();
+        write_json(
+            &generated.path.join("rust-agent-security.json"),
+            &SecurityManifest {
+                schema: 1,
+                composition_hash: resealed.composition_hash.clone(),
+                component_runtime_effects: resealed.component_runtime_effects.clone(),
+                host_runtime_effects: resealed.host_runtime_effects.clone(),
+                compiled_runtime_effects: resealed.compiled_runtime_effects.clone(),
+                build_requirements: resealed.build_requirements.clone(),
+            },
+        )
+        .unwrap();
+        write_json(
+            &generated.path.join("rust-agent-composition.json"),
+            &resealed,
+        )
+        .unwrap();
+        let resealed_path = generated
+            .path
+            .parent()
+            .unwrap()
+            .join(&resealed.composition_hash);
+        fs::rename(&generated.path, &resealed_path).unwrap();
+        let result = verify_composition(&resealed_path);
+        assert!(
+            matches!(
+                result,
+                Err(ComposeError::Verification(ref message))
+                    if message.contains("Cargo config")
+            ),
+            "unexpected verification result: {result:?}"
+        );
+        make_staging_tree_owner_writable(&resealed_path).unwrap();
     }
 
     fn write_snapshot_fixture(root: &Path, name: &str) -> PathBuf {
@@ -2350,6 +3410,256 @@ mod tests {
         assert_eq!(first.composition_hash, second.composition_hash);
         assert_eq!(first.manifest, second.manifest);
         assert_eq!(first.path, second.path);
+    }
+
+    #[test]
+    fn canonical_target_facts_snapshot_is_schema_owned_bounded_and_deterministic() {
+        let temp = TempDir::new().unwrap();
+        let mut first_options = options(&temp, "tests/fixtures/profiles/minimal.toml");
+        first_options.output_root = temp.path().join("first-compositions");
+        let mut second_options = first_options.clone();
+        second_options.output_root = temp.path().join("second-compositions");
+
+        let first = compose(&first_options).unwrap();
+        let second = compose(&second_options).unwrap();
+        let first_bytes = fs::read(first.path.join("target-facts.json")).unwrap();
+        let second_bytes = fs::read(second.path.join("target-facts.json")).unwrap();
+        let parsed = TargetFactsRecord::from_json(&first_bytes).unwrap();
+        let generated_record = first
+            .manifest
+            .generated_files
+            .iter()
+            .find(|file| file.path == "target-facts.json")
+            .unwrap();
+
+        assert_eq!(first_bytes, canonical::jcs_bytes(&parsed).unwrap());
+        assert_eq!(first_bytes, second_bytes);
+        assert!(first_bytes.len() <= MAX_CANONICAL_TARGET_FACTS_RECORD_BYTES);
+        assert_eq!(parsed, first.manifest.target_facts);
+        assert_eq!(
+            parsed.semantic_digest().unwrap(),
+            first.manifest.target_fact_digest
+        );
+        assert_eq!(generated_record.digest, sha256_hex(&first_bytes));
+        assert_eq!(generated_record.bytes, first_bytes.len() as u64);
+        assert_eq!(first.composition_hash, second.composition_hash);
+        verify_composition(&first.path).unwrap();
+        verify_composition(&second.path).unwrap();
+
+        make_staging_tree_owner_writable(&first.path).unwrap();
+        make_staging_tree_owner_writable(&second.path).unwrap();
+    }
+
+    #[test]
+    fn target_facts_snapshot_rejects_raw_canonical_semantic_and_size_tampering() {
+        let temp = TempDir::new().unwrap();
+        let generated = compose(&options(&temp, "tests/fixtures/profiles/minimal.toml")).unwrap();
+        let snapshot_path = generated.path.join("target-facts.json");
+        let manifest_path = generated.path.join("rust-agent-composition.json");
+        let original_snapshot = fs::read(&snapshot_path).unwrap();
+        let original_manifest = fs::read(&manifest_path).unwrap();
+
+        fs::write(&snapshot_path, b"{").unwrap();
+        assert!(matches!(
+            verify_composition(&generated.path),
+            Err(ComposeError::Verification(message))
+                if message.contains("target-facts.json is invalid")
+        ));
+
+        let pretty_snapshot = serde_json::to_vec_pretty(&generated.manifest.target_facts).unwrap();
+        fs::write(&snapshot_path, &pretty_snapshot).unwrap();
+        assert!(matches!(
+            verify_composition(&generated.path),
+            Err(ComposeError::Verification(message))
+                if message.contains("exact RFC 8785 canonical encoding")
+        ));
+
+        let mut forged_manifest = generated.manifest.clone();
+        forged_manifest
+            .target_facts
+            .facts
+            .entry("target_feature".into())
+            .or_default()
+            .insert(Some("forged-feature".into()));
+        forged_manifest.target_facts.validate().unwrap();
+        let forged_snapshot = canonical_target_facts_bytes(&forged_manifest.target_facts).unwrap();
+        fs::write(&snapshot_path, &forged_snapshot).unwrap();
+        let generated_record = forged_manifest
+            .generated_files
+            .iter_mut()
+            .find(|file| file.path == "target-facts.json")
+            .unwrap();
+        generated_record.digest = sha256_hex(&forged_snapshot);
+        generated_record.bytes = forged_snapshot.len() as u64;
+        write_json(&manifest_path, &forged_manifest).unwrap();
+        assert!(matches!(
+            verify_composition(&generated.path),
+            Err(ComposeError::Verification(message))
+                if message.contains("manifest projection")
+        ));
+
+        fs::write(&snapshot_path, &original_snapshot).unwrap();
+        fs::write(&manifest_path, &original_manifest).unwrap();
+        File::options()
+            .write(true)
+            .truncate(true)
+            .open(&snapshot_path)
+            .unwrap()
+            .set_len(MAX_CANONICAL_TARGET_FACTS_RECORD_BYTES as u64 + 1)
+            .unwrap();
+        assert!(matches!(
+            verify_composition(&generated.path),
+            Err(ComposeError::Verification(message)) if message.contains("maximum")
+        ));
+
+        make_staging_tree_owner_writable(&generated.path).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn invalid_target_facts_fail_before_cargo_side_effects() {
+        let temp = TempDir::new().unwrap();
+        let rustc = temp.path().join("incomplete-rustc");
+        let cargo = temp.path().join("side-effect-cargo");
+        let cargo_marker = temp.path().join("cargo-ran");
+        write_executable(&rustc, "#!/bin/sh\nprintf '%s\\n' 'panic=\"unwind\"'\n");
+        write_executable(
+            &cargo,
+            &format!("#!/bin/sh\nprintf cargo-ran > {cargo_marker:?}\n"),
+        );
+        let mut compose_options = options(&temp, "tests/fixtures/profiles/minimal.toml");
+        compose_options.rustc_path = rustc;
+        compose_options.cargo_path = cargo;
+
+        assert!(matches!(
+            compose(&compose_options),
+            Err(ComposeError::Target(TargetError::InvalidFact(message)))
+                if message.contains("missing required scalar")
+        ));
+        assert!(!cargo_marker.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn oversized_catalog_and_profile_fail_before_tool_or_output_side_effects() {
+        let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../..")
+            .canonicalize()
+            .unwrap();
+        let inputs = TempDir::new_in(workspace.join("target")).unwrap();
+        let effects = TempDir::new().unwrap();
+        let rustc = effects.path().join("side-effect-rustc");
+        let cargo = effects.path().join("side-effect-cargo");
+        let rustc_marker = effects.path().join("rustc-ran");
+        let cargo_marker = effects.path().join("cargo-ran");
+        write_executable(
+            &rustc,
+            &format!("#!/bin/sh\nprintf rustc-ran > {rustc_marker:?}\nexit 97\n"),
+        );
+        write_executable(
+            &cargo,
+            &format!("#!/bin/sh\nprintf cargo-ran > {cargo_marker:?}\nexit 97\n"),
+        );
+
+        for (name, maximum) in [
+            ("catalog", MAX_CATALOG_DOCUMENT_BYTES),
+            ("profile", MAX_PROFILE_DOCUMENT_BYTES),
+        ] {
+            let oversized = inputs.path().join(format!("oversized-{name}.toml"));
+            File::create(&oversized)
+                .unwrap()
+                .set_len(maximum as u64 + 1)
+                .unwrap();
+            let output_root = effects.path().join(format!("{name}-compositions"));
+            let mut compose_options = options(&effects, "tests/fixtures/profiles/minimal.toml");
+            compose_options.rustc_path = rustc.clone();
+            compose_options.cargo_path = cargo.clone();
+            compose_options.output_root = output_root.clone();
+            if name == "catalog" {
+                compose_options.catalog_path = oversized;
+            } else {
+                compose_options.profile_path = oversized;
+            }
+
+            assert!(matches!(
+                compose(&compose_options),
+                Err(ComposeError::InputTooLarge {
+                    maximum: actual_maximum,
+                    ..
+                }) if actual_maximum == maximum as u64
+            ));
+            assert!(!rustc_marker.exists());
+            assert!(!cargo_marker.exists());
+            assert!(!output_root.exists());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn workspace_input_rejects_symlink_provenance_and_same_metadata_inode_replacement() {
+        use std::os::unix::fs::symlink;
+
+        let workspace = TempDir::new().unwrap();
+        let input = workspace.path().join("catalog.toml");
+        let alias = workspace.path().join("catalog-alias.toml");
+        fs::write(&input, b"schema = 1\n").unwrap();
+        symlink(&input, &alias).unwrap();
+        assert!(matches!(
+            read_workspace_input(workspace.path(), &alias, 1024),
+            Err(ComposeError::UnsupportedSourceEntry(_))
+        ));
+
+        let before = fs::symlink_metadata(&input).unwrap();
+        let before_identity = workspace_input_identity(&before);
+        let replacement = workspace.path().join("replacement.toml");
+        fs::write(&replacement, b"schema = 1\n").unwrap();
+        File::options()
+            .write(true)
+            .open(&replacement)
+            .unwrap()
+            .set_times(FileTimes::new().set_modified(before.modified().unwrap()))
+            .unwrap();
+        fs::rename(&replacement, &input).unwrap();
+        let after = fs::symlink_metadata(&input).unwrap();
+        assert_eq!(after.len(), before.len());
+        assert_eq!(after.modified().unwrap(), before.modified().unwrap());
+        assert!(
+            ensure_workspace_input_identity(&input, &before_identity, &after).is_err(),
+            "Unix device/inode identity must detect same-byte same-mtime replacement"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ambient_output_ancestor_cargo_configs_fail_before_cargo_side_effects() {
+        for name in ["config", "config.toml"] {
+            let temp = TempDir::new().unwrap();
+            let cargo_directory = temp.path().join(".cargo");
+            fs::create_dir(&cargo_directory).unwrap();
+            fs::write(
+                cargo_directory.join(name),
+                b"[build]\nrustc-wrapper = \"malicious-wrapper\"\n",
+            )
+            .unwrap();
+            let cargo = temp.path().join("fake-cargo");
+            let cargo_marker = temp.path().join("cargo-ran");
+            write_executable(
+                &cargo,
+                &format!("#!/bin/sh\nprintf cargo-ran > {cargo_marker:?}\nexit 97\n"),
+            );
+            let mut compose_options = options(&temp, "tests/fixtures/profiles/minimal.toml");
+            compose_options.output_root = temp.path().join("nested/compositions");
+            compose_options.cargo_path = cargo;
+
+            assert!(matches!(
+                compose(&compose_options),
+                Err(ComposeError::CargoConfigIsolation(
+                    CargoConfigIsolationError::AmbientConfig(path)
+                )) if path.ends_with(name)
+            ));
+            assert!(!cargo_marker.exists());
+            assert!(!compose_options.output_root.exists());
+        }
     }
 
     #[test]
@@ -2405,35 +3715,27 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let generated = compose(&options(&temp, "tests/fixtures/profiles/minimal.toml")).unwrap();
         let manifest_path = generated.path.join("rust-agent-composition.json");
-        let original = fs::read(&manifest_path).unwrap();
-        let mut manifest: serde_json::Value = serde_json::from_slice(&original).unwrap();
+        let original = generated.manifest.clone();
+        let mut manifest = original.clone();
 
-        manifest["deployable"] = serde_json::Value::Bool(true);
-        fs::write(
-            &manifest_path,
-            serde_json::to_vec_pretty(&manifest).unwrap(),
-        )
-        .unwrap();
+        manifest.deployable = true;
+        write_json(&manifest_path, &manifest).unwrap();
         assert!(matches!(
             verify_composition(&generated.path),
             Err(ComposeError::Verification(message))
                 if message.contains("manifest projection")
         ));
 
-        manifest = serde_json::from_slice(&original).unwrap();
-        manifest["app-handoff"] = serde_json::Value::String("concurrent".into());
-        fs::write(
-            &manifest_path,
-            serde_json::to_vec_pretty(&manifest).unwrap(),
-        )
-        .unwrap();
+        manifest = original.clone();
+        manifest.app_handoff = crate::resolver::AppHandoff::Concurrent;
+        write_json(&manifest_path, &manifest).unwrap();
         assert!(matches!(
             verify_composition(&generated.path),
             Err(ComposeError::Verification(message))
                 if message.contains("manifest projection")
         ));
 
-        fs::write(&manifest_path, original).unwrap();
+        write_json(&manifest_path, &original).unwrap();
         verify_composition(&generated.path).unwrap();
         make_staging_tree_owner_writable(&generated.path).unwrap();
     }
@@ -2467,6 +3769,67 @@ mod tests {
             Err(ComposeError::Verification(message))
                 if message.contains("maximum")
         ));
+    }
+
+    #[test]
+    fn composition_manifest_load_rejects_noncanonical_and_duplicate_json() {
+        let temp = TempDir::new().unwrap();
+        let generated = compose(&options(&temp, "tests/fixtures/profiles/minimal.toml")).unwrap();
+        let manifest_path = generated.path.join("rust-agent-composition.json");
+        let canonical = fs::read(&manifest_path).unwrap();
+        assert_eq!(load_manifest(&generated.path).unwrap(), generated.manifest);
+
+        fs::write(
+            &manifest_path,
+            serde_json::to_vec(&generated.manifest).unwrap(),
+        )
+        .unwrap();
+        assert!(matches!(
+            load_manifest(&generated.path),
+            Err(ComposeError::ManifestNormalization { message, .. })
+                if message.contains("exact deterministic generator JSON encoding")
+        ));
+
+        let (owner, support) = generated
+            .manifest
+            .resolution
+            .target_support
+            .first_key_value()
+            .unwrap();
+        let owner = serde_json::to_string(owner).unwrap();
+        let support = serde_json::to_string(support).unwrap();
+        let mut duplicate = String::from_utf8(canonical.clone()).unwrap();
+        let marker = "\"target-support\": {";
+        let insert_at = duplicate.find(marker).unwrap() + marker.len();
+        duplicate.insert_str(insert_at, &format!("\n      {owner}: {support},"));
+        fs::write(&manifest_path, duplicate).unwrap();
+        assert!(matches!(
+            load_manifest(&generated.path),
+            Err(ComposeError::ManifestNormalization { message, .. })
+                if message.contains("duplicate target-support owner")
+        ));
+
+        fs::write(&manifest_path, canonical).unwrap();
+        verify_composition(&generated.path).unwrap();
+        make_staging_tree_owner_writable(&generated.path).unwrap();
+    }
+
+    #[test]
+    fn composition_manifest_load_runs_resolution_semantic_verification() {
+        let temp = TempDir::new().unwrap();
+        let generated = compose(&options(&temp, "tests/fixtures/profiles/minimal.toml")).unwrap();
+        let manifest_path = generated.path.join("rust-agent-composition.json");
+        let mut forged = generated.manifest.clone();
+        forged.resolution.profile = "forged-profile".into();
+        write_json(&manifest_path, &forged).unwrap();
+
+        assert!(matches!(
+            load_manifest(&generated.path),
+            Err(ComposeError::ManifestNormalization { message, .. })
+                if message.contains("resolution semantics are invalid")
+                    && message.contains("projection `profile`")
+        ));
+        make_staging_tree_owner_writable(&generated.path).unwrap();
     }
 
     #[test]
@@ -2514,37 +3877,93 @@ mod tests {
     }
 
     #[test]
+    fn composition_directory_basename_is_bound_to_the_composition_hash() {
+        let temp = TempDir::new().unwrap();
+        let generated = compose(&options(&temp, "tests/fixtures/profiles/minimal.toml")).unwrap();
+        let renamed = temp.path().join("forged-composition-name");
+        fs::rename(&generated.path, &renamed).unwrap();
+
+        assert_eq!(
+            verify_emitted_composition(&renamed).unwrap(),
+            generated.manifest
+        );
+
+        assert!(matches!(
+            verify_composition(&renamed),
+            Err(ComposeError::Verification(message))
+                if message.contains("directory basename")
+                    && message.contains(&generated.composition_hash)
+        ));
+        make_staging_tree_owner_writable(&renamed).unwrap();
+    }
+
+    #[test]
     fn composition_verification_rejects_nested_schema_and_resolution_projection_forgery() {
         let temp = TempDir::new().unwrap();
         let generated = compose(&options(&temp, "tests/fixtures/profiles/minimal.toml")).unwrap();
         let manifest_path = generated.path.join("rust-agent-composition.json");
-        let original: serde_json::Value =
-            serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+        let original = generated.manifest.clone();
         let mut forgeries = Vec::new();
 
         let mut profile_schema = original.clone();
-        profile_schema["normalized-profile"]["schema"] = serde_json::json!(2);
+        profile_schema.normalized_profile.schema = 2;
         forgeries.push(profile_schema);
         let mut resolution_schema = original.clone();
-        resolution_schema["resolution"]["schema"] = serde_json::json!(2);
+        resolution_schema.resolution.schema = 2;
         forgeries.push(resolution_schema);
         let mut cargo_schema = original.clone();
-        cargo_schema["cargo-resolution"]["schema"] = serde_json::json!(2);
+        cargo_schema.cargo_resolution.schema = 2;
         forgeries.push(cargo_schema);
         for field in ["profile", "target", "target-fact-digest"] {
             let mut resolution_projection = original.clone();
-            resolution_projection["resolution"][field] = serde_json::json!("forged");
+            match field {
+                "profile" => resolution_projection.resolution.profile = "forged".into(),
+                "target" => resolution_projection.resolution.target = "forged".into(),
+                "target-fact-digest" => {
+                    resolution_projection.resolution.target_fact_digest = "forged".into();
+                }
+                _ => unreachable!(),
+            }
             forgeries.push(resolution_projection);
         }
 
         for forgery in forgeries {
             write_json(&manifest_path, &forgery).unwrap();
-            assert!(matches!(
-                verify_composition(&generated.path),
-                Err(ComposeError::Verification(message))
-                    if message.contains("manifest projection")
-            ));
+            let result = verify_composition(&generated.path);
+            assert!(
+                matches!(
+                    &result,
+                    Err(ComposeError::Verification(message))
+                        if message.contains("manifest projection")
+                ) || matches!(
+                    &result,
+                    Err(ComposeError::ManifestNormalization { message, .. })
+                        if message.contains("resolution semantics")
+                            || message.contains("unsupported profile schema")
+                            || message.contains("unsupported resolution schema")
+                ),
+                "unexpected nested projection result: {result:?}"
+            );
         }
+
+        let mut consistently_forged_target_digest = original.clone();
+        let forged_digest = "0".repeat(64);
+        consistently_forged_target_digest.target_fact_digest = forged_digest.clone();
+        consistently_forged_target_digest
+            .normalized_target
+            .target_fact_digest = forged_digest.clone();
+        consistently_forged_target_digest
+            .resolution
+            .target_fact_digest = forged_digest.clone();
+        consistently_forged_target_digest
+            .cargo_resolution
+            .target_fact_digest = forged_digest;
+        write_json(&manifest_path, &consistently_forged_target_digest).unwrap();
+        assert!(matches!(
+            verify_composition(&generated.path),
+            Err(ComposeError::ManifestNormalization { message, .. })
+                if message.contains("target fact digest does not match")
+        ));
 
         write_json(&manifest_path, &original).unwrap();
         verify_composition(&generated.path).unwrap();
@@ -2556,11 +3975,10 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let generated = compose(&options(&temp, "tests/fixtures/profiles/with-fs.toml")).unwrap();
         let manifest_path = generated.path.join("rust-agent-composition.json");
-        let original: serde_json::Value =
-            serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+        let original = generated.manifest.clone();
 
         let mut missing_effect = original.clone();
-        missing_effect["component-runtime-effects"] = serde_json::json!([]);
+        missing_effect.component_runtime_effects.clear();
         write_json(&manifest_path, &missing_effect).unwrap();
         assert!(matches!(
             verify_composition(&generated.path),
@@ -2569,8 +3987,8 @@ mod tests {
         ));
 
         let mut reattributed_effect = original.clone();
-        reattributed_effect["component-runtime-effects"] = serde_json::json!([]);
-        reattributed_effect["host-runtime-effects"] = serde_json::json!(["read-local"]);
+        reattributed_effect.component_runtime_effects.clear();
+        reattributed_effect.host_runtime_effects = BTreeSet::from(["read-local".into()]);
         write_json(&manifest_path, &reattributed_effect).unwrap();
         assert!(matches!(
             verify_composition(&generated.path),
@@ -2581,6 +3999,206 @@ mod tests {
         write_json(&manifest_path, &original).unwrap();
         verify_composition(&generated.path).unwrap();
         make_staging_tree_owner_writable(&generated.path).unwrap();
+    }
+
+    #[test]
+    fn security_manifest_requires_exact_deterministic_encoding() {
+        let temp = TempDir::new().unwrap();
+        let generated = compose(&options(&temp, "tests/fixtures/profiles/with-fs.toml")).unwrap();
+        let security_path = generated.path.join("rust-agent-security.json");
+        let original = fs::read(&security_path).unwrap();
+        let security: SecurityManifest = serde_json::from_slice(&original).unwrap();
+
+        fs::write(&security_path, serde_json::to_vec(&security).unwrap()).unwrap();
+        assert!(matches!(
+            verify_composition(&generated.path),
+            Err(ComposeError::Verification(message))
+                if message.contains("exact deterministic derived encoding")
+        ));
+
+        let duplicate = String::from_utf8(original.clone()).unwrap().replacen(
+            "\"read-local\"",
+            "\"read-local\", \"read-local\"",
+            1,
+        );
+        assert_ne!(duplicate.as_bytes(), original);
+        fs::write(&security_path, duplicate).unwrap();
+        assert!(matches!(
+            verify_composition(&generated.path),
+            Err(ComposeError::Verification(message))
+                if message.contains("exact deterministic derived encoding")
+        ));
+
+        fs::write(&security_path, original).unwrap();
+        verify_composition(&generated.path).unwrap();
+        make_staging_tree_owner_writable(&generated.path).unwrap();
+    }
+
+    #[test]
+    fn cargo_resolution_requires_exact_deterministic_encoding_after_resealing() {
+        let temp = TempDir::new().unwrap();
+        let mut compact_options = options(&temp, "tests/fixtures/profiles/minimal.toml");
+        compact_options.output_root = temp.path().join("compact-cargo-resolution");
+        let compact = compose(&compact_options).unwrap();
+        let mut compact_manifest = compact.manifest.clone();
+        let compact_bytes = serde_json::to_vec(&compact_manifest.cargo_resolution).unwrap();
+        let compact_path = reseal_with_cargo_resolution_bytes(
+            &compact.path,
+            &mut compact_manifest,
+            &compact_bytes,
+        );
+        assert!(matches!(
+            verify_composition(&compact_path),
+            Err(ComposeError::Verification(message))
+                if message.contains("exact deterministic encoding")
+        ));
+        make_staging_tree_owner_writable(&compact_path).unwrap();
+
+        let mut duplicate_options = options(&temp, "tests/fixtures/profiles/minimal.toml");
+        duplicate_options.output_root = temp.path().join("duplicate-cargo-resolution");
+        let duplicate = compose(&duplicate_options).unwrap();
+        let mut duplicate_manifest = duplicate.manifest.clone();
+        let source = format!("git+https://example.invalid/repository#{}", "0".repeat(40));
+        duplicate_manifest
+            .cargo_resolution
+            .git_sources
+            .insert(source.clone());
+        let canonical = deterministic_json_bytes(&duplicate_manifest.cargo_resolution).unwrap();
+        let quoted = serde_json::to_string(&source).unwrap();
+        let duplicate_bytes = String::from_utf8(canonical)
+            .unwrap()
+            .replacen(&quoted, &format!("{quoted},\n    {quoted}"), 1)
+            .into_bytes();
+        let duplicate_path = reseal_with_cargo_resolution_bytes(
+            &duplicate.path,
+            &mut duplicate_manifest,
+            &duplicate_bytes,
+        );
+        assert!(matches!(
+            verify_composition(&duplicate_path),
+            Err(ComposeError::Verification(message))
+                if message.contains("exact deterministic encoding")
+        ));
+        make_staging_tree_owner_writable(&duplicate_path).unwrap();
+    }
+
+    #[test]
+    fn cargo_resolution_source_projection_must_match_lock_after_resealing() {
+        let temp = TempDir::new().unwrap();
+        let mut added_options = options(&temp, "tests/fixtures/profiles/minimal.toml");
+        added_options.output_root = temp.path().join("added-cargo-source");
+        let added = compose(&added_options).unwrap();
+        let mut added_manifest = added.manifest.clone();
+        added_manifest.cargo_resolution.git_sources.insert(format!(
+            "git+https://example.invalid/repository#{}",
+            "0".repeat(40)
+        ));
+        let added_bytes = deterministic_json_bytes(&added_manifest.cargo_resolution).unwrap();
+        let added_path =
+            reseal_with_cargo_resolution_bytes(&added.path, &mut added_manifest, &added_bytes);
+        assert!(matches!(
+            verify_composition(&added_path),
+            Err(ComposeError::Verification(message))
+                if message.contains("source projection differs from Cargo.lock")
+        ));
+        make_staging_tree_owner_writable(&added_path).unwrap();
+
+        let mut removed_options = options(&temp, "tests/fixtures/profiles/controlled-build.toml");
+        removed_options.output_root = temp.path().join("removed-cargo-source");
+        removed_options.registry_cache_path = Some(registry_cache());
+        let removed = compose(&removed_options).unwrap();
+        let mut removed_manifest = removed.manifest.clone();
+        assert!(!removed_manifest.cargo_resolution.registries.is_empty());
+        removed_manifest.cargo_resolution.registries.clear();
+        let removed_bytes = deterministic_json_bytes(&removed_manifest.cargo_resolution).unwrap();
+        let removed_path = reseal_with_cargo_resolution_bytes(
+            &removed.path,
+            &mut removed_manifest,
+            &removed_bytes,
+        );
+        assert!(matches!(
+            verify_composition(&removed_path),
+            Err(ComposeError::Verification(message))
+                if message.contains("source projection differs from Cargo.lock")
+        ));
+        make_staging_tree_owner_writable(&removed_path).unwrap();
+    }
+
+    #[test]
+    fn composition_record_sequences_require_canonical_order_after_resealing() {
+        fn reseal(path: &Path, manifest: &mut CompositionManifest) -> PathBuf {
+            let payload = CompositionIdentityPayload {
+                schema: 1,
+                profile: &manifest.normalized_profile,
+                target: &manifest.normalized_target,
+                target_facts: &manifest.target_facts,
+                custom_target_spec: manifest.custom_target_spec.as_ref(),
+                resolution: &manifest.resolution,
+                component_runtime_effects: &manifest.component_runtime_effects,
+                host_runtime_effects: &manifest.host_runtime_effects,
+                direct_root_build_requirements: &manifest.direct_root_build_requirements,
+                sources: &manifest.sources,
+                generated_files: &manifest.generated_files,
+                cargo_lock_digest: &manifest.cargo_lock_digest,
+                cargo_resolution: &manifest.cargo_resolution,
+            };
+            manifest.composition_hash = hex::encode(
+                canonical::domain_hash(b"rust-agent-composition-v1\0", &payload).unwrap(),
+            );
+            write_text(
+                &path.join("src/identity.rs"),
+                &format!(
+                    "pub const COMPOSITION_HASH: &str = {:?};\n",
+                    manifest.composition_hash
+                ),
+            )
+            .unwrap();
+            write_json(
+                &path.join("rust-agent-security.json"),
+                &SecurityManifest {
+                    schema: 1,
+                    composition_hash: manifest.composition_hash.clone(),
+                    component_runtime_effects: manifest.component_runtime_effects.clone(),
+                    host_runtime_effects: manifest.host_runtime_effects.clone(),
+                    compiled_runtime_effects: manifest.compiled_runtime_effects.clone(),
+                    build_requirements: manifest.build_requirements.clone(),
+                },
+            )
+            .unwrap();
+            write_json(&path.join("rust-agent-composition.json"), manifest).unwrap();
+            let resealed_path = path.parent().unwrap().join(&manifest.composition_hash);
+            fs::rename(path, &resealed_path).unwrap();
+            resealed_path
+        }
+
+        let temp = TempDir::new().unwrap();
+        let mut source_options = options(&temp, "tests/fixtures/profiles/minimal.toml");
+        source_options.output_root = temp.path().join("source-record-order");
+        let source_generated = compose(&source_options).unwrap();
+        assert!(source_generated.manifest.sources.len() > 1);
+        let mut source_manifest = source_generated.manifest.clone();
+        source_manifest.sources.reverse();
+        let source_path = reseal(&source_generated.path, &mut source_manifest);
+        assert!(matches!(
+            verify_composition(&source_path),
+            Err(ComposeError::Verification(message))
+                if message.contains("strict canonical id order")
+        ));
+        make_staging_tree_owner_writable(&source_path).unwrap();
+
+        let mut generated_options = options(&temp, "tests/fixtures/profiles/minimal.toml");
+        generated_options.output_root = temp.path().join("generated-record-order");
+        let generated = compose(&generated_options).unwrap();
+        assert!(generated.manifest.generated_files.len() > 1);
+        let mut generated_manifest = generated.manifest.clone();
+        generated_manifest.generated_files.reverse();
+        let generated_path = reseal(&generated.path, &mut generated_manifest);
+        assert!(matches!(
+            verify_composition(&generated_path),
+            Err(ComposeError::Verification(message))
+                if message.contains("strict canonical path order")
+        ));
+        make_staging_tree_owner_writable(&generated_path).unwrap();
     }
 
     #[cfg(any(
@@ -2603,6 +4221,25 @@ mod tests {
         assert!(source.join("source-marker").is_file());
         assert!(destination.is_dir());
         assert!(fs::read_dir(destination).unwrap().next().is_none());
+    }
+
+    #[test]
+    fn fresh_publication_is_post_verified_before_success() {
+        let temp = TempDir::new().unwrap();
+        let generated = compose(&options(&temp, "tests/fixtures/profiles/minimal.toml")).unwrap();
+        fs::write(generated.path.join("target-facts.json"), b"{").unwrap();
+
+        let result = finish_published_composition(&generated.path, generated.manifest.clone());
+        assert!(
+            matches!(
+                &result,
+                Err(ComposeError::ExistingCompositionCorrupt { message, .. })
+                    if message.contains("post-publication verification failed")
+            ),
+            "unexpected post-publication result: {result:?}"
+        );
+        assert!(generated.path.is_dir());
+        make_staging_tree_owner_writable(&generated.path).unwrap();
     }
 
     #[test]
@@ -2939,6 +4576,7 @@ mod tests {
         for (actual, golden) in [
             ("Cargo.toml", "Cargo.toml"),
             ("src/lib.rs", "lib.rs"),
+            ("target-facts.json", "target-facts.json"),
             ("rust-agent-composition.json", "rust-agent-composition.json"),
         ] {
             if std::env::var_os("RUST_AGENT_UPDATE_GOLDENS").as_deref()
@@ -2972,6 +4610,7 @@ mod tests {
             ("Cargo.toml", "Cargo.toml"),
             ("src/lib.rs", "lib.rs"),
             ("src/wasm.rs", "wasm.rs"),
+            ("target-facts.json", "target-facts.json"),
             ("rust-agent-composition.json", "rust-agent-composition.json"),
         ] {
             if std::env::var_os("RUST_AGENT_UPDATE_GOLDENS").as_deref()
@@ -2998,15 +4637,16 @@ mod tests {
         wasm_options.registry_cache_path = Some(registry_cache());
         let generated = compose(&wasm_options).unwrap();
         let manifest_path = generated.path.join("rust-agent-composition.json");
-        let mut manifest: serde_json::Value =
-            serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
-        manifest["direct-root-build-requirements"]["host-boundary:fixture-host-export"]["executables"] =
-            serde_json::json!([]);
-        manifest["build-requirements"]["executables"] = serde_json::json!([]);
-        manifest["resolution"]["build-requirements"]["executables"] = serde_json::json!([]);
-        let mut bytes = serde_json::to_vec_pretty(&manifest).unwrap();
-        bytes.push(b'\n');
-        fs::write(manifest_path, bytes).unwrap();
+        let mut manifest = generated.manifest.clone();
+        manifest
+            .direct_root_build_requirements
+            .get_mut("host-boundary:fixture-host-export")
+            .unwrap()
+            .executables
+            .clear();
+        manifest.build_requirements.executables.clear();
+        manifest.resolution.build_requirements.executables.clear();
+        write_json(&manifest_path, &manifest).unwrap();
         assert!(matches!(
             verify_composition(&generated.path),
             Err(ComposeError::Verification(message))

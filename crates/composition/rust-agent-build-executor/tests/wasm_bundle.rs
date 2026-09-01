@@ -115,6 +115,7 @@ fn javascript_wasm_bundle_is_closed_verified_and_executable_end_to_end() {
         rustc_path: rustc.clone(),
         cargo_path: cargo.clone(),
         registry_cache_path: Some(registry.clone()),
+        custom_target_spec_path: None,
     })
     .unwrap();
     assert_eq!(generated.manifest.build_kind, BuildKind::Wasm);

@@ -48,6 +48,7 @@ fn product_neutral_library_compile_matrix() {
             rustc_path: rustc.clone(),
             cargo_path: cargo.clone(),
             registry_cache_path: None,
+            custom_target_spec_path: None,
         })
         .unwrap();
         let built = development_build(&DevelopmentBuildOptions {

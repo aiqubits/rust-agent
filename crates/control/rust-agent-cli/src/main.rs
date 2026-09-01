@@ -41,6 +41,9 @@ enum Command {
         cargo: PathBuf,
         #[arg(long)]
         registry_cache: Option<PathBuf>,
+        /// Optional custom rustc target JSON, snapshotted before target discovery.
+        #[arg(long)]
+        custom_target_spec: Option<PathBuf>,
     },
     /// Build a verified composition through the Phase 1A development runner.
     Build {
@@ -105,17 +108,28 @@ fn main() -> Result<()> {
             rustc,
             cargo,
             registry_cache,
+            custom_target_spec,
         } => {
             let workspace = canonical_existing(&workspace)?;
             let generated = compose(&ComposeOptions {
-                catalog_path: canonical_existing(&catalog)?,
-                profile_path: canonical_existing(&profile)?,
+                // Preserve each input path component so the compiler can reject
+                // symlink provenance instead of receiving an already-resolved
+                // path. The canonical workspace above remains the trust root.
+                catalog_path: absolute_output(&catalog)?,
+                profile_path: absolute_output(&profile)?,
                 output_root: absolute_output(&output)?,
                 rustc_path: canonical_existing(&rustc)?,
                 cargo_path: canonical_existing(&cargo)?,
                 registry_cache_path: registry_cache
                     .as_deref()
                     .map(canonical_existing)
+                    .transpose()?,
+                custom_target_spec_path: custom_target_spec
+                    .as_deref()
+                    // Preserve every input path component so the composition
+                    // compiler can reject symlinked specs instead of receiving
+                    // an already-resolved path with that provenance erased.
+                    .map(absolute_output)
                     .transpose()?,
                 workspace_root: workspace,
             })?;
@@ -142,7 +156,7 @@ fn main() -> Result<()> {
                 BuildExecutionPolicy::empty_development()
             };
             let manifest = development_build(&DevelopmentBuildOptions {
-                composition_path: canonical_existing(&composition)?,
+                composition_path: absolute_output(&composition)?,
                 artifact_dir: absolute_output(&artifact_dir)?,
                 cargo_path: canonical_existing(&cargo)?,
                 rustc_path: canonical_existing(&rustc)?,
@@ -165,7 +179,7 @@ fn main() -> Result<()> {
             allow_development,
         } => match (composition, artifact_dir) {
             (Some(path), None) => {
-                let manifest = verify_composition(&canonical_existing(&path)?)?;
+                let manifest = verify_composition(&absolute_output(&path)?)?;
                 if !allow_development && !manifest.deployable {
                     bail!(
                         "development composition rejected by production inspection; pass --allow-development"
@@ -191,7 +205,7 @@ fn main() -> Result<()> {
             destination,
         } => {
             let manifest = emit_integration(
-                &canonical_existing(&composition)?,
+                &absolute_output(&composition)?,
                 &absolute_output(&destination)?,
             )?;
             print_json(&CommandOutput {
@@ -203,8 +217,7 @@ fn main() -> Result<()> {
             integration,
             allow_development,
         } => {
-            let manifest =
-                verify_integration(&canonical_existing(&integration)?, allow_development)?;
+            let manifest = verify_integration(&absolute_output(&integration)?, allow_development)?;
             print_json(&CommandOutput {
                 status: "verified-integration",
                 value: &manifest.composition_hash,

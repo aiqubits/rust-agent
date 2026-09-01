@@ -3,11 +3,12 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    custom_target::CustomTargetSpecRecord,
     metadata::BuildRequirements,
     profile::{BuildKind, CompositionProfile},
     resolver::{AppHandoff, Resolution},
     snapshot::CanonicalSnapshotEntry,
-    target::Target,
+    target::{Target, TargetFactsRecord},
 };
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -36,8 +37,12 @@ pub struct GeneratedFileRecord {
 pub struct CargoResolutionRecord {
     pub schema: u32,
     pub target: String,
+    #[serde(rename = "cargo-target-input")]
+    pub cargo_target_input: String,
     #[serde(rename = "target-fact-digest")]
     pub target_fact_digest: String,
+    #[serde(rename = "custom-target-spec-digest")]
+    pub custom_target_spec_digest: Option<String>,
     pub resolver: String,
     pub offline: bool,
     #[serde(rename = "isolated-cargo-home")]
@@ -55,6 +60,10 @@ pub struct CompositionIdentityPayload<'a> {
     pub schema: u32,
     pub profile: &'a CompositionProfile,
     pub target: &'a Target,
+    #[serde(rename = "target-facts")]
+    pub target_facts: &'a TargetFactsRecord,
+    #[serde(rename = "custom-target-spec")]
+    pub custom_target_spec: Option<&'a CustomTargetSpecRecord>,
     pub resolution: &'a Resolution,
     #[serde(rename = "component-runtime-effects")]
     pub component_runtime_effects: &'a BTreeSet<String>,
@@ -89,6 +98,10 @@ pub struct CompositionManifest {
     pub normalized_target: Target,
     #[serde(rename = "target-fact-digest")]
     pub target_fact_digest: String,
+    #[serde(rename = "target-facts")]
+    pub target_facts: TargetFactsRecord,
+    #[serde(rename = "custom-target-spec")]
+    pub custom_target_spec: Option<CustomTargetSpecRecord>,
     #[serde(rename = "selected-components")]
     pub selected_components: Vec<String>,
     #[serde(rename = "runtime-adapter")]

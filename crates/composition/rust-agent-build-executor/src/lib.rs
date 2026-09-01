@@ -73,8 +73,9 @@ pub use production_policy::{
     SigningHelper, TrustedReviewerPolicy, TrustedSigner,
 };
 use rust_agent_composition::{
-    CompositionManifest, WASM_BINDGEN_CLI_LOGICAL_ID, WASM_BINDGEN_PROTOCOL_VERSION,
-    profile::BuildKind, verify_composition,
+    CargoConfigIsolationError, CompositionManifest, Target, WASM_BINDGEN_CLI_LOGICAL_ID,
+    WASM_BINDGEN_PROTOCOL_VERSION, profile::BuildKind, verify_cargo_config_isolation,
+    verify_composition, verify_custom_target_snapshot,
 };
 pub use snapshot_materializer::{
     HostClosureMountObservation, HostClosureSnapshotManifest, HostClosureSnapshotSource,
@@ -103,6 +104,10 @@ pub enum DevelopmentBuildError {
     NonAbsolutePath(String),
     #[error("composition verification failed: {0}")]
     Composition(#[from] rust_agent_composition::ComposeError),
+    #[error("custom target preflight failed before Cargo: {0}")]
+    CustomTargetPreflight(String),
+    #[error("Cargo resolution context is not isolated: {0}")]
+    CargoConfigIsolation(#[from] CargoConfigIsolationError),
     #[error("build policy is invalid: {0}")]
     Policy(#[from] BuildPolicyError),
     #[error("artifact contract failed: {0}")]
@@ -126,6 +131,24 @@ pub fn development_build(
 ) -> Result<DevelopmentBuildManifest, DevelopmentBuildError> {
     validate_paths(options)?;
     let composition = verify_composition(&options.composition_path)?;
+    verify_cargo_config_isolation(
+        &options.composition_path,
+        &options.composition_path.join(".cargo/config.toml"),
+    )?;
+    if let Some(spec) = &composition.custom_target_spec {
+        let actual = Target::query_with_custom_spec(
+            &options.rustc_path,
+            composition.normalized_target.environment,
+            spec,
+            &options.composition_path.join(&spec.snapshot_path),
+        )
+        .map_err(|error| DevelopmentBuildError::CustomTargetPreflight(error.to_string()))?;
+        if actual != composition.normalized_target {
+            return Err(DevelopmentBuildError::CustomTargetPreflight(
+                "queried target facts differ from the composition snapshot".into(),
+            ));
+        }
+    }
     if !composition.cargo_resolution.registries.is_empty() && options.registry_cache_path.is_none()
     {
         return Err(DevelopmentBuildError::RegistryCacheRequired(
@@ -176,10 +199,18 @@ pub fn development_build(
         } else {
             &["test", "--locked", "--offline"]
         };
-        run_cargo(options, &cargo_home, &target_dir, "test", args)?;
+        run_cargo(
+            options,
+            &composition,
+            &cargo_home,
+            &target_dir,
+            "test",
+            args,
+        )?;
     }
     run_cargo(
         options,
+        &composition,
         &cargo_home,
         &target_dir,
         "build",
@@ -306,11 +337,24 @@ pub fn inspect_development_build(
 
 fn run_cargo(
     options: &DevelopmentBuildOptions,
+    composition: &CompositionManifest,
     cargo_home: &Path,
     target_dir: &Path,
     step: &'static str,
     args: &[&str],
 ) -> Result<(), DevelopmentBuildError> {
+    verify_cargo_config_isolation(
+        &options.composition_path,
+        &options.composition_path.join(".cargo/config.toml"),
+    )?;
+    let custom_snapshot_before = composition
+        .custom_target_spec
+        .as_ref()
+        .map(|spec| {
+            verify_custom_target_snapshot(spec, &options.composition_path.join(&spec.snapshot_path))
+        })
+        .transpose()
+        .map_err(|error| DevelopmentBuildError::CustomTargetPreflight(error.to_string()))?;
     let output = Command::new(&options.cargo_path)
         .args(args)
         .arg("--manifest-path")
@@ -324,7 +368,21 @@ fn run_cargo(
         .env("RUSTC", &options.rustc_path)
         .env("RUST_AGENT_BASELINE_LINKER", &options.linker_path)
         .env("PATH", baseline_path(options)?)
-        .output()?;
+        .output();
+    let custom_snapshot_after = composition
+        .custom_target_spec
+        .as_ref()
+        .map(|spec| {
+            verify_custom_target_snapshot(spec, &options.composition_path.join(&spec.snapshot_path))
+        })
+        .transpose()
+        .map_err(|error| DevelopmentBuildError::CustomTargetPreflight(error.to_string()))?;
+    if let (Some(before), Some(after)) = (&custom_snapshot_before, &custom_snapshot_after) {
+        before
+            .ensure_unchanged(after, "development Cargo invocation")
+            .map_err(|error| DevelopmentBuildError::CustomTargetPreflight(error.to_string()))?;
+    }
+    let output = output?;
     if output.status.success() {
         Ok(())
     } else {

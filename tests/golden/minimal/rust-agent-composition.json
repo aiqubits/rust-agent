@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "algorithm": "sha256-rust-agent-composition-v1",
-  "composition-hash": "e00b2629133bf366edeefcf7f790f77c0535d8c38fce2bddeeb15a66c0771771",
+  "composition-hash": "48a64ca5a319a6cb644106cc1d679382f275b4a4f17e9985e99e6f1526ff6092",
   "build-kind": "library",
   "profile-name": "fixture-minimal",
   "normalized-profile": {
@@ -38,6 +38,8 @@
   "target": "x86_64-unknown-linux-gnu",
   "normalized-target": {
     "triple": "x86_64-unknown-linux-gnu",
+    "arch": "x86_64",
+    "os": "linux",
     "environment": "desktop",
     "facts": {
       "debug_assertions": [
@@ -93,10 +95,70 @@
         null
       ]
     },
-    "target-fact-digest": "73c369762a21203cde3a60f65e26ee503a07358806d6559f514e2518282056de",
+    "target-fact-digest": "a9a93b29e8f3c9115c1964f81c7d7117aa8be0cb388eed6d5a56fcd79ac9d5c1",
     "custom-target-spec-digest": null
   },
-  "target-fact-digest": "73c369762a21203cde3a60f65e26ee503a07358806d6559f514e2518282056de",
+  "target-fact-digest": "a9a93b29e8f3c9115c1964f81c7d7117aa8be0cb388eed6d5a56fcd79ac9d5c1",
+  "target-facts": {
+    "schema": 1,
+    "triple": "x86_64-unknown-linux-gnu",
+    "facts": {
+      "debug_assertions": [
+        null
+      ],
+      "panic": [
+        "unwind"
+      ],
+      "target_abi": [
+        ""
+      ],
+      "target_arch": [
+        "x86_64"
+      ],
+      "target_endian": [
+        "little"
+      ],
+      "target_env": [
+        "gnu"
+      ],
+      "target_family": [
+        "unix"
+      ],
+      "target_feature": [
+        "fxsr",
+        "sse",
+        "sse2"
+      ],
+      "target_has_atomic": [
+        "16",
+        "32",
+        "64",
+        "8",
+        "ptr"
+      ],
+      "target_has_atomic_primitive_alignment": [
+        "16",
+        "32",
+        "64",
+        "8",
+        "ptr"
+      ],
+      "target_os": [
+        "linux"
+      ],
+      "target_pointer_width": [
+        "64"
+      ],
+      "target_vendor": [
+        "unknown"
+      ],
+      "unix": [
+        null
+      ]
+    },
+    "custom-target-spec-digest": null
+  },
+  "custom-target-spec": null,
   "selected-components": [
     "fixture-driver",
     "fixture-model"
@@ -149,7 +211,7 @@
     "schema": 1,
     "profile": "fixture-minimal",
     "target": "x86_64-unknown-linux-gnu",
-    "target-fact-digest": "73c369762a21203cde3a60f65e26ee503a07358806d6559f514e2518282056de",
+    "target-fact-digest": "a9a93b29e8f3c9115c1964f81c7d7117aa8be0cb388eed6d5a56fcd79ac9d5c1",
     "selected-components": [
       "fixture-driver",
       "fixture-model"
@@ -171,6 +233,41 @@
     ],
     "runtime-adapter": "fixture-runtime",
     "host-boundary": null,
+    "target-support": {
+      "component:fixture-driver": {
+        "targets": "cfg(true)",
+        "entries": [
+          {
+            "predicate": "cfg(true)",
+            "tier": "production"
+          }
+        ],
+        "matched-predicate": "cfg(true)",
+        "selected-tier": "production"
+      },
+      "component:fixture-model": {
+        "targets": "cfg(true)",
+        "entries": [
+          {
+            "predicate": "cfg(true)",
+            "tier": "production"
+          }
+        ],
+        "matched-predicate": "cfg(true)",
+        "selected-tier": "production"
+      },
+      "runtime-adapter:fixture-runtime": {
+        "targets": "cfg(true)",
+        "entries": [
+          {
+            "predicate": "cfg(true)",
+            "tier": "production"
+          }
+        ],
+        "matched-predicate": "cfg(true)",
+        "selected-tier": "production"
+      }
+    },
     "compiled-runtime-effects": [],
     "build-requirements": {
       "executables": [],
@@ -902,21 +999,28 @@
     },
     {
       "path": "cargo-resolution.json",
-      "digest": "79666139845b8a1ba750ef87e395035aa84d80aea43da68c7863d3e3014d4f25",
-      "bytes": 294
+      "digest": "acbbbc450e8390feda7f5e81cff47ba3c303903da3d7b22138f3e19b14133172",
+      "bytes": 383
     },
     {
       "path": "src/lib.rs",
       "digest": "d93477fb5d843aa34be9d1b53fc98defbb625c73cb76a45b88b1aa4250592bd1",
       "bytes": 1998
+    },
+    {
+      "path": "target-facts.json",
+      "digest": "1e385c2746e8a99ab4a10ce1c137039271e17773a222d4540f77ff5cbe7598eb",
+      "bytes": 499
     }
   ],
   "cargo-lock-digest": "c2b26cfaf8190297043770d999c71e78000ed284e0319b84227bedbc61bdf37e",
-  "cargo-resolution-digest": "79666139845b8a1ba750ef87e395035aa84d80aea43da68c7863d3e3014d4f25",
+  "cargo-resolution-digest": "acbbbc450e8390feda7f5e81cff47ba3c303903da3d7b22138f3e19b14133172",
   "cargo-resolution": {
     "schema": 1,
     "target": "x86_64-unknown-linux-gnu",
-    "target-fact-digest": "73c369762a21203cde3a60f65e26ee503a07358806d6559f514e2518282056de",
+    "cargo-target-input": "x86_64-unknown-linux-gnu",
+    "target-fact-digest": "a9a93b29e8f3c9115c1964f81c7d7117aa8be0cb388eed6d5a56fcd79ac9d5c1",
+    "custom-target-spec-digest": null,
     "resolver": "2",
     "offline": true,
     "isolated-cargo-home": true,

@@ -1,9 +1,39 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fmt,
+};
 
-use serde::{Deserialize, Serialize};
+use serde::{
+    Deserialize, Deserializer, Serialize,
+    de::{self, SeqAccess, Visitor},
+};
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
+use crate::target::MAX_TARGET_PREDICATE_PARTITIONS;
+
+pub const MAX_CATALOG_DOCUMENT_BYTES: usize = 1024 * 1024;
+pub const MAX_CATALOG_OWNERS: usize = 256;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum CatalogResourceBoundsError {
+    OwnerCountOverflow,
+    TooManyOwners { actual: usize, maximum: usize },
+}
+
+impl fmt::Display for CatalogResourceBoundsError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::OwnerCountOverflow => formatter.write_str("catalog owner count overflowed"),
+            Self::TooManyOwners { actual, maximum } => {
+                write!(
+                    formatter,
+                    "catalog has {actual} owners; maximum is {maximum}"
+                )
+            }
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize)]
 pub struct CatalogDocument {
     pub schema: u32,
     #[serde(default)]
@@ -16,9 +46,66 @@ pub struct CatalogDocument {
     pub host_boundaries: Vec<HostBoundarySpec>,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UncheckedCatalogDocument {
+    schema: u32,
+    #[serde(default)]
+    capabilities: Vec<CapabilitySpec>,
+    #[serde(default)]
+    components: Vec<ComponentSpec>,
+    #[serde(default, rename = "runtime-adapters")]
+    runtime_adapters: Vec<RuntimeAdapterSpec>,
+    #[serde(default, rename = "host-boundaries")]
+    host_boundaries: Vec<HostBoundarySpec>,
+}
+
+impl<'de> Deserialize<'de> for CatalogDocument {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let unchecked = UncheckedCatalogDocument::deserialize(deserializer)?;
+        let document = Self {
+            schema: unchecked.schema,
+            capabilities: unchecked.capabilities,
+            components: unchecked.components,
+            runtime_adapters: unchecked.runtime_adapters,
+            host_boundaries: unchecked.host_boundaries,
+        };
+        document
+            .validate_resource_bounds()
+            .map_err(de::Error::custom)?;
+        Ok(document)
+    }
+}
+
 impl CatalogDocument {
     pub fn from_toml(input: &str) -> Result<Self, toml::de::Error> {
+        if input.len() > MAX_CATALOG_DOCUMENT_BYTES {
+            return Err(<toml::de::Error as de::Error>::custom(format!(
+                "catalog document has {} bytes; maximum is {MAX_CATALOG_DOCUMENT_BYTES}",
+                input.len()
+            )));
+        }
         toml::from_str(input)
+    }
+
+    pub(crate) fn validate_resource_bounds(&self) -> Result<(), CatalogResourceBoundsError> {
+        let owner_count = self
+            .capabilities
+            .len()
+            .checked_add(self.components.len())
+            .and_then(|count| count.checked_add(self.runtime_adapters.len()))
+            .and_then(|count| count.checked_add(self.host_boundaries.len()))
+            .ok_or(CatalogResourceBoundsError::OwnerCountOverflow)?;
+        if owner_count > MAX_CATALOG_OWNERS {
+            return Err(CatalogResourceBoundsError::TooManyOwners {
+                actual: owner_count,
+                maximum: MAX_CATALOG_OWNERS,
+            });
+        }
+        Ok(())
     }
 }
 
@@ -87,7 +174,15 @@ pub struct ComponentSpec {
     #[serde(default, rename = "prepared-config-type")]
     pub prepared_config_type: Option<String>,
     pub targets: String,
-    pub support: SupportTier,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub support: Option<SupportTier>,
+    #[serde(
+        default,
+        rename = "target-support",
+        deserialize_with = "deserialize_target_support_entries",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub target_support: Option<Vec<TargetSupport>>,
     #[serde(rename = "lifecycle-effects")]
     pub lifecycle_effects: BTreeSet<String>,
     pub provides: Vec<CapabilityProvide>,
@@ -119,6 +214,13 @@ pub enum ConfigSource {
 pub enum SupportTier {
     Experimental,
     Production,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct TargetSupport {
+    pub predicate: String,
+    pub tier: SupportTier,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -227,7 +329,15 @@ pub struct RuntimeAdapterSpec {
     pub package_path: String,
     pub constructor: String,
     pub targets: String,
-    pub support: SupportTier,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub support: Option<SupportTier>,
+    #[serde(
+        default,
+        rename = "target-support",
+        deserialize_with = "deserialize_target_support_entries",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub target_support: Option<Vec<TargetSupport>>,
     pub primitives: BTreeSet<String>,
     pub security: BTreeSet<String>,
     #[serde(rename = "app-coexistence")]
@@ -249,7 +359,15 @@ pub struct HostBoundarySpec {
     #[serde(default, rename = "export-module")]
     pub export_module: Option<String>,
     pub targets: String,
-    pub support: SupportTier,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub support: Option<SupportTier>,
+    #[serde(
+        default,
+        rename = "target-support",
+        deserialize_with = "deserialize_target_support_entries",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub target_support: Option<Vec<TargetSupport>>,
     pub security: BTreeSet<String>,
     #[serde(rename = "runtime-adapters")]
     pub runtime_adapters: BTreeSet<String>,
@@ -270,4 +388,93 @@ pub struct CatalogTrustPolicy {
     pub schema: u32,
     #[serde(default, rename = "reviewer-policies")]
     pub reviewer_policies: BTreeMap<String, BTreeSet<String>>,
+}
+
+fn deserialize_target_support_entries<'de, D>(
+    deserializer: D,
+) -> Result<Option<Vec<TargetSupport>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    struct TargetSupportEntriesVisitor;
+
+    impl<'de> Visitor<'de> for TargetSupportEntriesVisitor {
+        type Value = Option<Vec<TargetSupport>>;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(
+                formatter,
+                "at most {MAX_TARGET_PREDICATE_PARTITIONS} target-support entries"
+            )
+        }
+
+        fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+        where
+            A: SeqAccess<'de>,
+        {
+            let mut entries = Vec::new();
+            while let Some(entry) = sequence.next_element::<TargetSupport>()? {
+                if entries.len() == MAX_TARGET_PREDICATE_PARTITIONS {
+                    return Err(de::Error::custom(format!(
+                        "target-support entry count exceeds {MAX_TARGET_PREDICATE_PARTITIONS}"
+                    )));
+                }
+                entries.push(entry);
+            }
+            Ok(Some(entries))
+        }
+    }
+
+    deserializer.deserialize_seq(TargetSupportEntriesVisitor)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn catalog_with_capabilities(count: usize) -> String {
+        let mut input = String::from("schema = 1\n");
+        for index in 0..count {
+            input.push_str(&format!(
+                r#"
+[[capabilities]]
+id = "cap:test-{index}"
+api-package = "test-api-{index}"
+rust-api = "test_api_{index}::Api"
+binding-type = "test_api_{index}::Binding"
+binding-adapter = "test_api_{index}::Adapter"
+binding = "singleton"
+scope = "app"
+"#,
+            ));
+        }
+        input
+    }
+
+    #[test]
+    fn catalog_document_byte_and_owner_boundaries_are_closed() {
+        let prefix = "schema = 1\n";
+        let exact_bytes = format!(
+            "{prefix}{}",
+            " ".repeat(MAX_CATALOG_DOCUMENT_BYTES - prefix.len())
+        );
+        CatalogDocument::from_toml(&exact_bytes).unwrap();
+        let oversized_bytes = format!("{exact_bytes} ");
+        assert!(CatalogDocument::from_toml(&oversized_bytes).is_err());
+
+        let maximum_catalog =
+            CatalogDocument::from_toml(&catalog_with_capabilities(MAX_CATALOG_OWNERS)).unwrap();
+        assert!(
+            CatalogDocument::from_toml(&catalog_with_capabilities(MAX_CATALOG_OWNERS + 1)).is_err()
+        );
+        assert!(
+            toml::from_str::<CatalogDocument>(&catalog_with_capabilities(MAX_CATALOG_OWNERS + 1))
+                .is_err()
+        );
+
+        let mut direct_json = serde_json::to_value(maximum_catalog).unwrap();
+        let capabilities = direct_json["capabilities"].as_array_mut().unwrap();
+        capabilities.push(capabilities[0].clone());
+        assert!(serde_json::from_value::<CatalogDocument>(direct_json).is_err());
+    }
 }

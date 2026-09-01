@@ -8,10 +8,13 @@ use thiserror::Error;
 use crate::{
     metadata::{
         AppCoexistence, BindingKind, BuildRequirements, CapabilitySpec, CatalogDocument,
-        ComponentSpec, ConfigSource, HostBoundarySpec, ProvideLayer, ResourceNamespaceMode,
-        RuntimeAdapterSpec, ScopeKind,
+        CatalogResourceBoundsError, ComponentSpec, ConfigSource, HostBoundarySpec, ProvideLayer,
+        ResourceNamespaceMode, RuntimeAdapterSpec, ScopeKind, SupportTier, TargetSupport,
     },
-    target::TargetError,
+    target::{
+        CoreTargetFacts, PredicateAnalysisBudget, TargetError, canonical_builtin_facts,
+        validate_predicate_partition_with_budget,
+    },
 };
 
 const SCHEMA_VERSION: u32 = 1;
@@ -95,21 +98,47 @@ pub enum CatalogError {
     InvalidResourceNamespace(String, String),
     #[error("target predicate in {owner} is invalid: {source}")]
     InvalidTargetPredicate { owner: String, source: TargetError },
+    #[error("target support in {owner} is invalid: {message}")]
+    InvalidTargetSupport { owner: String, message: String },
+    #[error("target support predicate in {owner} is invalid: {source}")]
+    InvalidTargetSupportPredicate { owner: String, source: TargetError },
+    #[error("catalog owner count overflowed")]
+    CatalogOwnerCountOverflow,
+    #[error("catalog has {actual} owners; maximum is {maximum}")]
+    CatalogOwnerLimitExceeded { actual: usize, maximum: usize },
 }
 
 impl NormalizedCatalog {
     pub fn normalize(document: CatalogDocument) -> Result<Self, CatalogError> {
+        let mut predicate_analysis_budget = PredicateAnalysisBudget::new();
+        Self::normalize_with_predicate_budget(document, &mut predicate_analysis_budget)
+    }
+
+    fn normalize_with_predicate_budget(
+        document: CatalogDocument,
+        predicate_analysis_budget: &mut PredicateAnalysisBudget,
+    ) -> Result<Self, CatalogError> {
+        document
+            .validate_resource_bounds()
+            .map_err(|error| match error {
+                CatalogResourceBoundsError::OwnerCountOverflow => {
+                    CatalogError::CatalogOwnerCountOverflow
+                }
+                CatalogResourceBoundsError::TooManyOwners { actual, maximum } => {
+                    CatalogError::CatalogOwnerLimitExceeded { actual, maximum }
+                }
+            })?;
         if document.schema != SCHEMA_VERSION {
             return Err(CatalogError::UnsupportedSchema(document.schema));
         }
 
         let capabilities = collect_unique("capability", document.capabilities, |value| &value.id)?;
-        let components = collect_unique("component", document.components, |value| &value.id)?;
-        let runtime_adapters =
+        let mut components = collect_unique("component", document.components, |value| &value.id)?;
+        let mut runtime_adapters =
             collect_unique("runtime adapter", document.runtime_adapters, |value| {
                 &value.id
             })?;
-        let host_boundaries =
+        let mut host_boundaries =
             collect_unique("host boundary", document.host_boundaries, |value| &value.id)?;
 
         for capability in capabilities.values() {
@@ -117,7 +146,14 @@ impl NormalizedCatalog {
         }
 
         let mut package_owners = BTreeMap::new();
-        for component in components.values() {
+        for component in components.values_mut() {
+            normalize_target_support(
+                &component.id,
+                &component.targets,
+                &mut component.support,
+                &mut component.target_support,
+                predicate_analysis_budget,
+            )?;
             validate_component(component, &capabilities)?;
             if let Some(previous) =
                 package_owners.insert(component.package.clone(), component.id.clone())
@@ -141,10 +177,24 @@ impl NormalizedCatalog {
         }
         let resource_namespace_requirements =
             normalize_resource_namespace_requirements(&components, &capabilities)?;
-        for adapter in runtime_adapters.values() {
+        for adapter in runtime_adapters.values_mut() {
+            normalize_target_support(
+                &adapter.id,
+                &adapter.targets,
+                &mut adapter.support,
+                &mut adapter.target_support,
+                predicate_analysis_budget,
+            )?;
             validate_adapter(adapter)?;
         }
-        for boundary in host_boundaries.values() {
+        for boundary in host_boundaries.values_mut() {
+            normalize_target_support(
+                &boundary.id,
+                &boundary.targets,
+                &mut boundary.support,
+                &mut boundary.target_support,
+                predicate_analysis_budget,
+            )?;
             validate_boundary(boundary)?;
         }
 
@@ -665,9 +715,9 @@ fn validate_target_syntax(owner: &str, predicate: &str) -> Result<(), CatalogErr
     let target = crate::target::Target::from_facts(
         "validation-unknown-none",
         crate::target::Environment::Server,
-        BTreeMap::new(),
+        minimal_validation_target_facts(),
     )
-    .expect("empty target facts have a canonical encoding");
+    .expect("the static validation target facts are canonical");
     target
         .matches(predicate)
         .map(|_| ())
@@ -675,6 +725,79 @@ fn validate_target_syntax(owner: &str, predicate: &str) -> Result<(), CatalogErr
             owner: owner.to_owned(),
             source,
         })
+}
+
+fn normalize_target_support(
+    owner: &str,
+    targets: &str,
+    support: &mut Option<SupportTier>,
+    target_support: &mut Option<Vec<TargetSupport>>,
+    predicate_analysis_budget: &mut PredicateAnalysisBudget,
+) -> Result<(), CatalogError> {
+    validate_target_support(
+        owner,
+        targets,
+        *support,
+        target_support.as_deref(),
+        predicate_analysis_budget,
+    )?;
+    if let Some(tier) = support.take() {
+        *target_support = Some(vec![TargetSupport {
+            predicate: targets.into(),
+            tier,
+        }]);
+    }
+    target_support
+        .as_mut()
+        .expect("validated target support is always present")
+        .sort();
+    Ok(())
+}
+
+fn validate_target_support(
+    owner: &str,
+    targets: &str,
+    support: Option<SupportTier>,
+    target_support: Option<&[TargetSupport]>,
+    predicate_analysis_budget: &mut PredicateAnalysisBudget,
+) -> Result<(), CatalogError> {
+    match (support, target_support) {
+        (Some(_), None) => Ok(()),
+        (Some(_), Some(_)) => Err(CatalogError::InvalidTargetSupport {
+            owner: owner.into(),
+            message: "blanket `support` and `target-support` are mutually exclusive".into(),
+        }),
+        (None, None) => Err(CatalogError::InvalidTargetSupport {
+            owner: owner.into(),
+            message: "exactly one of blanket `support` or `target-support` is required".into(),
+        }),
+        (None, Some([])) => Err(CatalogError::InvalidTargetSupport {
+            owner: owner.into(),
+            message: "`target-support` must not be empty".into(),
+        }),
+        (None, Some(entries)) => {
+            let predicates = entries
+                .iter()
+                .map(|entry| entry.predicate.as_str())
+                .collect::<Vec<_>>();
+            validate_predicate_partition_with_budget(
+                targets,
+                &predicates,
+                predicate_analysis_budget,
+            )
+            .map_err(|source| CatalogError::InvalidTargetSupportPredicate {
+                owner: owner.into(),
+                source,
+            })
+        }
+    }
+}
+
+fn minimal_validation_target_facts() -> BTreeMap<String, BTreeSet<Option<String>>> {
+    canonical_builtin_facts(CoreTargetFacts::little_endian(
+        "x86_64", "gnu", "linux", "64", "unwind",
+    ))
+    .expect("the static core target facts are canonical")
 }
 
 fn validate_id(value: &str, kind: &'static str) -> Result<(), CatalogError> {
@@ -813,6 +936,233 @@ provides = [{ capability = "cap:model", priority = 1, effects = [] }]
         let document = CatalogDocument::from_toml(BASE).unwrap();
         let catalog = NormalizedCatalog::normalize(document).unwrap();
         assert!(catalog.components.contains_key("model"));
+    }
+
+    fn catalog_with_component_target_support(targets: &str, support: &str) -> String {
+        BASE.replace(
+            "targets = \"cfg(true)\"\nsupport = \"production\"",
+            &format!("targets = '{targets}'\n{support}"),
+        )
+    }
+
+    #[test]
+    fn blanket_support_normalizes_to_an_exact_round_trippable_entry() {
+        let catalog =
+            NormalizedCatalog::normalize(CatalogDocument::from_toml(BASE).unwrap()).unwrap();
+        let component = &catalog.components["model"];
+        assert_eq!(component.support, None);
+        assert_eq!(
+            component.target_support.as_deref(),
+            Some(
+                [TargetSupport {
+                    predicate: "cfg(true)".into(),
+                    tier: SupportTier::Production,
+                }]
+                .as_slice()
+            )
+        );
+
+        let encoded = serde_json::to_vec(component).unwrap();
+        let decoded: ComponentSpec = serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(decoded.support, None);
+        assert_eq!(decoded.target_support, component.target_support);
+    }
+
+    #[test]
+    fn explicit_support_partition_is_canonical_and_order_deterministic() {
+        let targets = "cfg(any(target_os = \"linux\", target_os = \"windows\"))";
+        let linux = "{ predicate = 'cfg(target_os = \"linux\")', tier = \"production\" }";
+        let windows = "{ predicate = 'cfg(target_os = \"windows\")', tier = \"experimental\" }";
+        let first = catalog_with_component_target_support(
+            targets,
+            &format!("target-support = [{windows}, {linux}]"),
+        );
+        let second = catalog_with_component_target_support(
+            targets,
+            &format!("target-support = [{linux}, {windows}]"),
+        );
+        let first =
+            NormalizedCatalog::normalize(CatalogDocument::from_toml(&first).unwrap()).unwrap();
+        let second =
+            NormalizedCatalog::normalize(CatalogDocument::from_toml(&second).unwrap()).unwrap();
+        let first = &first.components["model"];
+        let second = &second.components["model"];
+        assert_eq!(first.target_support, second.target_support);
+        assert_eq!(
+            serde_json::to_vec(first).unwrap(),
+            serde_json::to_vec(second).unwrap()
+        );
+    }
+
+    #[test]
+    fn target_support_shape_and_unknown_fields_fail_closed() {
+        let both = BASE.replace(
+            "support = \"production\"",
+            "support = \"production\"\ntarget-support = [{ predicate = 'cfg(true)', tier = \"production\" }]",
+        );
+        assert!(matches!(
+            NormalizedCatalog::normalize(CatalogDocument::from_toml(&both).unwrap()),
+            Err(CatalogError::InvalidTargetSupport { owner, .. }) if owner == "model"
+        ));
+
+        for support in ["", "target-support = []"] {
+            let input = BASE.replace("support = \"production\"", support);
+            assert!(matches!(
+                NormalizedCatalog::normalize(CatalogDocument::from_toml(&input).unwrap()),
+                Err(CatalogError::InvalidTargetSupport { owner, .. }) if owner == "model"
+            ));
+        }
+
+        let unknown = BASE.replace(
+            "support = \"production\"",
+            "target-support = [{ predicate = 'cfg(true)', tier = \"production\", rank = 1 }]",
+        );
+        assert!(CatalogDocument::from_toml(&unknown).is_err());
+    }
+
+    #[test]
+    fn target_support_partition_rejects_dead_outside_overlap_and_gap_entries() {
+        let dead = catalog_with_component_target_support(
+            "cfg(true)",
+            "target-support = [{ predicate = 'cfg(false)', tier = \"production\" }, { predicate = 'cfg(true)', tier = \"experimental\" }]",
+        );
+        assert!(matches!(
+            NormalizedCatalog::normalize(CatalogDocument::from_toml(&dead).unwrap()),
+            Err(CatalogError::InvalidTargetSupportPredicate {
+                owner,
+                source: TargetError::PredicatePartitionUnsatisfiable { index: 0 }
+            }) if owner == "model"
+        ));
+
+        let outside = catalog_with_component_target_support(
+            "cfg(target_os = \"linux\")",
+            "target-support = [{ predicate = 'cfg(target_os = \"windows\")', tier = \"production\" }]",
+        );
+        assert!(matches!(
+            NormalizedCatalog::normalize(CatalogDocument::from_toml(&outside).unwrap()),
+            Err(CatalogError::InvalidTargetSupportPredicate {
+                owner,
+                source: TargetError::PredicatePartitionOutsideParent { index: 0 }
+            }) if owner == "model"
+        ));
+
+        let overlap = catalog_with_component_target_support(
+            "cfg(any(target_feature = \"sse\", target_feature = \"avx\"))",
+            "target-support = [{ predicate = 'cfg(target_feature = \"sse\")', tier = \"production\" }, { predicate = 'cfg(target_feature = \"avx\")', tier = \"experimental\" }]",
+        );
+        assert!(matches!(
+            NormalizedCatalog::normalize(CatalogDocument::from_toml(&overlap).unwrap()),
+            Err(CatalogError::InvalidTargetSupportPredicate {
+                owner,
+                source: TargetError::PredicatePartitionOverlap { first: 0, second: 1 }
+            }) if owner == "model"
+        ));
+
+        let gap = catalog_with_component_target_support(
+            "cfg(true)",
+            "target-support = [{ predicate = 'cfg(target_os = \"linux\")', tier = \"production\" }, { predicate = 'cfg(target_os = \"windows\")', tier = \"experimental\" }]",
+        );
+        assert!(matches!(
+            NormalizedCatalog::normalize(CatalogDocument::from_toml(&gap).unwrap()),
+            Err(CatalogError::InvalidTargetSupportPredicate {
+                owner,
+                source: TargetError::PredicatePartitionGap
+            }) if owner == "model"
+        ));
+    }
+
+    #[test]
+    fn target_support_entry_count_boundary_is_bounded() {
+        let maximum = crate::target::MAX_TARGET_PREDICATE_PARTITIONS;
+        let predicates = (0..maximum)
+            .map(|index| format!("target_os = \"custom-{index}\""))
+            .collect::<Vec<_>>();
+        let targets = format!("cfg(any({}))", predicates.join(", "));
+        let entries = (0..maximum)
+            .map(|index| {
+                format!(
+                    "{{ predicate = 'cfg(target_os = \"custom-{index}\")', tier = \"production\" }}"
+                )
+            })
+            .collect::<Vec<_>>();
+        let exact = catalog_with_component_target_support(
+            &targets,
+            &format!("target-support = [{}]", entries.join(", ")),
+        );
+        NormalizedCatalog::normalize(CatalogDocument::from_toml(&exact).unwrap()).unwrap();
+
+        let mut excess_entries = entries;
+        excess_entries
+            .push("{ predicate = 'cfg(target_os = \"overflow\")', tier = \"production\" }".into());
+        let excess = catalog_with_component_target_support(
+            "cfg(true)",
+            &format!("target-support = [{}]", excess_entries.join(", ")),
+        );
+        assert!(CatalogDocument::from_toml(&excess).is_err());
+    }
+
+    #[test]
+    fn catalog_target_support_analysis_budget_is_shared_across_owners() {
+        let explicit = catalog_with_component_target_support(
+            "cfg(true)",
+            "target-support = [{ predicate = 'cfg(true)', tier = \"production\" }]",
+        );
+        let one_owner = CatalogDocument::from_toml(&explicit).unwrap();
+        NormalizedCatalog::normalize(one_owner.clone()).unwrap();
+
+        let succeeds_with = |document: CatalogDocument, work| {
+            let mut budget = PredicateAnalysisBudget::with_work_limit_for_test(work);
+            NormalizedCatalog::normalize_with_predicate_budget(document, &mut budget).is_ok()
+        };
+        let mut upper = 1_usize;
+        while !succeeds_with(one_owner.clone(), upper) {
+            upper = upper.checked_mul(2).expect("test budget search is bounded");
+        }
+        let mut lower = 0_usize;
+        while lower + 1 < upper {
+            let middle = lower + (upper - lower) / 2;
+            if succeeds_with(one_owner.clone(), middle) {
+                upper = middle;
+            } else {
+                lower = middle;
+            }
+        }
+        let exact_single_owner_work = upper;
+        assert!(succeeds_with(one_owner.clone(), exact_single_owner_work));
+
+        let mut two_owners = one_owner;
+        let mut second = two_owners.components[0].clone();
+        second.id = "model-second".into();
+        second.package = "fixture-model-second".into();
+        second.package_path = "fixtures/model-second".into();
+        two_owners.components.push(second);
+        let mut budget = PredicateAnalysisBudget::with_work_limit_for_test(exact_single_owner_work);
+        assert!(matches!(
+            NormalizedCatalog::normalize_with_predicate_budget(two_owners, &mut budget),
+            Err(CatalogError::InvalidTargetSupportPredicate {
+                owner,
+                source: TargetError::PredicateAnalysisLimitExceeded {
+                    resource: "analysis work",
+                    maximum,
+                },
+            }) if owner == "model-second" && maximum == exact_single_owner_work
+        ));
+    }
+
+    #[test]
+    fn normalization_rechecks_catalog_owner_bound_after_mutation() {
+        let mut document = CatalogDocument::from_toml(BASE).unwrap();
+        let component = document.components[0].clone();
+        document
+            .components
+            .resize(crate::metadata::MAX_CATALOG_OWNERS + 1, component);
+
+        assert!(matches!(
+            NormalizedCatalog::normalize(document),
+            Err(CatalogError::CatalogOwnerLimitExceeded { actual, maximum })
+                if actual > crate::metadata::MAX_CATALOG_OWNERS
+                    && maximum == crate::metadata::MAX_CATALOG_OWNERS
+        ));
     }
 
     #[test]
@@ -965,7 +1315,7 @@ local-bootstrap = "auto"
         let target = crate::target::Target::from_facts(
             "x86_64-unknown-linux-gnu",
             crate::target::Environment::Desktop,
-            BTreeMap::new(),
+            minimal_validation_target_facts(),
         )
         .unwrap();
         let resolution = crate::resolver::resolve(&catalog, &profile, &target).unwrap();

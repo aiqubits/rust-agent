@@ -61,6 +61,7 @@ fn compose_fixture(
         rustc_path: rustc.to_owned(),
         cargo_path: cargo.to_owned(),
         registry_cache_path: (profile == "wasm-js.toml").then(registry_cache),
+        custom_target_spec_path: None,
     })
     .unwrap()
 }

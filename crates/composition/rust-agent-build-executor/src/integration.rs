@@ -5,7 +5,7 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
-use rust_agent_composition::{CompositionManifest, verify_composition};
+use rust_agent_composition::{CompositionManifest, verify_composition, verify_emitted_composition};
 #[cfg(any(
     target_os = "android",
     target_os = "ios",
@@ -68,7 +68,7 @@ pub fn emit_integration(
         let _ = remove_staging_tree(&staging);
         return Err(error);
     }
-    verify_composition(&staging).map_err(|error| {
+    verify_emitted_composition(&staging).map_err(|error| {
         let _ = remove_staging_tree(&staging);
         IntegrationError::Composition(error)
     })?;
@@ -83,7 +83,7 @@ pub fn emit_integration(
             return Err(error.into());
         }
     }
-    let published = verify_composition(destination)?;
+    let published = verify_emitted_composition(destination)?;
     if published != manifest {
         return Err(IntegrationError::DestinationConflict(
             destination.display().to_string(),
@@ -96,7 +96,7 @@ fn reuse_existing_integration(
     destination: &Path,
     expected: &CompositionManifest,
 ) -> Result<CompositionManifest, IntegrationError> {
-    let existing = verify_composition(destination)
+    let existing = verify_emitted_composition(destination)
         .map_err(|_| IntegrationError::DestinationConflict(destination.display().to_string()))?;
     if &existing == expected {
         Ok(existing)
@@ -112,7 +112,7 @@ pub fn verify_integration(
     allow_development: bool,
 ) -> Result<CompositionManifest, IntegrationError> {
     validate_absolute(destination)?;
-    let manifest = verify_composition(destination)?;
+    let manifest = verify_emitted_composition(destination)?;
     if !allow_development && !manifest.deployable {
         return Err(IntegrationError::DevelopmentNotAllowed);
     }

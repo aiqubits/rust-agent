@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "algorithm": "sha256-rust-agent-composition-v1",
-  "composition-hash": "8fa824cb05733d7fa2d3b6e9d69730eac64c49d43129e18589679c1e5c121f8f",
+  "composition-hash": "8bc5ff8eb69fbc6dfaadd4e09ec00da39697b095f369bf980421bdd7d1df8c27",
   "build-kind": "wasm",
   "profile-name": "fixture-wasm-js",
   "normalized-profile": {
@@ -37,6 +37,8 @@
   "target": "wasm32-unknown-unknown",
   "normalized-target": {
     "triple": "wasm32-unknown-unknown",
+    "arch": "wasm32",
+    "os": "unknown",
     "environment": "browser",
     "facts": {
       "debug_assertions": [
@@ -92,10 +94,70 @@
         "unknown"
       ]
     },
-    "target-fact-digest": "23418f403297dd7944128cdc90ecab0ec981da52357db88b2e48849c9a5bc020",
+    "target-fact-digest": "586c21e6986d75f5474789da61e011a0dade81d3416579a271fb5907ca5a4a28",
     "custom-target-spec-digest": null
   },
-  "target-fact-digest": "23418f403297dd7944128cdc90ecab0ec981da52357db88b2e48849c9a5bc020",
+  "target-fact-digest": "586c21e6986d75f5474789da61e011a0dade81d3416579a271fb5907ca5a4a28",
+  "target-facts": {
+    "schema": 1,
+    "triple": "wasm32-unknown-unknown",
+    "facts": {
+      "debug_assertions": [
+        null
+      ],
+      "panic": [
+        "abort"
+      ],
+      "target_abi": [
+        ""
+      ],
+      "target_arch": [
+        "wasm32"
+      ],
+      "target_endian": [
+        "little"
+      ],
+      "target_env": [
+        ""
+      ],
+      "target_family": [
+        "wasm"
+      ],
+      "target_feature": [
+        "bulk-memory",
+        "multivalue",
+        "mutable-globals",
+        "nontrapping-fptoint",
+        "reference-types",
+        "sign-ext"
+      ],
+      "target_has_atomic": [
+        "16",
+        "32",
+        "64",
+        "8",
+        "ptr"
+      ],
+      "target_has_atomic_primitive_alignment": [
+        "16",
+        "32",
+        "64",
+        "8",
+        "ptr"
+      ],
+      "target_os": [
+        "unknown"
+      ],
+      "target_pointer_width": [
+        "32"
+      ],
+      "target_vendor": [
+        "unknown"
+      ]
+    },
+    "custom-target-spec-digest": null
+  },
+  "custom-target-spec": null,
   "selected-components": [
     "fixture-driver",
     "fixture-model"
@@ -161,7 +223,7 @@
     "schema": 1,
     "profile": "fixture-wasm-js",
     "target": "wasm32-unknown-unknown",
-    "target-fact-digest": "23418f403297dd7944128cdc90ecab0ec981da52357db88b2e48849c9a5bc020",
+    "target-fact-digest": "586c21e6986d75f5474789da61e011a0dade81d3416579a271fb5907ca5a4a28",
     "selected-components": [
       "fixture-driver",
       "fixture-model"
@@ -183,6 +245,52 @@
     ],
     "runtime-adapter": "fixture-runtime",
     "host-boundary": "fixture-host-export",
+    "target-support": {
+      "component:fixture-driver": {
+        "targets": "cfg(true)",
+        "entries": [
+          {
+            "predicate": "cfg(true)",
+            "tier": "production"
+          }
+        ],
+        "matched-predicate": "cfg(true)",
+        "selected-tier": "production"
+      },
+      "component:fixture-model": {
+        "targets": "cfg(true)",
+        "entries": [
+          {
+            "predicate": "cfg(true)",
+            "tier": "production"
+          }
+        ],
+        "matched-predicate": "cfg(true)",
+        "selected-tier": "production"
+      },
+      "host-boundary:fixture-host-export": {
+        "targets": "cfg(target_arch = \"wasm32\")",
+        "entries": [
+          {
+            "predicate": "cfg(target_arch = \"wasm32\")",
+            "tier": "production"
+          }
+        ],
+        "matched-predicate": "cfg(target_arch = \"wasm32\")",
+        "selected-tier": "production"
+      },
+      "runtime-adapter:fixture-runtime": {
+        "targets": "cfg(true)",
+        "entries": [
+          {
+            "predicate": "cfg(true)",
+            "tier": "production"
+          }
+        ],
+        "matched-predicate": "cfg(true)",
+        "selected-tier": "production"
+      }
+    },
     "compiled-runtime-effects": [
       "host-bridge"
     ],
@@ -990,8 +1098,8 @@
     },
     {
       "path": "cargo-resolution.json",
-      "digest": "62fafcfdf666a87a12d054ebfadc194efe27d3723efc11d168b677b11b9d998a",
-      "bytes": 368
+      "digest": "8fbe846e6592d2ecde16bfe8626549bc07ea136fb32c8ea1d7182ac168035113",
+      "bytes": 455
     },
     {
       "path": "src/lib.rs",
@@ -1002,14 +1110,21 @@
       "path": "src/wasm.rs",
       "digest": "3eecaf3bfd90ad6d1aaf372f02be407290dd4353bde3553a66f2d6193e4af217",
       "bytes": 807
+    },
+    {
+      "path": "target-facts.json",
+      "digest": "97f7ac42172a049785c15530b3294ef785e7ce6e430b2a41f70fdcd46c62891c",
+      "bytes": 557
     }
   ],
   "cargo-lock-digest": "1319a1932e004f5854a5017eb600307b50e81609a5c38e8affd219ee5bd9895d",
-  "cargo-resolution-digest": "62fafcfdf666a87a12d054ebfadc194efe27d3723efc11d168b677b11b9d998a",
+  "cargo-resolution-digest": "8fbe846e6592d2ecde16bfe8626549bc07ea136fb32c8ea1d7182ac168035113",
   "cargo-resolution": {
     "schema": 1,
     "target": "wasm32-unknown-unknown",
-    "target-fact-digest": "23418f403297dd7944128cdc90ecab0ec981da52357db88b2e48849c9a5bc020",
+    "cargo-target-input": "wasm32-unknown-unknown",
+    "target-fact-digest": "586c21e6986d75f5474789da61e011a0dade81d3416579a271fb5907ca5a4a28",
+    "custom-target-spec-digest": null,
     "resolver": "2",
     "offline": true,
     "isolated-cargo-home": true,

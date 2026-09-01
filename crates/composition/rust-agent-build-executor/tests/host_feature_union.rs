@@ -327,6 +327,7 @@ fn external_shared_target_feature_union_is_observed_and_accounted_end_to_end() {
         rustc_path: rustc.clone(),
         cargo_path: cargo.clone(),
         registry_cache_path: None,
+        custom_target_spec_path: None,
     });
     assert!(matches!(
         without_registry,
@@ -341,6 +342,7 @@ fn external_shared_target_feature_union_is_observed_and_accounted_end_to_end() {
         rustc_path: rustc.clone(),
         cargo_path: cargo.clone(),
         registry_cache_path: Some(registry.clone()),
+        custom_target_spec_path: None,
     })
     .unwrap();
     assert_eq!(

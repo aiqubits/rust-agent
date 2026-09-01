@@ -160,7 +160,10 @@ package-path = "tests/fixtures/hosts/fixture-host-entry"
 kind = "entry"
 entry = "rust_agent_fixture_host_entry::run"
 targets = "cfg(any(target_os = \"linux\", target_os = \"macos\", target_os = \"windows\"))"
-support = "production"
+target-support = [
+    { predicate = 'cfg(target_os = "linux")', tier = "production" },
+    { predicate = 'cfg(any(target_os = "macos", target_os = "windows"))', tier = "experimental" },
+]
 security = ["host-bridge"]
 runtime-adapters = ["fixture-runtime"]
 build-requirements = { executables = [], read-inputs = [], environment = [] }
