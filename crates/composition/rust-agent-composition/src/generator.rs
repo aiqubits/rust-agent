@@ -43,7 +43,8 @@ use crate::{
         GeneratedFileRecord, SecurityManifest, SourcePackageRecord,
     },
     metadata::{
-        BuildRequirements, CatalogTrustPolicy, HostBoundaryKind, MAX_CATALOG_TRUST_POLICY_BYTES,
+        AppCoexistence, BuildRequirements, CatalogTrustPolicy, ConfigSource, HostBoundaryKind,
+        MAX_CATALOG_TRUST_POLICY_BYTES,
     },
     profile::{BuildKind, CompositionProfile, MAX_PROFILE_DOCUMENT_BYTES},
     resolver::{ResolutionError, resolve},
@@ -361,7 +362,12 @@ fn compose_in_staging(
     )?;
     write_text(
         &staging.join("src/lib.rs"),
-        &generate_lib_rs(catalog, resolution, profile.build_kind)?,
+        &generate_lib_rs(
+            catalog,
+            resolution,
+            profile.build_kind,
+            &generator_inputs.normalized_catalog_digest,
+        )?,
     )?;
     if profile.build_kind == BuildKind::Wasm {
         write_text(
@@ -1287,6 +1293,7 @@ fn verify_composition_with_location_policy(
                 &committed_catalog,
                 &rederived_resolution,
                 manifest.build_kind,
+                &manifest.generator_inputs.normalized_catalog_digest,
             )?,
         ),
     ];
@@ -3517,10 +3524,11 @@ fn generate_lib_rs(
     catalog: &NormalizedCatalog,
     resolution: &crate::resolver::Resolution,
     build_kind: BuildKind,
+    catalog_digest: &str,
 ) -> Result<String, ComposeError> {
     let adapter = &catalog.runtime_adapters[&resolution.runtime_adapter];
     let mut output = String::from(
-        "#![forbid(unsafe_code)]\n\nmod identity;\n\npub use identity::COMPOSITION_HASH;\npub use rust_agent_runtime_api::{BuildError, RuntimePrimitives};\n",
+        "#![forbid(unsafe_code)]\n\nmod identity;\n\npub use identity::COMPOSITION_HASH;\npub use rust_agent_fixture_api::FixtureApp;\npub use rust_agent_runtime_api::{AppHandoffError, AppHandoffMode, BuildError, RuntimePrimitives};\n",
     );
     if build_kind == BuildKind::Wasm {
         output.push_str("mod wasm;\npub use wasm::start;\n");
@@ -3529,18 +3537,205 @@ fn generate_lib_rs(
         "pub use {} as create_runtime_primitives;\n\n",
         adapter.constructor
     ));
-    output.push_str("pub fn build(runtime: RuntimePrimitives) -> Result<rust_agent_fixture_api::FixtureApp, BuildError> {\n");
+    output.push_str(&format!(
+        "pub const CATALOG_DIGEST: &str = {catalog_digest:?};\n\n"
+    ));
+
+    let file_components = resolution
+        .construction_order
+        .iter()
+        .map(|id| &catalog.components[id])
+        .filter(|component| component.config_source == ConfigSource::File)
+        .collect::<Vec<_>>();
+    let host_components = resolution
+        .construction_order
+        .iter()
+        .map(|id| &catalog.components[id])
+        .filter(|component| component.config_source == ConfigSource::Host)
+        .collect::<Vec<_>>();
+
+    if !host_components.is_empty() {
+        output.push_str("pub mod host_api {\n");
+        for component in &host_components {
+            let module = rust_ident(&component.id);
+            let host_api = component.host_api.as_ref().ok_or_else(|| {
+                ComposeError::UnsupportedPhase1A(format!(
+                    "host-source component {} has no host-api",
+                    component.id
+                ))
+            })?;
+            output.push_str(&format!(
+                "    pub mod {module} {{ pub use {host_api}::*; }}\n"
+            ));
+        }
+        output.push_str("}\n\n");
+    }
+
+    if file_components.is_empty() {
+        output.push_str("#[derive(Default)]\n");
+    }
+    output.push_str("pub struct RuntimeConfig {\n");
+    for component in &file_components {
+        let field = rust_ident(component.config_key.as_deref().ok_or_else(|| {
+            ComposeError::UnsupportedPhase1A(format!(
+                "file-source component {} has no config-key",
+                component.id
+            ))
+        })?);
+        output.push_str(&format!("    pub {field}: {},\n", component.config_type));
+    }
+    output.push_str("}\n\n");
+
+    if host_components.is_empty() {
+        output.push_str("#[derive(Default)]\n");
+    }
+    output.push_str("pub struct HostBindings {\n");
+    for component in &host_components {
+        let field = rust_ident(component.config_key.as_deref().ok_or_else(|| {
+            ComposeError::UnsupportedPhase1A(format!(
+                "host-source component {} has no config-key",
+                component.id
+            ))
+        })?);
+        let module = rust_ident(&component.id);
+        output.push_str(&format!("    {field}: host_api::{module}::Config,\n"));
+    }
+    output.push_str("}\n\n");
+
+    output.push_str(
+        "#[derive(Clone, Copy, Debug, Eq, PartialEq)]\npub enum HostBindingsError {\n    DuplicateField(&'static str),\n    MissingField(&'static str),\n}\n\nimpl std::fmt::Display for HostBindingsError {\n    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {\n        match self {\n            Self::DuplicateField(field) => write!(formatter, \"duplicate Host binding `{field}`\"),\n            Self::MissingField(field) => write!(formatter, \"missing Host binding `{field}`\"),\n        }\n    }\n}\n\nimpl std::error::Error for HostBindingsError {}\n\n",
+    );
+    output.push_str("pub struct HostBindingsBuilder {\n");
+    for component in &host_components {
+        let field = rust_ident(component.config_key.as_deref().ok_or_else(|| {
+            ComposeError::UnsupportedPhase1A(format!(
+                "host-source component {} has no config-key",
+                component.id
+            ))
+        })?);
+        let module = rust_ident(&component.id);
+        output.push_str(&format!(
+            "    {field}: Option<host_api::{module}::Config>,\n"
+        ));
+    }
+    output.push_str(
+        "}\n\nimpl Default for HostBindingsBuilder {\n    fn default() -> Self {\n        Self {\n",
+    );
+    for component in &host_components {
+        let field = rust_ident(component.config_key.as_deref().ok_or_else(|| {
+            ComposeError::UnsupportedPhase1A(format!(
+                "host-source component {} has no config-key",
+                component.id
+            ))
+        })?);
+        output.push_str(&format!("            {field}: None,\n"));
+    }
+    output.push_str("        }\n    }\n}\n\nimpl HostBindingsBuilder {\n    pub fn new() -> Self {\n        Self::default()\n    }\n\n");
+    for component in &host_components {
+        let key = component.config_key.as_deref().ok_or_else(|| {
+            ComposeError::UnsupportedPhase1A(format!(
+                "host-source component {} has no config-key",
+                component.id
+            ))
+        })?;
+        let field = rust_ident(key);
+        let module = rust_ident(&component.id);
+        output.push_str(&format!(
+            "    pub fn set_{field}(&mut self, value: host_api::{module}::Config) -> Result<&mut Self, HostBindingsError> {{\n        if self.{field}.is_some() {{\n            return Err(HostBindingsError::DuplicateField({key:?}));\n        }}\n        self.{field} = Some(value);\n        Ok(self)\n    }}\n\n"
+        ));
+    }
+    output.push_str("    pub fn build(self) -> Result<HostBindings, HostBindingsError> {\n        Ok(HostBindings {\n");
+    for component in &host_components {
+        let key = component.config_key.as_deref().ok_or_else(|| {
+            ComposeError::UnsupportedPhase1A(format!(
+                "host-source component {} has no config-key",
+                component.id
+            ))
+        })?;
+        let field = rust_ident(key);
+        output.push_str(&format!(
+            "            {field}: self.{field}.ok_or(HostBindingsError::MissingField({key:?}))?,\n"
+        ));
+    }
+    output.push_str("        })\n    }\n}\n\n");
+
+    output.push_str("pub fn build(runtime_config: RuntimeConfig, host_bindings: HostBindings, runtime: RuntimePrimitives) -> Result<rust_agent_fixture_api::FixtureApp, BuildError> {\n");
     output.push_str(&format!(
         "    if runtime.adapter().as_str() != {:?} {{\n        return Err(BuildError::InvalidComposition(\"runtime adapter identity mismatch\"));\n    }}\n",
         adapter.id
+    ));
+    if file_components.is_empty() {
+        output.push_str("    let _ = runtime_config;\n");
+    }
+    if host_components.is_empty() {
+        output.push_str("    let _ = host_bindings;\n");
+    }
+    output.push_str("    let shared_host_fields = vec![\n");
+    for component_id in &resolution.construction_order {
+        let component = &catalog.components[component_id];
+        let Some(AppCoexistence::ConcurrentSharedHostHandle {
+            host_config_fields, ..
+        }) = &component.app_coexistence
+        else {
+            continue;
+        };
+        let config_field = rust_ident(component.config_key.as_deref().ok_or_else(|| {
+            ComposeError::UnsupportedPhase1A(format!(
+                "shared-host component {} has no config-key",
+                component.id
+            ))
+        })?);
+        for path in host_config_fields {
+            let (_, field) = path.split_once('.').ok_or_else(|| {
+                ComposeError::UnsupportedPhase1A(format!(
+                    "shared-host field {path} is not component-qualified"
+                ))
+            })?;
+            output.push_str(&format!(
+                "        rust_agent_runtime_api::seal_shared_host_handle({path:?}, &host_bindings.{config_field}.{field})?,\n"
+            ));
+        }
+    }
+    output.push_str("    ];\n");
+    let handoff_mode = match resolution.app_handoff {
+        crate::resolver::AppHandoff::Concurrent => {
+            "rust_agent_runtime_api::AppHandoffMode::Concurrent"
+        }
+        crate::resolver::AppHandoff::StopOldApp => {
+            "rust_agent_runtime_api::AppHandoffMode::StopOldApp"
+        }
+    };
+    output.push_str(&format!(
+        "    let handoff = rust_agent_runtime_api::AppHandoffSeal::new(\n        {handoff_mode},\n        COMPOSITION_HASH,\n        CATALOG_DIGEST,\n        shared_host_fields,\n    )?;\n"
     ));
 
     let mut binding_variables: BTreeMap<(String, Option<String>, String), String> = BTreeMap::new();
     for component_id in &resolution.construction_order {
         let component = &catalog.components[component_id];
         let component_var = rust_ident(component_id);
+        let config_expression = match component.config_source {
+            ConfigSource::None => "Default::default()".to_owned(),
+            ConfigSource::File => format!(
+                "runtime_config.{}",
+                rust_ident(component.config_key.as_deref().ok_or_else(|| {
+                    ComposeError::UnsupportedPhase1A(format!(
+                        "file-source component {} has no config-key",
+                        component.id
+                    ))
+                })?)
+            ),
+            ConfigSource::Host => format!(
+                "host_bindings.{}",
+                rust_ident(component.config_key.as_deref().ok_or_else(|| {
+                    ComposeError::UnsupportedPhase1A(format!(
+                        "host-source component {} has no config-key",
+                        component.id
+                    ))
+                })?)
+            ),
+        };
         output.push_str(&format!(
-            "    let {component_var}_config: {} = Default::default();\n",
+            "    let {component_var}_config: {} = {config_expression};\n",
             component.config_type
         ));
         output.push_str(&format!(
@@ -3630,11 +3825,13 @@ fn generate_lib_rs(
             |(_, variable)| format!("Some({variable})"),
         );
     output.push_str(&format!(
-        "    Ok(rust_agent_fixture_api::FixtureApp::new({driver}, {file_reader}))\n}}\n\n"
+        "    Ok(rust_agent_fixture_api::FixtureApp::new({driver}, {file_reader}, handoff))\n}}\n\n"
     ));
-    output.push_str(
-        "#[cfg(test)]\nmod tests {\n    use super::*;\n\n    #[test]\n    fn generated_factory_graph_executes() {\n        let runtime = create_runtime_primitives().unwrap();\n        let app = build(runtime).unwrap();\n        assert_eq!(app.run(\"hello\"), \"fixture-response:hello\");\n    }\n}\n",
-    );
+    if file_components.is_empty() && host_components.is_empty() {
+        output.push_str(
+            "#[cfg(test)]\nmod tests {\n    use super::*;\n\n    #[test]\n    fn generated_factory_graph_executes() {\n        let runtime = create_runtime_primitives().unwrap();\n        let app = build(RuntimeConfig::default(), HostBindings::default(), runtime).unwrap();\n        assert_eq!(app.run(\"hello\"), \"fixture-response:hello\");\n    }\n}\n",
+        );
+    }
     Ok(output)
 }
 
@@ -3657,7 +3854,7 @@ fn generate_wasm_rs(
         ))
     })?;
     Ok(format!(
-        "use {export}::{{JsValue, WasmAppHandle, wasm_bindgen}};\n\n#[wasm_bindgen]\npub async fn start(\n    runtime_config: JsValue,\n    host_bindings: JsValue,\n) -> Result<WasmAppHandle, JsValue> {{\n    if !runtime_config.is_object() || runtime_config.is_null() {{\n        return Err(JsValue::from_str(\"runtime_config must be an object\"));\n    }}\n    if !host_bindings.is_object() || host_bindings.is_null() {{\n        return Err(JsValue::from_str(\"host_bindings must be an object\"));\n    }}\n    let runtime = {export}::runtime_primitives(crate::create_runtime_primitives)\n        .map_err(|error| JsValue::from_str(&error.to_string()))?;\n    let app = crate::build(runtime)\n        .map_err(|error| JsValue::from_str(&error.to_string()))?;\n    Ok(WasmAppHandle::from_app(app))\n}}\n"
+        "use {export}::{{JsValue, WasmAppHandle, wasm_bindgen}};\n\n#[wasm_bindgen]\npub async fn start(\n    runtime_config: JsValue,\n    host_bindings: JsValue,\n) -> Result<WasmAppHandle, JsValue> {{\n    if !runtime_config.is_object() || runtime_config.is_null() {{\n        return Err(JsValue::from_str(\"runtime_config must be an object\"));\n    }}\n    if !host_bindings.is_object() || host_bindings.is_null() {{\n        return Err(JsValue::from_str(\"host_bindings must be an object\"));\n    }}\n    let runtime = {export}::runtime_primitives(crate::create_runtime_primitives)\n        .map_err(|error| JsValue::from_str(&error.to_string()))?;\n    let app = crate::build(\n        crate::RuntimeConfig::default(),\n        crate::HostBindings::default(),\n        runtime,\n    )\n        .map_err(|error| JsValue::from_str(&error.to_string()))?;\n    Ok(WasmAppHandle::from_app(app))\n}}\n"
     ))
 }
 

@@ -1,0 +1,20 @@
+schema = 1
+name = "fixture-shared-host"
+build-kind = "library"
+target = "x86_64-unknown-linux-gnu"
+environment = "desktop"
+support-tier = "production"
+runtime-adapter = "fixture-runtime"
+resolver-decision-budget = 100
+denied-effects = ["code-execution", "host-bridge", "network-outbound", "persistent-storage", "process-exec", "read-local", "remote-execution", "secret-access", "write-local"]
+
+[components]
+fixture-driver = "enabled"
+fixture-model = "disabled"
+fixture-model-fallback = "disabled"
+fixture-model-shared = "enabled"
+fixture-fs-read = "disabled"
+fixture-build-proof = "disabled"
+
+[bindings]
+model = "fixture-model-shared"

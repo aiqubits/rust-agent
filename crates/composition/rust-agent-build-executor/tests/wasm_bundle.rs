@@ -24,7 +24,7 @@ const BUNDLE_ABSOLUTE_CEILING: u64 = 512 * 1024;
 const WASM_SIZE_BASELINES: [(&str, u64); 5] = [
     ("bundle/rust_agent.d.ts", 2_940),
     ("bundle/rust_agent.js", 19_330),
-    ("bundle/rust_agent_bg.wasm", 344_995),
+    ("bundle/rust_agent_bg.wasm", 387_494),
     ("bundle/rust_agent_bg.wasm.d.ts", 1_703),
     ("intermediate/rust_agent_raw.wasm", 6_354_252),
 ];

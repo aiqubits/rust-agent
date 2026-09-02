@@ -304,6 +304,63 @@
           "mode": "requires-stop"
         },
         "cargo-features": []
+      },
+      {
+        "id": "fixture-model-shared",
+        "package": "rust-agent-fixture-model-shared",
+        "package-path": "tests/fixtures/components/fixture-model-shared",
+        "scope": "app",
+        "factory": "rust_agent_fixture_model_shared::build",
+        "dependencies-type": "rust_agent_fixture_model_shared::Dependencies",
+        "config-type": "rust_agent_fixture_model_shared::host_api::Config",
+        "config-source": "host",
+        "config-key": "fixture-model-shared",
+        "host-api": "rust_agent_fixture_model_shared::host_api",
+        "resource-namespace-preparer": null,
+        "prepared-config-type": null,
+        "targets": "cfg(not(target_arch = \"wasm32\"))",
+        "target-support": [
+          {
+            "predicate": "cfg(not(target_arch = \"wasm32\"))",
+            "tier": "production"
+          }
+        ],
+        "lifecycle-effects": [],
+        "provides": [
+          {
+            "capability": "cap:model",
+            "key": null,
+            "priority": 50,
+            "order": 0,
+            "layer": "provider",
+            "resource-namespace": {
+              "mode": "none"
+            },
+            "effects": []
+          }
+        ],
+        "requires": [],
+        "conflicts": [],
+        "security": [],
+        "runtime-primitives": [],
+        "build-requirements": {
+          "executables": [],
+          "read-inputs": [],
+          "environment": []
+        },
+        "app-coexistence": {
+          "mode": "concurrent-shared-host-handle",
+          "evidence": {
+            "source": "coexistence-evidence.toml",
+            "algorithm": "sha256",
+            "digest": "b7a427f093ad64e3eb933fa09e435af691e200323d2afe0dc5376ee28d801411",
+            "reviewer-policy": "phase-1a-fixture-review-v1"
+          },
+          "host-config-fields": [
+            "fixture-model-shared.shared"
+          ]
+        },
+        "cargo-features": []
       }
     ],
     "runtime-adapters": [
@@ -398,7 +455,7 @@
       }
     ]
   },
-  "normalized-catalog-digest": "e9ba0c01612dd63dbc1dbaa4b8672fe5c597961f617b0a3db6d89729dab71be5",
+  "normalized-catalog-digest": "05262656d13865efd85c9b00fd1f8e69bec354e8421f90b7ca971539ce7c8305",
   "catalog-trust-input": {
     "schema": 1,
     "normalized-policy": {
@@ -470,6 +527,31 @@
         "bytes-hex": "736368656d61203d20310a6f776e6572203d2022666978747572652d6d6f64656c220a6d6f6465203d2022636f6e63757272656e742d696e646570656e64656e74220a72756c652d736574203d202270686173652d31612d696e646570656e64656e742d7631220a636c61696d73203d205b22626f756e646172792d636f6e666967222c2022646966666572656e742d636f6e666967222c20226964656e746963616c2d636f6e666967222c2022696e646570656e64656e742d7265616c2d7265736f7572636573222c202274776f2d6170702d696e2d70726f63657373225d0a7465737473203d205b22727573745f6167656e745f666978747572655f6d6f64656c3a3a74657374733a3a74776f5f696e7374616e6365735f6172655f696e646570656e64656e745f666f725f6964656e746963616c5f646966666572656e745f616e645f626f756e646172795f636f6e66696773225d0a"
       },
       {
+        "owner-kind": "component",
+        "owner": "fixture-model-shared",
+        "package": "rust-agent-fixture-model-shared",
+        "package-path": "tests/fixtures/components/fixture-model-shared",
+        "source": "coexistence-evidence.toml",
+        "algorithm": "sha256",
+        "digest": "b7a427f093ad64e3eb933fa09e435af691e200323d2afe0dc5376ee28d801411",
+        "reviewer-policy": "phase-1a-fixture-review-v1",
+        "document": {
+          "schema": 1,
+          "owner": "fixture-model-shared",
+          "mode": "concurrent-shared-host-handle",
+          "rule-set": "phase-1a-shared-handle-v1",
+          "claims": [
+            "no-reopen",
+            "same-host-handle-identity",
+            "two-app-in-process"
+          ],
+          "tests": [
+            "topology_matrix::shared_host_handoff_uses_same_typed_identity_without_reopen"
+          ]
+        },
+        "bytes-hex": "736368656d61203d20310a6f776e6572203d2022666978747572652d6d6f64656c2d736861726564220a6d6f6465203d2022636f6e63757272656e742d7368617265642d686f73742d68616e646c65220a72756c652d736574203d202270686173652d31612d7368617265642d68616e646c652d7631220a636c61696d73203d205b226e6f2d72656f70656e222c202273616d652d686f73742d68616e646c652d6964656e74697479222c202274776f2d6170702d696e2d70726f63657373225d0a7465737473203d205b22746f706f6c6f67795f6d61747269783a3a7368617265645f686f73745f68616e646f66665f757365735f73616d655f74797065645f6964656e746974795f776974686f75745f72656f70656e225d0a"
+      },
+      {
         "owner-kind": "runtime-adapter",
         "owner": "fixture-runtime",
         "package": "rust-agent-fixture-runtime",
@@ -497,7 +579,7 @@
         "bytes-hex": "736368656d61203d20310a6f776e6572203d2022666978747572652d72756e74696d65220a6d6f6465203d2022636f6e63757272656e742d696e646570656e64656e74220a72756c652d736574203d202270686173652d31612d696e646570656e64656e742d7631220a636c61696d73203d205b22626f756e646172792d636f6e666967222c2022646966666572656e742d636f6e666967222c20226964656e746963616c2d636f6e666967222c2022696e646570656e64656e742d7265616c2d7265736f7572636573222c202274776f2d6170702d696e2d70726f63657373225d0a7465737473203d205b22727573745f6167656e745f666978747572655f72756e74696d653a3a74657374733a3a74776f5f72756e74696d655f62756e646c65735f6172655f696e646570656e64656e746c795f6f776e6564225d0a"
       }
     ],
-    "identity-digest": "ab5cea3c69b89578c76e30579893f989242a1051243f212209bdbd02f73826b8"
+    "identity-digest": "5a4bf46685fc40433ad37956cb666fa836fba2947c8d4fde2257f9f33451dad0"
   },
   "root-build-requirements": {
     "rust-agent-core": {
@@ -516,5 +598,5 @@
       "environment": []
     }
   },
-  "identity-digest": "f8b4346c595836e95521d43e4ac7f7c818eaaffeaf214b0b9c6591a92ca9fdf4"
+  "identity-digest": "a29a8db37f78d8d9b918eca6080aad9b6d552ad602dae0b2c4d60a2afa4743b5"
 }

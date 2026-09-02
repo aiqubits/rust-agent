@@ -11,6 +11,7 @@ members = [
     "tests/fixtures/components/fixture-fs-read",
     "tests/fixtures/components/fixture-model",
     "tests/fixtures/components/fixture-model-fallback",
+    "tests/fixtures/components/fixture-model-shared",
     "tests/fixtures/helpers/fixture-target-native",
     "tests/fixtures/helpers/fixture-target-wasm",
     "tests/fixtures/runtime/fixture-runtime",

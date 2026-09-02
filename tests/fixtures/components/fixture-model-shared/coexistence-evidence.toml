@@ -1,0 +1,6 @@
+schema = 1
+owner = "fixture-model-shared"
+mode = "concurrent-shared-host-handle"
+rule-set = "phase-1a-shared-handle-v1"
+claims = ["no-reopen", "same-host-handle-identity", "two-app-in-process"]
+tests = ["topology_matrix::shared_host_handoff_uses_same_typed_identity_without_reopen"]

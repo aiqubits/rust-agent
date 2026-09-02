@@ -739,60 +739,19 @@ mod tests {
 
     #[test]
     fn shared_host_handle_evidence_uses_the_shared_rule_set_and_identity_claims() {
-        let mut document =
-            CatalogDocument::from_toml(include_str!("../../../../tests/fixtures/catalog.toml"))
-                .unwrap();
-        let shared_bytes = concat!(
-            "schema = 1\n",
-            "owner = \"fixture-model\"\n",
-            "mode = \"concurrent-shared-host-handle\"\n",
-            "rule-set = \"phase-1a-shared-handle-v1\"\n",
-            "claims = [\"no-reopen\", \"same-host-handle-identity\", \"two-app-in-process\"]\n",
-            "tests = [\"rust_agent_runtime_api::tests::shared_host_handle_identity_survives_clone_but_not_rewrap\"]\n",
+        let catalog = fixture_catalog();
+        let commitment = CatalogTrustInputCommitment::new(
+            &catalog,
+            &fixture_policy(),
+            fixture_evidence(&catalog),
         )
-        .as_bytes()
-        .to_vec();
-        let model = document
-            .components
-            .iter_mut()
-            .find(|component| component.id == "fixture-model")
-            .unwrap();
-        model.config_source = crate::metadata::ConfigSource::Host;
-        model.config_key = Some("fixture-model".into());
-        model.app_coexistence = Some(AppCoexistence::ConcurrentSharedHostHandle {
-            evidence: EvidenceRef {
-                source: "coexistence-shared.toml".into(),
-                algorithm: "sha256".into(),
-                digest: hex::encode(Sha256::digest(&shared_bytes)),
-                reviewer_policy: "phase-1a-fixture-review-v1".into(),
-            },
-            host_config_fields: vec!["fixture-model.shared".into()],
-        });
-        let catalog = NormalizedCatalog::normalize(document).unwrap();
-        let root = fixture_root();
-        let evidence = evidence_requests(&catalog)
-            .into_iter()
-            .map(|request| {
-                let bytes = if request.owner.id == "fixture-model" {
-                    shared_bytes.clone()
-                } else {
-                    fs::read(
-                        root.join(&request.package_path)
-                            .join(&request.evidence.source),
-                    )
-                    .unwrap()
-                };
-                (request.owner, bytes)
-            })
-            .collect();
-        let commitment =
-            CatalogTrustInputCommitment::new(&catalog, &fixture_policy(), evidence).unwrap();
+        .unwrap();
 
         commitment.validate(&catalog).unwrap();
         let model = commitment
             .evidence
             .iter()
-            .find(|record| record.owner == "fixture-model")
+            .find(|record| record.owner == "fixture-model-shared")
             .unwrap();
         assert_eq!(
             model.document.mode,

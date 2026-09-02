@@ -610,7 +610,7 @@ fn compile_independent_host(
     .unwrap();
     fs::write(
         host.join("src/main.rs"),
-        "fn main() {\n    let runtime = agent::create_runtime_primitives().unwrap();\n    let app = agent::build(runtime).unwrap();\n    assert_eq!(app.run(\"host\"), \"fixture-response:host\");\n}\n",
+        "fn main() {\n    let runtime = agent::create_runtime_primitives().unwrap();\n    let app = agent::build(agent::RuntimeConfig::default(), agent::HostBindings::default(), runtime).unwrap();\n    assert_eq!(app.run(\"host\"), \"fixture-response:host\");\n}\n",
     )
     .unwrap();
     assert_success(&run_host_cargo(
@@ -662,7 +662,7 @@ fn compile_independent_host(
     .unwrap();
     fs::write(
         host.join("src/main.rs"),
-        "fn main() {\n    let identity = second_runtime_api::RuntimeAdapterIdentity::checked(\"fixture-runtime\").unwrap();\n    let runtime = second_runtime_api::RuntimePrimitives::new(identity);\n    let _ = agent::build(runtime);\n}\n",
+        "fn main() {\n    let identity = second_runtime_api::RuntimeAdapterIdentity::checked(\"fixture-runtime\").unwrap();\n    let runtime = second_runtime_api::RuntimePrimitives::new(identity);\n    let _ = agent::build(agent::RuntimeConfig::default(), agent::HostBindings::default(), runtime);\n}\n",
     )
     .unwrap();
     assert_success(&run_host_cargo(

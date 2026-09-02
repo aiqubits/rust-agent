@@ -8,8 +8,9 @@ use thiserror::Error;
 use crate::{
     metadata::{
         AppCoexistence, BindingKind, BuildRequirements, CapabilitySpec, CatalogDocument,
-        CatalogResourceBoundsError, ComponentSpec, ConfigSource, HostBoundarySpec, ProvideLayer,
-        ResourceNamespaceMode, RuntimeAdapterSpec, ScopeKind, SupportTier, TargetSupport,
+        CatalogResourceBoundsError, ComponentSpec, ConfigSource, HostBoundarySpec,
+        MAX_SHARED_HOST_CONFIG_FIELDS, ProvideLayer, ResourceNamespaceMode, RuntimeAdapterSpec,
+        ScopeKind, SupportTier, TargetSupport,
     },
     target::{
         CoreTargetFacts, PredicateAnalysisBudget, TargetError, canonical_builtin_facts,
@@ -147,6 +148,12 @@ impl NormalizedCatalog {
 
         let mut package_owners = BTreeMap::new();
         for component in components.values_mut() {
+            if let Some(AppCoexistence::ConcurrentSharedHostHandle {
+                host_config_fields, ..
+            }) = &mut component.app_coexistence
+            {
+                host_config_fields.sort();
+            }
             normalize_target_support(
                 &component.id,
                 &component.targets,
@@ -255,6 +262,9 @@ fn validate_component(
     validate_rust_path(&spec.id, &spec.factory)?;
     validate_rust_path(&spec.id, &spec.dependencies_type)?;
     validate_rust_path(&spec.id, &spec.config_type)?;
+    if let Some(host_api) = &spec.host_api {
+        validate_rust_path(&spec.id, host_api)?;
+    }
     if let Some(preparer) = &spec.resource_namespace_preparer {
         validate_rust_path(&spec.id, preparer)?;
     }
@@ -264,18 +274,39 @@ fn validate_component(
     validate_target_syntax(&spec.id, &spec.targets)?;
 
     match spec.config_source {
-        ConfigSource::None if spec.config_key.is_some() => {
+        ConfigSource::None if spec.config_key.is_some() || spec.host_api.is_some() => {
             return Err(CatalogError::InvalidConfig(
                 spec.id.clone(),
-                "none source forbids config-key".into(),
+                "none source forbids config-key and host-api".into(),
             ));
         }
-        ConfigSource::File | ConfigSource::Host
-            if spec.config_key.as_deref() != Some(spec.id.as_str()) =>
+        ConfigSource::File if spec.config_key.as_deref() != Some(spec.id.as_str()) => {
+            return Err(CatalogError::InvalidConfig(
+                spec.id.clone(),
+                "file config-key must exactly equal component id".into(),
+            ));
+        }
+        ConfigSource::File if spec.host_api.is_some() => {
+            return Err(CatalogError::InvalidConfig(
+                spec.id.clone(),
+                "file source forbids host-api".into(),
+            ));
+        }
+        ConfigSource::Host
+            if spec.config_key.as_deref() != Some(spec.id.as_str()) || spec.host_api.is_none() =>
         {
             return Err(CatalogError::InvalidConfig(
                 spec.id.clone(),
-                "file/host config-key must exactly equal component id".into(),
+                "host source requires config-key equal to component id and host-api".into(),
+            ));
+        }
+        ConfigSource::Host
+            if spec.config_type
+                != format!("{}::Config", spec.host_api.as_deref().unwrap_or_default()) =>
+        {
+            return Err(CatalogError::InvalidConfig(
+                spec.id.clone(),
+                "host config-type must be the Config type exported by host-api".into(),
             ));
         }
         _ => {}
@@ -697,6 +728,15 @@ fn validate_coexistence(
                     "shared-host-handle needs at least one field".into(),
                 ));
             }
+            if host_config_fields.len() > MAX_SHARED_HOST_CONFIG_FIELDS {
+                return Err(CatalogError::InvalidAppCoexistence(
+                    owner.to_owned(),
+                    format!(
+                        "shared-host-handle has {} fields; maximum is {MAX_SHARED_HOST_CONFIG_FIELDS}",
+                        host_config_fields.len()
+                    ),
+                ));
+            }
             let mut unique_fields = BTreeSet::new();
             for path in host_config_fields {
                 let Some((component, field)) = path.split_once('.') else {
@@ -873,6 +913,7 @@ fn is_id(value: &str) -> bool {
 
 fn validate_rust_field(owner: &str, value: &str) -> Result<(), CatalogError> {
     let valid = !value.is_empty()
+        && value.len() <= 128
         && value.as_bytes()[0].is_ascii_lowercase()
         && value
             .bytes()
@@ -1259,7 +1300,7 @@ provides = [{ capability = "cap:model", priority = 1, effects = [] }]
         let shared = BASE
             .replace(
                 "config-source = \"none\"",
-                "config-source = \"host\"\nconfig-key = \"model\"",
+                "config-source = \"host\"\nconfig-key = \"model\"\nhost-api = \"fixture_model\"",
             )
             .replace(
                 "app-coexistence = { mode = \"requires-stop\" }",
@@ -1278,6 +1319,76 @@ provides = [{ capability = "cap:model", priority = 1, effects = [] }]
             assert!(matches!(
                 NormalizedCatalog::normalize(CatalogDocument::from_toml(&invalid).unwrap()),
                 Err(CatalogError::InvalidAppCoexistence(_, _))
+            ));
+        }
+
+        let boundary_field = format!("[\"model.{}\"]", "a".repeat(128));
+        let boundary = shared.replace("[\"model.shared\"]", &boundary_field);
+        NormalizedCatalog::normalize(CatalogDocument::from_toml(&boundary).unwrap()).unwrap();
+
+        let oversized_field = format!("[\"model.{}\"]", "a".repeat(129));
+        let invalid = shared.replace("[\"model.shared\"]", &oversized_field);
+        assert!(matches!(
+            NormalizedCatalog::normalize(CatalogDocument::from_toml(&invalid).unwrap()),
+            Err(CatalogError::InvalidAppCoexistence(_, _))
+        ));
+
+        let boundary_count = (0..MAX_SHARED_HOST_CONFIG_FIELDS)
+            .map(|index| format!("\"model.shared_{index}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let boundary = shared.replace("\"model.shared\"", &boundary_count);
+        NormalizedCatalog::normalize(CatalogDocument::from_toml(&boundary).unwrap()).unwrap();
+
+        let too_many = (0..=MAX_SHARED_HOST_CONFIG_FIELDS)
+            .map(|index| format!("\"model.shared_{index}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let invalid = shared.replace("\"model.shared\"", &too_many);
+        assert!(matches!(
+            NormalizedCatalog::normalize(CatalogDocument::from_toml(&invalid).unwrap()),
+            Err(CatalogError::InvalidAppCoexistence(_, _))
+        ));
+
+        let reordered = shared.replace("[\"model.shared\"]", "[\"model.second\", \"model.first\"]");
+        let normalized =
+            NormalizedCatalog::normalize(CatalogDocument::from_toml(&reordered).unwrap()).unwrap();
+        let AppCoexistence::ConcurrentSharedHostHandle {
+            host_config_fields, ..
+        } = normalized.components["model"]
+            .app_coexistence
+            .as_ref()
+            .unwrap()
+        else {
+            panic!("expected shared-host coexistence");
+        };
+        assert_eq!(host_config_fields, &["model.first", "model.second"]);
+    }
+
+    #[test]
+    fn host_source_config_requires_exact_host_api_contract() {
+        let host = BASE.replace(
+            "config-source = \"none\"",
+            "config-source = \"host\"\nconfig-key = \"model\"\nhost-api = \"fixture_model\"",
+        );
+        NormalizedCatalog::normalize(CatalogDocument::from_toml(&host).unwrap()).unwrap();
+
+        for invalid in [
+            host.replace("\nhost-api = \"fixture_model\"", ""),
+            host.replace("host-api = \"fixture_model\"", "host-api = \"other_api\""),
+            host.replace("config-key = \"model\"", "config-key = \"other\""),
+            BASE.replace(
+                "config-source = \"none\"",
+                "config-source = \"none\"\nhost-api = \"fixture_model\"",
+            ),
+            BASE.replace(
+                "config-source = \"none\"",
+                "config-source = \"file\"\nconfig-key = \"model\"\nhost-api = \"fixture_model\"",
+            ),
+        ] {
+            assert!(matches!(
+                NormalizedCatalog::normalize(CatalogDocument::from_toml(&invalid).unwrap()),
+                Err(CatalogError::InvalidConfig(_, _))
             ));
         }
     }

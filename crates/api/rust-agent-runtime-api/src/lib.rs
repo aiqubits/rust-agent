@@ -12,10 +12,18 @@ pub use rust_agent_core::{
 /// Clones preserve a private wrapper identity. Constructing a second wrapper,
 /// even around the same service `Arc`, intentionally creates a different
 /// identity so a Host cannot substitute a reopen for a handoff.
-#[derive(Clone)]
 pub struct SharedHostHandle<T: ?Sized> {
     inner: Arc<T>,
     identity: Arc<SharedHostHandleIdentity>,
+}
+
+impl<T: ?Sized> Clone for SharedHostHandle<T> {
+    fn clone(&self) -> Self {
+        Self {
+            inner: Arc::clone(&self.inner),
+            identity: Arc::clone(&self.identity),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -42,6 +50,224 @@ impl<T: ?Sized> fmt::Debug for SharedHostHandle<T> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("SharedHostHandle(<opaque>)")
     }
+}
+
+pub const MAX_SHARED_HOST_HANDOFF_FIELDS: usize = 64;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AppHandoffMode {
+    Concurrent,
+    StopOldApp,
+}
+
+#[derive(Clone)]
+pub struct SharedHostFieldIdentity {
+    path: &'static str,
+    identity: Arc<SharedHostHandleIdentity>,
+}
+
+impl SharedHostFieldIdentity {
+    pub const fn path(&self) -> &'static str {
+        self.path
+    }
+
+    fn same_identity(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.identity, &other.identity)
+    }
+}
+
+impl fmt::Debug for SharedHostFieldIdentity {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SharedHostFieldIdentity")
+            .field("path", &self.path)
+            .field("identity", &"<opaque>")
+            .finish()
+    }
+}
+
+pub fn seal_shared_host_handle<T: ?Sized>(
+    path: &'static str,
+    handle: &SharedHostHandle<T>,
+) -> Result<SharedHostFieldIdentity, AppHandoffError> {
+    if !valid_shared_host_field_path(path) {
+        return Err(AppHandoffError::InvalidSharedFieldPath(path));
+    }
+    Ok(SharedHostFieldIdentity {
+        path,
+        identity: Arc::clone(&handle.identity),
+    })
+}
+
+#[derive(Clone)]
+pub struct AppHandoffSeal {
+    mode: AppHandoffMode,
+    composition_hash: &'static str,
+    catalog_digest: &'static str,
+    shared_fields: Arc<[SharedHostFieldIdentity]>,
+}
+
+impl AppHandoffSeal {
+    pub fn new(
+        mode: AppHandoffMode,
+        composition_hash: &'static str,
+        catalog_digest: &'static str,
+        shared_fields: Vec<SharedHostFieldIdentity>,
+    ) -> Result<Self, AppHandoffError> {
+        if !is_sha256(composition_hash) {
+            return Err(AppHandoffError::InvalidIdentity("composition-hash"));
+        }
+        if !is_sha256(catalog_digest) {
+            return Err(AppHandoffError::InvalidIdentity("catalog-digest"));
+        }
+        if shared_fields.len() > MAX_SHARED_HOST_HANDOFF_FIELDS {
+            return Err(AppHandoffError::TooManySharedFields {
+                actual: shared_fields.len(),
+                maximum: MAX_SHARED_HOST_HANDOFF_FIELDS,
+            });
+        }
+        if !shared_fields
+            .windows(2)
+            .all(|pair| pair[0].path < pair[1].path)
+        {
+            return Err(AppHandoffError::NonCanonicalSharedFields);
+        }
+        Ok(Self {
+            mode,
+            composition_hash,
+            catalog_digest,
+            shared_fields: shared_fields.into(),
+        })
+    }
+
+    pub const fn mode(&self) -> AppHandoffMode {
+        self.mode
+    }
+
+    pub fn verify_concurrent_handoff_from(&self, old: &Self) -> Result<(), AppHandoffError> {
+        if self.mode != AppHandoffMode::Concurrent || old.mode != AppHandoffMode::Concurrent {
+            return Err(AppHandoffError::ConcurrentHandoffUnavailable);
+        }
+        if self.composition_hash != old.composition_hash {
+            return Err(AppHandoffError::CompositionMismatch);
+        }
+        if self.catalog_digest != old.catalog_digest {
+            return Err(AppHandoffError::CatalogMismatch);
+        }
+        if self.shared_fields.len() != old.shared_fields.len()
+            || self
+                .shared_fields
+                .iter()
+                .zip(old.shared_fields.iter())
+                .any(|(new, old)| new.path != old.path)
+        {
+            return Err(AppHandoffError::SharedFieldSetMismatch);
+        }
+        if let Some(field) = self
+            .shared_fields
+            .iter()
+            .zip(old.shared_fields.iter())
+            .find_map(|(new, old)| (!new.same_identity(old)).then_some(new.path))
+        {
+            return Err(AppHandoffError::SharedIdentityMismatch(field));
+        }
+        Ok(())
+    }
+}
+
+impl fmt::Debug for AppHandoffSeal {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AppHandoffSeal")
+            .field("mode", &self.mode)
+            .field("composition_hash", &self.composition_hash)
+            .field("catalog_digest", &self.catalog_digest)
+            .field("shared_fields", &self.shared_fields)
+            .finish()
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum AppHandoffError {
+    InvalidIdentity(&'static str),
+    InvalidSharedFieldPath(&'static str),
+    TooManySharedFields { actual: usize, maximum: usize },
+    NonCanonicalSharedFields,
+    ConcurrentHandoffUnavailable,
+    CompositionMismatch,
+    CatalogMismatch,
+    SharedFieldSetMismatch,
+    SharedIdentityMismatch(&'static str),
+}
+
+impl fmt::Display for AppHandoffError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidIdentity(field) => write!(formatter, "invalid handoff {field}"),
+            Self::InvalidSharedFieldPath(path) => {
+                write!(formatter, "invalid shared Host field path `{path}`")
+            }
+            Self::TooManySharedFields { actual, maximum } => write!(
+                formatter,
+                "handoff has {actual} shared Host fields; maximum is {maximum}"
+            ),
+            Self::NonCanonicalSharedFields => {
+                formatter.write_str("shared Host fields are duplicated or not in canonical order")
+            }
+            Self::ConcurrentHandoffUnavailable => {
+                formatter.write_str("concurrent App handoff is unavailable")
+            }
+            Self::CompositionMismatch => formatter.write_str("App composition identity mismatch"),
+            Self::CatalogMismatch => formatter.write_str("App catalog identity mismatch"),
+            Self::SharedFieldSetMismatch => {
+                formatter.write_str("App shared Host field set mismatch")
+            }
+            Self::SharedIdentityMismatch(path) => {
+                write!(
+                    formatter,
+                    "shared Host handle identity mismatch for `{path}`"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for AppHandoffError {}
+
+fn is_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn valid_shared_host_field_path(value: &str) -> bool {
+    let Some((component, field)) = value.split_once('.') else {
+        return false;
+    };
+    !field.contains('.')
+        && valid_kebab_id(component)
+        && !field.is_empty()
+        && field.len() <= 128
+        && field
+            .bytes()
+            .next()
+            .is_some_and(|byte| byte.is_ascii_lowercase() || byte == b'_')
+        && field
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+}
+
+fn valid_kebab_id(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    !bytes.is_empty()
+        && bytes.len() <= 128
+        && bytes[0].is_ascii_lowercase()
+        && bytes[bytes.len() - 1] != b'-'
+        && !bytes.windows(2).any(|pair| pair == b"--")
+        && bytes
+            .iter()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'-')
 }
 
 /// Opaque identity of the runtime adapter that created a primitive bundle.
@@ -384,6 +610,7 @@ impl SessionQueryCursor {
 pub enum BuildError {
     Component(ComponentBuildError),
     InvalidRuntime(RuntimePrimitiveError),
+    InvalidHandoff(AppHandoffError),
     InvalidComposition(&'static str),
 }
 
@@ -392,6 +619,7 @@ impl fmt::Display for BuildError {
         match self {
             Self::Component(error) => write!(formatter, "component build failed: {error}"),
             Self::InvalidRuntime(error) => write!(formatter, "invalid runtime: {error}"),
+            Self::InvalidHandoff(error) => write!(formatter, "invalid App handoff: {error}"),
             Self::InvalidComposition(message) => {
                 write!(formatter, "invalid composition: {message}")
             }
@@ -404,6 +632,12 @@ impl std::error::Error for BuildError {}
 impl From<ComponentBuildError> for BuildError {
     fn from(error: ComponentBuildError) -> Self {
         Self::Component(error)
+    }
+}
+
+impl From<AppHandoffError> for BuildError {
+    fn from(error: AppHandoffError) -> Self {
+        Self::InvalidHandoff(error)
     }
 }
 
@@ -430,6 +664,121 @@ mod tests {
         assert!(!first.same_identity(&second_wrapper));
         assert_eq!(first.service().as_str(), "host-owned");
         assert_eq!(format!("{first:?}"), "SharedHostHandle(<opaque>)");
+    }
+
+    #[test]
+    fn app_handoff_seal_checks_mode_composition_catalog_field_set_and_identity() {
+        const COMPOSITION: &str =
+            "0000000000000000000000000000000000000000000000000000000000000000";
+        const OTHER_COMPOSITION: &str =
+            "1111111111111111111111111111111111111111111111111111111111111111";
+        const CATALOG: &str = "2222222222222222222222222222222222222222222222222222222222222222";
+        const OTHER_CATALOG: &str =
+            "3333333333333333333333333333333333333333333333333333333333333333";
+
+        let service = Arc::new(String::from("host-owned"));
+        let handle = SharedHostHandle::new(Arc::clone(&service));
+        let same = handle.clone();
+        let second_wrapper = SharedHostHandle::new(service);
+        let seal = |composition, catalog, field: SharedHostFieldIdentity| {
+            AppHandoffSeal::new(
+                AppHandoffMode::Concurrent,
+                composition,
+                catalog,
+                vec![field],
+            )
+            .unwrap()
+        };
+        let old = seal(
+            COMPOSITION,
+            CATALOG,
+            seal_shared_host_handle("fixture-model.shared", &handle).unwrap(),
+        );
+        let matching = seal(
+            COMPOSITION,
+            CATALOG,
+            seal_shared_host_handle("fixture-model.shared", &same).unwrap(),
+        );
+        matching.verify_concurrent_handoff_from(&old).unwrap();
+
+        let wrong_wrapper = seal(
+            COMPOSITION,
+            CATALOG,
+            seal_shared_host_handle("fixture-model.shared", &second_wrapper).unwrap(),
+        );
+        assert_eq!(
+            wrong_wrapper.verify_concurrent_handoff_from(&old),
+            Err(AppHandoffError::SharedIdentityMismatch(
+                "fixture-model.shared"
+            ))
+        );
+        let wrong_field = seal(
+            COMPOSITION,
+            CATALOG,
+            seal_shared_host_handle("fixture-model.other", &same).unwrap(),
+        );
+        assert_eq!(
+            wrong_field.verify_concurrent_handoff_from(&old),
+            Err(AppHandoffError::SharedFieldSetMismatch)
+        );
+        let wrong_composition = seal(
+            OTHER_COMPOSITION,
+            CATALOG,
+            seal_shared_host_handle("fixture-model.shared", &same).unwrap(),
+        );
+        assert_eq!(
+            wrong_composition.verify_concurrent_handoff_from(&old),
+            Err(AppHandoffError::CompositionMismatch)
+        );
+        let wrong_catalog = seal(
+            COMPOSITION,
+            OTHER_CATALOG,
+            seal_shared_host_handle("fixture-model.shared", &same).unwrap(),
+        );
+        assert_eq!(
+            wrong_catalog.verify_concurrent_handoff_from(&old),
+            Err(AppHandoffError::CatalogMismatch)
+        );
+        let stopped =
+            AppHandoffSeal::new(AppHandoffMode::StopOldApp, COMPOSITION, CATALOG, Vec::new())
+                .unwrap();
+        assert_eq!(
+            matching.verify_concurrent_handoff_from(&stopped),
+            Err(AppHandoffError::ConcurrentHandoffUnavailable)
+        );
+    }
+
+    #[test]
+    fn app_handoff_seal_rejects_invalid_identity_path_order_and_field_bound() {
+        const IDENTITY: &str = "0000000000000000000000000000000000000000000000000000000000000000";
+        let handle = SharedHostHandle::new(Arc::new(()));
+        assert!(matches!(
+            seal_shared_host_handle("invalid", &handle),
+            Err(AppHandoffError::InvalidSharedFieldPath("invalid"))
+        ));
+        let field = seal_shared_host_handle("fixture-model.shared", &handle).unwrap();
+        assert!(matches!(
+            AppHandoffSeal::new(AppHandoffMode::Concurrent, "INVALID", IDENTITY, Vec::new()),
+            Err(AppHandoffError::InvalidIdentity("composition-hash"))
+        ));
+        assert!(matches!(
+            AppHandoffSeal::new(
+                AppHandoffMode::Concurrent,
+                IDENTITY,
+                IDENTITY,
+                vec![field.clone(), field.clone()]
+            ),
+            Err(AppHandoffError::NonCanonicalSharedFields)
+        ));
+        assert!(matches!(
+            AppHandoffSeal::new(
+                AppHandoffMode::Concurrent,
+                IDENTITY,
+                IDENTITY,
+                vec![field; MAX_SHARED_HOST_HANDOFF_FIELDS + 1]
+            ),
+            Err(AppHandoffError::TooManySharedFields { .. })
+        ));
     }
 
     #[test]

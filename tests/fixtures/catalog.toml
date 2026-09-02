@@ -60,6 +60,29 @@ app-coexistence = { mode = "concurrent-independent", evidence = { source = "coex
 cargo-features = []
 
 [[components]]
+id = "fixture-model-shared"
+package = "rust-agent-fixture-model-shared"
+package-path = "tests/fixtures/components/fixture-model-shared"
+scope = "app"
+factory = "rust_agent_fixture_model_shared::build"
+dependencies-type = "rust_agent_fixture_model_shared::Dependencies"
+config-type = "rust_agent_fixture_model_shared::host_api::Config"
+config-source = "host"
+config-key = "fixture-model-shared"
+host-api = "rust_agent_fixture_model_shared::host_api"
+targets = "cfg(not(target_arch = \"wasm32\"))"
+support = "production"
+lifecycle-effects = []
+provides = [{ capability = "cap:model", priority = 50, effects = [] }]
+requires = []
+conflicts = []
+security = []
+runtime-primitives = []
+build-requirements = { executables = [], read-inputs = [], environment = [] }
+app-coexistence = { mode = "concurrent-shared-host-handle", host-config-fields = ["fixture-model-shared.shared"], evidence = { source = "coexistence-evidence.toml", algorithm = "sha256", digest = "b7a427f093ad64e3eb933fa09e435af691e200323d2afe0dc5376ee28d801411", reviewer-policy = "phase-1a-fixture-review-v1" } }
+cargo-features = []
+
+[[components]]
 id = "fixture-model-fallback"
 package = "rust-agent-fixture-model-fallback"
 package-path = "tests/fixtures/components/fixture-model-fallback"

@@ -6,6 +6,11 @@ fn require_std_error<T: std::error::Error>() {}
 fn main() {
     require_std_error::<hex::FromHexError>();
     let runtime = agent::create_runtime_primitives().expect("fixture runtime must initialize");
-    let app = agent::build(runtime).expect("emitted composition must build in the product Host");
+    let app = agent::build(
+        agent::RuntimeConfig::default(),
+        agent::HostBindings::default(),
+        runtime,
+    )
+    .expect("emitted composition must build in the product Host");
     println!("{}:product-generated-marker", app.run("shared-feature"));
 }

@@ -13,6 +13,7 @@ use crate::target::MAX_TARGET_PREDICATE_PARTITIONS;
 pub const MAX_CATALOG_DOCUMENT_BYTES: usize = 1024 * 1024;
 pub const MAX_CATALOG_OWNERS: usize = 256;
 pub const MAX_CATALOG_TRUST_POLICY_BYTES: usize = 64 * 1024;
+pub const MAX_SHARED_HOST_CONFIG_FIELDS: usize = 64;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum CatalogResourceBoundsError {
@@ -170,6 +171,8 @@ pub struct ComponentSpec {
     pub config_source: ConfigSource,
     #[serde(default, rename = "config-key")]
     pub config_key: Option<String>,
+    #[serde(default, rename = "host-api", skip_serializing_if = "Option::is_none")]
+    pub host_api: Option<String>,
     #[serde(default, rename = "resource-namespace-preparer")]
     pub resource_namespace_preparer: Option<String>,
     #[serde(default, rename = "prepared-config-type")]

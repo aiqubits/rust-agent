@@ -13,7 +13,11 @@ pub async fn start(
     }
     let runtime = rust_agent_fixture_host_export::runtime_primitives(crate::create_runtime_primitives)
         .map_err(|error| JsValue::from_str(&error.to_string()))?;
-    let app = crate::build(runtime)
+    let app = crate::build(
+        crate::RuntimeConfig::default(),
+        crate::HostBindings::default(),
+        runtime,
+    )
         .map_err(|error| JsValue::from_str(&error.to_string()))?;
     Ok(WasmAppHandle::from_app(app))
 }

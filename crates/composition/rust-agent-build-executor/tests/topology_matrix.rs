@@ -147,6 +147,78 @@ fn framework_neutral_host_topology_matrix() {
     );
 }
 
+#[test]
+fn shared_host_handoff_uses_same_typed_identity_without_reopen() {
+    let root = repository_root();
+    let temp = TempDir::new().unwrap();
+    let rustc = tool("rustc");
+    let cargo = tool("cargo");
+    let linker = tool("cc");
+
+    let shared = compose_fixture(&root, temp.path(), &rustc, &cargo, "shared-host.toml");
+    assert_eq!(
+        shared.manifest.app_handoff,
+        rust_agent_composition::resolver::AppHandoff::Concurrent
+    );
+    let generated = fs::read_to_string(shared.path.join("src/lib.rs")).unwrap();
+    assert!(generated.contains(
+        "seal_shared_host_handle(\"fixture-model-shared.shared\", &host_bindings.fixture_model_shared.shared)"
+    ));
+    assert!(generated.contains("pub mod host_api"));
+    assert!(generated.contains("pub struct HostBindingsBuilder"));
+    assert!(
+        !generated.contains("pub fixture_model_shared: host_api::fixture_model_shared::Config")
+    );
+    assert!(generated.contains(
+        "pub fn set_fixture_model_shared(&mut self, value: host_api::fixture_model_shared::Config)"
+    ));
+
+    let integration = temp.path().join("shared-host-integration");
+    emit_integration(&shared.path, &integration).unwrap();
+    compile_shared_host_fixture(&root, temp.path(), &integration, &cargo, &rustc, &linker);
+}
+
+fn compile_shared_host_fixture(
+    root: &Path,
+    temp: &Path,
+    integration: &Path,
+    cargo: &Path,
+    rustc: &Path,
+    linker: &Path,
+) {
+    let fixture = temp.join("shared-host-handoff");
+    fs::create_dir_all(fixture.join("src")).unwrap();
+    fs::copy(
+        root.join("tests/fixtures/topologies/shared-host/src/lib.rs"),
+        fixture.join("src/lib.rs"),
+    )
+    .unwrap();
+    let integration_path = integration.display();
+    fs::write(
+        fixture.join("Cargo.toml"),
+        format!(
+            "[package]\nname = \"shared-host-handoff\"\nversion = \"0.1.0\"\nedition = \"2024\"\nrust-version = \"1.97.1\"\npublish = false\n\n[dependencies]\nagent = {{ package = \"rust-agent-generated-composition\", path = \"{integration_path}\", default-features = false }}\n\n[workspace]\n"
+        ),
+    )
+    .unwrap();
+    assert_success(&run_cargo(
+        cargo,
+        rustc,
+        linker,
+        &fixture,
+        temp,
+        &["generate-lockfile", "--offline"],
+    ));
+    assert_success(&run_cargo(
+        cargo,
+        rustc,
+        linker,
+        &fixture,
+        temp,
+        &["test", "--locked", "--offline"],
+    ));
+}
+
 fn compile_same_module_wasm_fixture(
     root: &Path,
     temp: &Path,

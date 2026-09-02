@@ -20,19 +20,21 @@ impl fmt::Display for HostEntryError {
 
 impl std::error::Error for HostEntryError {}
 
-pub fn run<R, F>(create_runtime: R, build: F) -> Result<FixtureApp, HostEntryError>
+pub fn run<C, H, R, F>(create_runtime: R, build: F) -> Result<FixtureApp, HostEntryError>
 where
+    C: Default,
+    H: Default,
     R: FnOnce() -> Result<RuntimePrimitives, RuntimePrimitiveError>,
-    F: FnOnce(RuntimePrimitives) -> Result<FixtureApp, BuildError>,
+    F: FnOnce(C, H, RuntimePrimitives) -> Result<FixtureApp, BuildError>,
 {
     let runtime = create_runtime().map_err(HostEntryError::Runtime)?;
-    build(runtime).map_err(HostEntryError::Build)
+    build(C::default(), H::default(), runtime).map_err(HostEntryError::Build)
 }
 
 #[cfg(test)]
 mod tests {
     use rust_agent_fixture_api::{Driver, DriverBinding};
-    use rust_agent_runtime_api::RuntimeAdapterIdentity;
+    use rust_agent_runtime_api::{AppHandoffMode, AppHandoffSeal, RuntimeAdapterIdentity};
     use std::sync::Arc;
 
     use super::*;
@@ -52,11 +54,18 @@ mod tests {
                     "fixture-runtime",
                 )?))
             },
-            |runtime| {
+            |_config: (), _bindings: (), runtime| {
                 assert_eq!(runtime.adapter().as_str(), "fixture-runtime");
                 Ok(FixtureApp::new(
                     DriverBinding::from_provider(Arc::new(Echo)),
                     None,
+                    AppHandoffSeal::new(
+                        AppHandoffMode::Concurrent,
+                        "0000000000000000000000000000000000000000000000000000000000000000",
+                        "1111111111111111111111111111111111111111111111111111111111111111",
+                        Vec::new(),
+                    )
+                    .unwrap(),
                 ))
             },
         )

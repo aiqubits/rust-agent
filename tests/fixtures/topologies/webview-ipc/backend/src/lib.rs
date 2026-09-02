@@ -38,7 +38,14 @@ mod tests {
     #[test]
     fn command_mapping_preserves_the_exact_request_identity() {
         let runtime = agent::create_runtime_primitives().unwrap();
-        let adapter = BackendIpcAdapter::new(agent::build(runtime).unwrap());
+        let adapter = BackendIpcAdapter::new(
+            agent::build(
+                agent::RuntimeConfig::default(),
+                agent::HostBindings::default(),
+                runtime,
+            )
+            .unwrap(),
+        );
         let id = RequestId::checked("request-42").unwrap();
         let result = adapter.dispatch(RunCommand::checked(id.clone(), "hello").unwrap());
         assert_eq!(result.request_id(), &id);
@@ -48,7 +55,14 @@ mod tests {
     #[test]
     fn channel_mapping_is_bounded_and_never_exposes_the_runtime_handle() {
         let runtime = agent::create_runtime_primitives().unwrap();
-        let adapter = BackendIpcAdapter::new(agent::build(runtime).unwrap());
+        let adapter = BackendIpcAdapter::new(
+            agent::build(
+                agent::RuntimeConfig::default(),
+                agent::HostBindings::default(),
+                runtime,
+            )
+            .unwrap(),
+        );
         let (events, frontend) = ipc_contract::bounded_event_channel(1).unwrap();
         let id = RequestId::checked("request-42").unwrap();
         adapter

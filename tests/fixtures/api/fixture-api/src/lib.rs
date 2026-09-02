@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use rust_agent_runtime_api::BuildError;
+use rust_agent_runtime_api::{AppHandoffError, AppHandoffMode, AppHandoffSeal, BuildError};
 
 pub const FACTORY_ABI: &str = "rust-agent-component-factory-v1";
 
@@ -114,13 +114,19 @@ impl FileReaderBinding {
 pub struct FixtureApp {
     driver: DriverBinding,
     file_reader: Option<FileReaderBinding>,
+    handoff: AppHandoffSeal,
 }
 
 impl FixtureApp {
-    pub fn new(driver: DriverBinding, file_reader: Option<FileReaderBinding>) -> Self {
+    pub fn new(
+        driver: DriverBinding,
+        file_reader: Option<FileReaderBinding>,
+        handoff: AppHandoffSeal,
+    ) -> Self {
         Self {
             driver,
             file_reader,
+            handoff,
         }
     }
 
@@ -137,5 +143,13 @@ impl FixtureApp {
 
     pub fn has_file_reader(&self) -> bool {
         self.file_reader.is_some()
+    }
+
+    pub const fn app_handoff_mode(&self) -> AppHandoffMode {
+        self.handoff.mode()
+    }
+
+    pub fn verify_concurrent_handoff_from(&self, old: &Self) -> Result<(), AppHandoffError> {
+        self.handoff.verify_concurrent_handoff_from(&old.handoff)
     }
 }

@@ -1,0 +1,5 @@
+error[E0616]: field `identity` of struct `SharedHostFieldIdentity` is private
+ --> tests/ui/forge_shared_host_field_identity.rs:8:28
+  |
+8 |     let _identity = sealed.identity;
+  |                            ^^^^^^^^ private field

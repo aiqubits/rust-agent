@@ -2261,6 +2261,9 @@ mod tests {
         profile
             .components
             .insert("fixture-model".into(), ComponentChoice::Disabled);
+        profile
+            .components
+            .insert("fixture-model-shared".into(), ComponentChoice::Disabled);
         assert!(matches!(
             resolve(&fixture_catalog(), &profile, &target()),
             Err(ResolutionError::Unsatisfiable { .. })
@@ -3160,6 +3163,10 @@ mod tests {
                 catalog.components.get_mut("fixture-model-fallback").unwrap().conflicts.clear();
             }
             let mut profile = profile();
+            profile.components.insert(
+                "fixture-model-shared".into(),
+                ComponentChoice::Disabled,
+            );
             if disable_primary {
                 profile.components.insert("fixture-model".into(), ComponentChoice::Disabled);
             }

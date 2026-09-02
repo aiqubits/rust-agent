@@ -1,0 +1,15 @@
+error[E0308]: mismatched types
+ --> tests/ui/seal_non_shared_host_field.rs:7:61
+  |
+7 |     let _ = seal_shared_host_handle("fixture-model.shared", &not_a_shared_handle);
+  |             -----------------------                         ^^^^^^^^^^^^^^^^^^^^ expected `&SharedHostHandle<_>`, found `&Arc<()>`
+  |             |
+  |             arguments to this function are incorrect
+  |
+  = note: expected reference `&SharedHostHandle<_>`
+             found reference `&Arc<()>`
+note: function defined here
+ --> src/lib.rs
+  |
+  | pub fn seal_shared_host_handle<T: ?Sized>(
+  |        ^^^^^^^^^^^^^^^^^^^^^^^

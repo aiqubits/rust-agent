@@ -627,6 +627,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "rust-agent-fixture-model-shared"
+version = "0.1.0"
+dependencies = [
+ "rust-agent-fixture-api",
+ "rust-agent-runtime-api",
+]
+
+[[package]]
 name = "rust-agent-fixture-runtime"
 version = "0.1.0"
 dependencies = [

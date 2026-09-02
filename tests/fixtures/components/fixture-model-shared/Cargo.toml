@@ -1,0 +1,40 @@
+[package]
+name = "rust-agent-fixture-model-shared"
+description = "Product-neutral shared Host handle model fixture"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[package.metadata.rust-agent]
+schema = 1
+id = "fixture-model-shared"
+scope = "app"
+factory = "rust_agent_fixture_model_shared::build"
+dependencies-type = "rust_agent_fixture_model_shared::Dependencies"
+config-type = "rust_agent_fixture_model_shared::host_api::Config"
+config-source = "host"
+config-key = "fixture-model-shared"
+host-api = "rust_agent_fixture_model_shared::host_api"
+targets = ['cfg(not(target_arch = "wasm32"))']
+support = "production"
+lifecycle-effects = []
+provides = [{ capability = "cap:model", priority = 50, effects = [] }]
+requires = []
+conflicts = []
+security = []
+runtime-primitives = []
+build-requirements = { executables = [], read-inputs = [], environment = [] }
+app-coexistence = { mode = "concurrent-shared-host-handle", host-config-fields = ["fixture-model-shared.shared"], evidence = { source = "coexistence-evidence.toml", algorithm = "sha256", digest = "b7a427f093ad64e3eb933fa09e435af691e200323d2afe0dc5376ee28d801411", reviewer-policy = "phase-1a-fixture-review-v1" } }
+cargo-features = []
+
+[features]
+default = []
+
+[dependencies]
+rust-agent-fixture-api = { version = "0.1.0", path = "../../api/fixture-api", default-features = false }
+rust-agent-runtime-api = { version = "0.1.0", path = "../../../../crates/api/rust-agent-runtime-api", default-features = false }
+
+[lints]
+workspace = true
