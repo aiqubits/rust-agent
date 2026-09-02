@@ -1,5 +1,5 @@
 {
-  "schema": 1,
+  "schema": 2,
   "normalized-catalog": {
     "schema": 1,
     "capabilities": [
@@ -142,7 +142,13 @@
           "environment": []
         },
         "app-coexistence": {
-          "mode": "requires-stop"
+          "mode": "concurrent-independent",
+          "evidence": {
+            "source": "coexistence-evidence.toml",
+            "algorithm": "sha256",
+            "digest": "708938236a72e999075c6a75a37a32cf249039e7cf206d52f7e1d4a05a405c14",
+            "reviewer-policy": "phase-1a-fixture-review-v1"
+          }
         },
         "cargo-features": []
       },
@@ -240,7 +246,13 @@
           "environment": []
         },
         "app-coexistence": {
-          "mode": "requires-stop"
+          "mode": "concurrent-independent",
+          "evidence": {
+            "source": "coexistence-evidence.toml",
+            "algorithm": "sha256",
+            "digest": "e18440d1ed7261351fdea403322f6568d78edbe4fbd04c9f873cabf62840cbd6",
+            "reviewer-policy": "phase-1a-fixture-review-v1"
+          }
         },
         "cargo-features": []
       },
@@ -310,7 +322,13 @@
         "primitives": [],
         "security": [],
         "app-coexistence": {
-          "mode": "requires-stop"
+          "mode": "concurrent-independent",
+          "evidence": {
+            "source": "coexistence-evidence.toml",
+            "algorithm": "sha256",
+            "digest": "0b037cd6be4a6c7b558f75fcb370fb3485114e7beab7fd8971b2073208dce86d",
+            "reviewer-policy": "phase-1a-fixture-review-v1"
+          }
         },
         "build-requirements": {
           "executables": [],
@@ -380,7 +398,107 @@
       }
     ]
   },
-  "normalized-catalog-digest": "9e6aa08d79b33d2818fbdc052f062373502225234b65f040b28e2aeb827b11b8",
+  "normalized-catalog-digest": "e9ba0c01612dd63dbc1dbaa4b8672fe5c597961f617b0a3db6d89729dab71be5",
+  "catalog-trust-input": {
+    "schema": 1,
+    "normalized-policy": {
+      "schema": 1,
+      "reviewer-policies": {
+        "phase-1a-fixture-review-v1": {
+          "evidence-schema": 1,
+          "rule-sets": [
+            "phase-1a-independent-v1",
+            "phase-1a-shared-handle-v1"
+          ]
+        }
+      }
+    },
+    "normalized-policy-digest": "df355b959d2cf726f30baa81ac05d445f7dec143eb28be8a867f4f9f4c1ff86c",
+    "evidence": [
+      {
+        "owner-kind": "component",
+        "owner": "fixture-driver",
+        "package": "rust-agent-fixture-driver",
+        "package-path": "tests/fixtures/components/fixture-driver",
+        "source": "coexistence-evidence.toml",
+        "algorithm": "sha256",
+        "digest": "708938236a72e999075c6a75a37a32cf249039e7cf206d52f7e1d4a05a405c14",
+        "reviewer-policy": "phase-1a-fixture-review-v1",
+        "document": {
+          "schema": 1,
+          "owner": "fixture-driver",
+          "mode": "concurrent-independent",
+          "rule-set": "phase-1a-independent-v1",
+          "claims": [
+            "boundary-config",
+            "different-config",
+            "identical-config",
+            "independent-real-resources",
+            "two-app-in-process"
+          ],
+          "tests": [
+            "rust_agent_fixture_driver::tests::two_instances_keep_independent_config_and_dependency_ownership"
+          ]
+        },
+        "bytes-hex": "736368656d61203d20310a6f776e6572203d2022666978747572652d647269766572220a6d6f6465203d2022636f6e63757272656e742d696e646570656e64656e74220a72756c652d736574203d202270686173652d31612d696e646570656e64656e742d7631220a636c61696d73203d205b22626f756e646172792d636f6e666967222c2022646966666572656e742d636f6e666967222c20226964656e746963616c2d636f6e666967222c2022696e646570656e64656e742d7265616c2d7265736f7572636573222c202274776f2d6170702d696e2d70726f63657373225d0a7465737473203d205b22727573745f6167656e745f666978747572655f6472697665723a3a74657374733a3a74776f5f696e7374616e6365735f6b6565705f696e646570656e64656e745f636f6e6669675f616e645f646570656e64656e63795f6f776e657273686970225d0a"
+      },
+      {
+        "owner-kind": "component",
+        "owner": "fixture-model",
+        "package": "rust-agent-fixture-model",
+        "package-path": "tests/fixtures/components/fixture-model",
+        "source": "coexistence-evidence.toml",
+        "algorithm": "sha256",
+        "digest": "e18440d1ed7261351fdea403322f6568d78edbe4fbd04c9f873cabf62840cbd6",
+        "reviewer-policy": "phase-1a-fixture-review-v1",
+        "document": {
+          "schema": 1,
+          "owner": "fixture-model",
+          "mode": "concurrent-independent",
+          "rule-set": "phase-1a-independent-v1",
+          "claims": [
+            "boundary-config",
+            "different-config",
+            "identical-config",
+            "independent-real-resources",
+            "two-app-in-process"
+          ],
+          "tests": [
+            "rust_agent_fixture_model::tests::two_instances_are_independent_for_identical_different_and_boundary_configs"
+          ]
+        },
+        "bytes-hex": "736368656d61203d20310a6f776e6572203d2022666978747572652d6d6f64656c220a6d6f6465203d2022636f6e63757272656e742d696e646570656e64656e74220a72756c652d736574203d202270686173652d31612d696e646570656e64656e742d7631220a636c61696d73203d205b22626f756e646172792d636f6e666967222c2022646966666572656e742d636f6e666967222c20226964656e746963616c2d636f6e666967222c2022696e646570656e64656e742d7265616c2d7265736f7572636573222c202274776f2d6170702d696e2d70726f63657373225d0a7465737473203d205b22727573745f6167656e745f666978747572655f6d6f64656c3a3a74657374733a3a74776f5f696e7374616e6365735f6172655f696e646570656e64656e745f666f725f6964656e746963616c5f646966666572656e745f616e645f626f756e646172795f636f6e66696773225d0a"
+      },
+      {
+        "owner-kind": "runtime-adapter",
+        "owner": "fixture-runtime",
+        "package": "rust-agent-fixture-runtime",
+        "package-path": "tests/fixtures/runtime/fixture-runtime",
+        "source": "coexistence-evidence.toml",
+        "algorithm": "sha256",
+        "digest": "0b037cd6be4a6c7b558f75fcb370fb3485114e7beab7fd8971b2073208dce86d",
+        "reviewer-policy": "phase-1a-fixture-review-v1",
+        "document": {
+          "schema": 1,
+          "owner": "fixture-runtime",
+          "mode": "concurrent-independent",
+          "rule-set": "phase-1a-independent-v1",
+          "claims": [
+            "boundary-config",
+            "different-config",
+            "identical-config",
+            "independent-real-resources",
+            "two-app-in-process"
+          ],
+          "tests": [
+            "rust_agent_fixture_runtime::tests::two_runtime_bundles_are_independently_owned"
+          ]
+        },
+        "bytes-hex": "736368656d61203d20310a6f776e6572203d2022666978747572652d72756e74696d65220a6d6f6465203d2022636f6e63757272656e742d696e646570656e64656e74220a72756c652d736574203d202270686173652d31612d696e646570656e64656e742d7631220a636c61696d73203d205b22626f756e646172792d636f6e666967222c2022646966666572656e742d636f6e666967222c20226964656e746963616c2d636f6e666967222c2022696e646570656e64656e742d7265616c2d7265736f7572636573222c202274776f2d6170702d696e2d70726f63657373225d0a7465737473203d205b22727573745f6167656e745f666978747572655f72756e74696d653a3a74657374733a3a74776f5f72756e74696d655f62756e646c65735f6172655f696e646570656e64656e746c795f6f776e6564225d0a"
+      }
+    ],
+    "identity-digest": "ab5cea3c69b89578c76e30579893f989242a1051243f212209bdbd02f73826b8"
+  },
   "root-build-requirements": {
     "rust-agent-core": {
       "executables": [],
@@ -398,5 +516,5 @@
       "environment": []
     }
   },
-  "identity-digest": "d54d4a85dbc593a44525a4d3a35b9a4e14632d4b2e0f70db52227ae05f1f084c"
+  "identity-digest": "f8b4346c595836e95521d43e4ac7f7c818eaaffeaf214b0b9c6591a92ca9fdf4"
 }

@@ -56,6 +56,7 @@ fn compose_fixture(
     compose(&ComposeOptions {
         workspace_root: root.to_owned(),
         profile_path: root.join("tests/fixtures/profiles").join(profile),
+        catalog_trust_policy_path: root.join("tests/fixtures/catalog-trust.toml"),
         output_root: temp.join("compositions"),
         rustc_path: rustc.to_owned(),
         cargo_path: cargo.to_owned(),

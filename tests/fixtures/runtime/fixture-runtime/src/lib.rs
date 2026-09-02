@@ -17,4 +17,14 @@ mod tests {
             "fixture-runtime"
         );
     }
+
+    #[test]
+    fn two_runtime_bundles_are_independently_owned() {
+        let first = create_runtime_primitives().unwrap();
+        let second = create_runtime_primitives().unwrap();
+
+        assert_eq!(first.adapter(), second.adapter());
+        assert!(!first.same_bundle_identity(&second));
+        assert!(first.same_bundle_identity(&first.clone()));
+    }
 }

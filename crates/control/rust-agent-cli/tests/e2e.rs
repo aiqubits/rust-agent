@@ -79,6 +79,9 @@ fn registry_backed_compose_requires_explicit_cache_end_to_end() {
         "--profile".into(),
         root.join("tests/fixtures/profiles/controlled-build.toml")
             .into_os_string(),
+        "--catalog-trust-policy".into(),
+        root.join("tests/fixtures/catalog-trust.toml")
+            .into_os_string(),
         "--output".into(),
         compositions.as_os_str().into(),
         "--rustc".into(),
@@ -143,6 +146,9 @@ fn custom_target_cli_preserves_symlink_provenance_and_fails_before_tools() {
             "--profile".into(),
             root.join("tests/fixtures/profiles/minimal.toml")
                 .into_os_string(),
+            "--catalog-trust-policy".into(),
+            root.join("tests/fixtures/catalog-trust.toml")
+                .into_os_string(),
             "--output".into(),
             output_root.as_os_str().into(),
             "--rustc".into(),
@@ -198,6 +204,9 @@ fn profile_cli_preserves_symlink_provenance_and_fails_before_tools() {
             root.as_os_str().into(),
             "--profile".into(),
             linked_profile.as_os_str().into(),
+            "--catalog-trust-policy".into(),
+            root.join("tests/fixtures/catalog-trust.toml")
+                .into_os_string(),
             "--output".into(),
             output_root.as_os_str().into(),
             "--rustc".into(),
@@ -242,6 +251,9 @@ fn composition_and_integration_cli_preserve_root_symlink_provenance() {
             root.as_os_str().into(),
             "--profile".into(),
             root.join("tests/fixtures/profiles/minimal.toml")
+                .into_os_string(),
+            "--catalog-trust-policy".into(),
+            root.join("tests/fixtures/catalog-trust.toml")
                 .into_os_string(),
             "--output".into(),
             compositions.as_os_str().into(),
@@ -363,6 +375,9 @@ fn compose_build_inspect_emit_verify_end_to_end() {
             root.as_os_str().into(),
             "--profile".into(),
             root.join("tests/fixtures/profiles/minimal.toml")
+                .into_os_string(),
+            "--catalog-trust-policy".into(),
+            root.join("tests/fixtures/catalog-trust.toml")
                 .into_os_string(),
             "--output".into(),
             compositions.as_os_str().into(),
@@ -492,6 +507,9 @@ fn javascript_wasm_compose_build_and_inspect_end_to_end() {
             root.as_os_str().into(),
             "--profile".into(),
             root.join("tests/fixtures/profiles/wasm-js.toml")
+                .into_os_string(),
+            "--catalog-trust-policy".into(),
+            root.join("tests/fixtures/catalog-trust.toml")
                 .into_os_string(),
             "--output".into(),
             compositions.as_os_str().into(),

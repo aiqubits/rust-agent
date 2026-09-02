@@ -1,0 +1,5 @@
+schema = 1
+
+[reviewer-policies.phase-1a-fixture-review-v1]
+evidence-schema = 1
+rule-sets = ["phase-1a-independent-v1", "phase-1a-shared-handle-v1"]

@@ -15,7 +15,7 @@ targets = ["cfg(true)"]
 support = "production"
 primitives = []
 security = []
-app-coexistence = { mode = "requires-stop" }
+app-coexistence = { mode = "concurrent-independent", evidence = { source = "coexistence-evidence.toml", algorithm = "sha256", digest = "0b037cd6be4a6c7b558f75fcb370fb3485114e7beab7fd8971b2073208dce86d", reviewer-policy = "phase-1a-fixture-review-v1" } }
 build-requirements = { executables = [], read-inputs = [], environment = [] }
 
 [features]

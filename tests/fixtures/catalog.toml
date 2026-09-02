@@ -56,7 +56,7 @@ conflicts = []
 security = []
 runtime-primitives = []
 build-requirements = { executables = [], read-inputs = [], environment = [] }
-app-coexistence = { mode = "requires-stop" }
+app-coexistence = { mode = "concurrent-independent", evidence = { source = "coexistence-evidence.toml", algorithm = "sha256", digest = "e18440d1ed7261351fdea403322f6568d78edbe4fbd04c9f873cabf62840cbd6", reviewer-policy = "phase-1a-fixture-review-v1" } }
 cargo-features = []
 
 [[components]]
@@ -98,7 +98,7 @@ conflicts = []
 security = []
 runtime-primitives = []
 build-requirements = { executables = [], read-inputs = [], environment = [] }
-app-coexistence = { mode = "requires-stop" }
+app-coexistence = { mode = "concurrent-independent", evidence = { source = "coexistence-evidence.toml", algorithm = "sha256", digest = "708938236a72e999075c6a75a37a32cf249039e7cf206d52f7e1d4a05a405c14", reviewer-policy = "phase-1a-fixture-review-v1" } }
 cargo-features = []
 
 [[components]]
@@ -152,7 +152,7 @@ targets = "cfg(true)"
 support = "production"
 primitives = []
 security = []
-app-coexistence = { mode = "requires-stop" }
+app-coexistence = { mode = "concurrent-independent", evidence = { source = "coexistence-evidence.toml", algorithm = "sha256", digest = "0b037cd6be4a6c7b558f75fcb370fb3485114e7beab7fd8971b2073208dce86d", reviewer-policy = "phase-1a-fixture-review-v1" } }
 build-requirements = { executables = [], read-inputs = [], environment = [] }
 
 [[host-boundaries]]

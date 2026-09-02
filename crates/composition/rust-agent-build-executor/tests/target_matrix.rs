@@ -43,6 +43,7 @@ fn product_neutral_library_compile_matrix() {
         let generated = compose(&ComposeOptions {
             workspace_root: root.clone(),
             profile_path: root.join("tests/fixtures/profiles").join(profile),
+            catalog_trust_policy_path: root.join("tests/fixtures/catalog-trust.toml"),
             output_root: temp.path().join("compositions"),
             rustc_path: rustc.clone(),
             cargo_path: cargo.clone(),

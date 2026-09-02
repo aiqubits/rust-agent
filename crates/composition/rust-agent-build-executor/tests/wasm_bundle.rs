@@ -110,6 +110,7 @@ fn javascript_wasm_bundle_is_closed_verified_and_executable_end_to_end() {
     let generated = compose(&ComposeOptions {
         workspace_root: root.clone(),
         profile_path: root.join("tests/fixtures/profiles/wasm-js.toml"),
+        catalog_trust_policy_path: root.join("tests/fixtures/catalog-trust.toml"),
         output_root: temp.path().join("compositions"),
         rustc_path: rustc.clone(),
         cargo_path: cargo.clone(),

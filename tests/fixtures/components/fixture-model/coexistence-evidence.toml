@@ -1,0 +1,6 @@
+schema = 1
+owner = "fixture-model"
+mode = "concurrent-independent"
+rule-set = "phase-1a-independent-v1"
+claims = ["boundary-config", "different-config", "identical-config", "independent-real-resources", "two-app-in-process"]
+tests = ["rust_agent_fixture_model::tests::two_instances_are_independent_for_identical_different_and_boundary_configs"]

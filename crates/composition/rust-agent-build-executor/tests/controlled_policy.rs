@@ -51,6 +51,7 @@ fn build_requirements_need_exact_policy_kind_but_never_expand_runtime_effects() 
     let generated = compose(&ComposeOptions {
         workspace_root: root.clone(),
         profile_path: root.join("tests/fixtures/profiles/controlled-build.toml"),
+        catalog_trust_policy_path: root.join("tests/fixtures/catalog-trust.toml"),
         output_root: temp.path().join("compositions"),
         rustc_path: rustc.clone(),
         cargo_path: cargo.clone(),
@@ -132,6 +133,7 @@ fn development_build_rejects_ancestor_cargo_config_before_cargo_side_effects() {
     let generated = compose(&ComposeOptions {
         workspace_root: root.clone(),
         profile_path: root.join("tests/fixtures/profiles/minimal.toml"),
+        catalog_trust_policy_path: root.join("tests/fixtures/catalog-trust.toml"),
         output_root: temp.path().join("compositions"),
         rustc_path: rustc.clone(),
         cargo_path: cargo,
@@ -189,6 +191,7 @@ fn development_build_rejects_noncanonical_and_duplicate_composition_manifests_be
     let generated = compose(&ComposeOptions {
         workspace_root: root.clone(),
         profile_path: root.join("tests/fixtures/profiles/minimal.toml"),
+        catalog_trust_policy_path: root.join("tests/fixtures/catalog-trust.toml"),
         output_root: temp.path().join("compositions"),
         rustc_path: rustc.clone(),
         cargo_path: cargo,

@@ -31,6 +31,9 @@ enum Command {
         workspace: PathBuf,
         #[arg(long)]
         profile: PathBuf,
+        /// Schema-owned allowlist for App coexistence evidence reviewers and rule sets.
+        #[arg(long)]
+        catalog_trust_policy: PathBuf,
         #[arg(long)]
         output: PathBuf,
         #[arg(long)]
@@ -101,6 +104,7 @@ fn main() -> Result<()> {
         Command::Compose {
             workspace,
             profile,
+            catalog_trust_policy,
             output,
             rustc,
             cargo,
@@ -113,6 +117,7 @@ fn main() -> Result<()> {
                 // symlink provenance instead of receiving an already-resolved
                 // path. The canonical workspace above remains the trust root.
                 profile_path: absolute_output(&profile)?,
+                catalog_trust_policy_path: absolute_output(&catalog_trust_policy)?,
                 output_root: absolute_output(&output)?,
                 rustc_path: canonical_existing(&rustc)?,
                 cargo_path: canonical_existing(&cargo)?,

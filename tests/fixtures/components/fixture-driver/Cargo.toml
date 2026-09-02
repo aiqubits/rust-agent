@@ -24,7 +24,7 @@ conflicts = []
 security = []
 runtime-primitives = []
 build-requirements = { executables = [], read-inputs = [], environment = [] }
-app-coexistence = { mode = "requires-stop" }
+app-coexistence = { mode = "concurrent-independent", evidence = { source = "coexistence-evidence.toml", algorithm = "sha256", digest = "708938236a72e999075c6a75a37a32cf249039e7cf206d52f7e1d4a05a405c14", reviewer-policy = "phase-1a-fixture-review-v1" } }
 cargo-features = []
 
 [features]

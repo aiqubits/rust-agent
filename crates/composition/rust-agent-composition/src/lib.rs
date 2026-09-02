@@ -3,6 +3,7 @@
 pub mod canonical;
 pub mod cargo_context;
 pub mod catalog;
+pub mod catalog_trust;
 pub mod custom_target;
 pub mod diagnostics;
 mod discovery;
@@ -18,6 +19,7 @@ pub mod toolchain;
 
 pub use cargo_context::{CargoConfigIsolationError, verify_cargo_config_isolation};
 pub use catalog::{CatalogError, NormalizedCatalog};
+pub use catalog_trust::{CatalogTrustError, CatalogTrustInputCommitment};
 pub use custom_target::{
     CustomTargetSnapshotObservation, CustomTargetSpecError, CustomTargetSpecRecord,
     MAX_CUSTOM_TARGET_SPEC_BYTES, verify_custom_target_snapshot,

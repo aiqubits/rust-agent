@@ -12,6 +12,7 @@ use crate::target::MAX_TARGET_PREDICATE_PARTITIONS;
 
 pub const MAX_CATALOG_DOCUMENT_BYTES: usize = 1024 * 1024;
 pub const MAX_CATALOG_OWNERS: usize = 256;
+pub const MAX_CATALOG_TRUST_POLICY_BYTES: usize = 64 * 1024;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum CatalogResourceBoundsError {
@@ -382,12 +383,33 @@ pub enum HostBoundaryKind {
     WasmExport,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct CatalogTrustPolicy {
     pub schema: u32,
     #[serde(default, rename = "reviewer-policies")]
-    pub reviewer_policies: BTreeMap<String, BTreeSet<String>>,
+    pub reviewer_policies: BTreeMap<String, CatalogReviewerPolicy>,
+}
+
+impl CatalogTrustPolicy {
+    pub fn from_toml(input: &str) -> Result<Self, toml::de::Error> {
+        if input.len() > MAX_CATALOG_TRUST_POLICY_BYTES {
+            return Err(<toml::de::Error as de::Error>::custom(format!(
+                "catalog trust policy has {} bytes; maximum is {MAX_CATALOG_TRUST_POLICY_BYTES}",
+                input.len()
+            )));
+        }
+        toml::from_str(input)
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct CatalogReviewerPolicy {
+    #[serde(rename = "evidence-schema")]
+    pub evidence_schema: u32,
+    #[serde(rename = "rule-sets")]
+    pub rule_sets: BTreeSet<String>,
 }
 
 fn deserialize_target_support_entries<'de, D>(
@@ -476,5 +498,16 @@ scope = "app"
         let capabilities = direct_json["capabilities"].as_array_mut().unwrap();
         capabilities.push(capabilities[0].clone());
         assert!(serde_json::from_value::<CatalogDocument>(direct_json).is_err());
+    }
+
+    #[test]
+    fn catalog_trust_policy_input_bytes_are_bounded() {
+        let prefix = "schema = 1\n";
+        let exact = format!(
+            "{prefix}{}",
+            " ".repeat(MAX_CATALOG_TRUST_POLICY_BYTES - prefix.len())
+        );
+        CatalogTrustPolicy::from_toml(&exact).unwrap();
+        assert!(CatalogTrustPolicy::from_toml(&format!("{exact} ")).is_err());
     }
 }

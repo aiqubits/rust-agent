@@ -1,0 +1,6 @@
+schema = 1
+owner = "fixture-driver"
+mode = "concurrent-independent"
+rule-set = "phase-1a-independent-v1"
+claims = ["boundary-config", "different-config", "identical-config", "independent-real-resources", "two-app-in-process"]
+tests = ["rust_agent_fixture_driver::tests::two_instances_keep_independent_config_and_dependency_ownership"]

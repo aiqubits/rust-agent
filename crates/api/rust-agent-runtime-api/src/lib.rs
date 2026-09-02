@@ -7,6 +7,43 @@ pub use rust_agent_core::{
     CompositionHash, Digest, SessionId,
 };
 
+/// Host-owned resource wrapper used by audited shared-handle App Components.
+///
+/// Clones preserve a private wrapper identity. Constructing a second wrapper,
+/// even around the same service `Arc`, intentionally creates a different
+/// identity so a Host cannot substitute a reopen for a handoff.
+#[derive(Clone)]
+pub struct SharedHostHandle<T: ?Sized> {
+    inner: Arc<T>,
+    identity: Arc<SharedHostHandleIdentity>,
+}
+
+#[derive(Debug)]
+struct SharedHostHandleIdentity;
+
+impl<T: ?Sized> SharedHostHandle<T> {
+    pub fn new(inner: Arc<T>) -> Self {
+        Self {
+            inner,
+            identity: Arc::new(SharedHostHandleIdentity),
+        }
+    }
+
+    pub fn service(&self) -> Arc<T> {
+        Arc::clone(&self.inner)
+    }
+
+    pub fn same_identity(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.identity, &other.identity)
+    }
+}
+
+impl<T: ?Sized> fmt::Debug for SharedHostHandle<T> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("SharedHostHandle(<opaque>)")
+    }
+}
+
 /// Opaque identity of the runtime adapter that created a primitive bundle.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RuntimeAdapterIdentity(Arc<str>);
@@ -29,15 +66,26 @@ impl RuntimeAdapterIdentity {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RuntimePrimitives {
     adapter: RuntimeAdapterIdentity,
+    bundle_identity: Arc<RuntimePrimitiveBundleIdentity>,
 }
+
+#[derive(Debug, Eq, PartialEq)]
+struct RuntimePrimitiveBundleIdentity;
 
 impl RuntimePrimitives {
     pub fn new(adapter: RuntimeAdapterIdentity) -> Self {
-        Self { adapter }
+        Self {
+            adapter,
+            bundle_identity: Arc::new(RuntimePrimitiveBundleIdentity),
+        }
     }
 
     pub fn adapter(&self) -> &RuntimeAdapterIdentity {
         &self.adapter
+    }
+
+    pub fn same_bundle_identity(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.bundle_identity, &other.bundle_identity)
     }
 }
 
@@ -369,6 +417,19 @@ mod tests {
         let identity = RuntimeAdapterIdentity::checked("fixture-runtime").unwrap();
         let runtime = RuntimePrimitives::new(identity);
         assert_eq!(runtime.adapter().as_str(), "fixture-runtime");
+    }
+
+    #[test]
+    fn shared_host_handle_identity_survives_clone_but_not_rewrap() {
+        let service = Arc::new(String::from("host-owned"));
+        let first = SharedHostHandle::new(Arc::clone(&service));
+        let clone = first.clone();
+        let second_wrapper = SharedHostHandle::new(service);
+
+        assert!(first.same_identity(&clone));
+        assert!(!first.same_identity(&second_wrapper));
+        assert_eq!(first.service().as_str(), "host-owned");
+        assert_eq!(format!("{first:?}"), "SharedHostHandle(<opaque>)");
     }
 
     #[test]

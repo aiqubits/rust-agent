@@ -322,6 +322,7 @@ fn external_shared_target_feature_union_is_observed_and_accounted_end_to_end() {
     let without_registry = compose(&ComposeOptions {
         workspace_root: root.clone(),
         profile_path: root.join("tests/fixtures/profiles/controlled-build.toml"),
+        catalog_trust_policy_path: root.join("tests/fixtures/catalog-trust.toml"),
         output_root: temp.path().join("missing-registry-compositions"),
         rustc_path: rustc.clone(),
         cargo_path: cargo.clone(),
@@ -336,6 +337,7 @@ fn external_shared_target_feature_union_is_observed_and_accounted_end_to_end() {
     let generated = compose(&ComposeOptions {
         workspace_root: root.clone(),
         profile_path: root.join("tests/fixtures/profiles/controlled-build.toml"),
+        catalog_trust_policy_path: root.join("tests/fixtures/catalog-trust.toml"),
         output_root: temp.path().join("compositions"),
         rustc_path: rustc.clone(),
         cargo_path: cargo.clone(),

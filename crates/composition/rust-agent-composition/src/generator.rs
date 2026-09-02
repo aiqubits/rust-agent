@@ -28,6 +28,10 @@ use crate::{
         verify_cargo_config_isolation,
     },
     catalog::{CatalogError, NormalizedCatalog},
+    catalog_trust::{
+        CatalogEvidenceOwner, CatalogTrustError, CatalogTrustInputCommitment, EvidenceOwnerKind,
+        MAX_COEXISTENCE_EVIDENCE_BYTES, MAX_TOTAL_COEXISTENCE_EVIDENCE_BYTES, evidence_requests,
+    },
     custom_target::{
         CustomTargetSpecError, CustomTargetSpecRecord, MAX_CUSTOM_TARGET_SPEC_BYTES,
         verify_custom_target_snapshot,
@@ -38,7 +42,9 @@ use crate::{
         CargoResolutionRecord, CompositionIdentityPayload, CompositionManifest,
         GeneratedFileRecord, SecurityManifest, SourcePackageRecord,
     },
-    metadata::{BuildRequirements, HostBoundaryKind},
+    metadata::{
+        BuildRequirements, CatalogTrustPolicy, HostBoundaryKind, MAX_CATALOG_TRUST_POLICY_BYTES,
+    },
     profile::{BuildKind, CompositionProfile, MAX_PROFILE_DOCUMENT_BYTES},
     resolver::{ResolutionError, resolve},
     snapshot::{
@@ -69,6 +75,7 @@ enum CompositionTreeEntryKind {
 pub struct ComposeOptions {
     pub workspace_root: PathBuf,
     pub profile_path: PathBuf,
+    pub catalog_trust_policy_path: PathBuf,
     pub output_root: PathBuf,
     pub rustc_path: PathBuf,
     pub cargo_path: PathBuf,
@@ -101,8 +108,12 @@ pub enum ComposeError {
     Discovery(#[from] DiscoveryError),
     #[error("profile TOML is invalid: {0}")]
     ProfileToml(#[source] toml::de::Error),
+    #[error("catalog trust-policy TOML is invalid: {0}")]
+    CatalogTrustToml(#[source] toml::de::Error),
     #[error("catalog is invalid: {0}")]
     Catalog(#[from] CatalogError),
+    #[error("catalog trust input is invalid: {0}")]
+    CatalogTrust(#[from] CatalogTrustError),
     #[error("target is invalid: {0}")]
     Target(#[from] TargetError),
     #[error("compose rustc provenance is invalid: {0}")]
@@ -156,6 +167,19 @@ pub fn compose(options: &ComposeOptions) -> Result<GeneratedComposition, Compose
             }
         })?)
         .map_err(ComposeError::ProfileToml)?;
+    let catalog_trust_policy_bytes = read_workspace_input(
+        &options.workspace_root,
+        &options.catalog_trust_policy_path,
+        MAX_CATALOG_TRUST_POLICY_BYTES,
+    )?;
+    let catalog_trust_policy =
+        CatalogTrustPolicy::from_toml(std::str::from_utf8(&catalog_trust_policy_bytes).map_err(
+            |error| ComposeError::ManifestNormalization {
+                path: options.catalog_trust_policy_path.display().to_string(),
+                message: error.to_string(),
+            },
+        )?)
+        .map_err(ComposeError::CatalogTrustToml)?;
     if !matches!(profile.build_kind, BuildKind::Library | BuildKind::Wasm) {
         return Err(ComposeError::UnsupportedPhase1A(format!(
             "{:?}",
@@ -245,7 +269,11 @@ pub fn compose(options: &ComposeOptions) -> Result<GeneratedComposition, Compose
         } = discovered?;
         validate_mandatory_root_build_requirements(&root_build_requirements)?;
         let catalog = NormalizedCatalog::normalize(document)?;
-        let generator_inputs = GeneratorInputCommitment::new(&catalog, &root_build_requirements)?;
+        let evidence_bytes = read_catalog_evidence(&options.workspace_root, &catalog)?;
+        let catalog_trust_input =
+            CatalogTrustInputCommitment::new(&catalog, &catalog_trust_policy, evidence_bytes)?;
+        let generator_inputs =
+            GeneratorInputCommitment::new(&catalog, catalog_trust_input, &root_build_requirements)?;
         let resolution = resolve(&catalog, &profile, &target)?;
         let package_inputs =
             selected_packages(&options.workspace_root, &catalog, &resolution, &target)?;
@@ -318,6 +346,11 @@ fn compose_in_staging(
         )?);
     }
     sources.sort_by(|left, right| left.id.cmp(&right.id));
+    verify_selected_catalog_evidence(
+        &source_root,
+        resolution,
+        &generator_inputs.catalog_trust_input,
+    )?;
 
     fs::create_dir_all(staging.join("src"))?;
     fs::create_dir_all(staging.join(".cargo"))?;
@@ -629,6 +662,89 @@ fn build_requirement_union(
         union.merge_from(requirements);
     }
     union
+}
+
+fn read_catalog_evidence(
+    workspace_root: &Path,
+    catalog: &NormalizedCatalog,
+) -> Result<BTreeMap<CatalogEvidenceOwner, Vec<u8>>, ComposeError> {
+    let mut result = BTreeMap::new();
+    let mut aggregate_bytes = 0_usize;
+    for request in evidence_requests(catalog) {
+        let path = workspace_root
+            .join(&request.package_path)
+            .join(&request.evidence.source);
+        let bytes = read_workspace_input(workspace_root, &path, MAX_COEXISTENCE_EVIDENCE_BYTES)?;
+        aggregate_bytes = aggregate_bytes.checked_add(bytes.len()).ok_or_else(|| {
+            CatalogTrustError::InvalidEvidence("aggregate evidence byte count overflowed".into())
+        })?;
+        if aggregate_bytes > MAX_TOTAL_COEXISTENCE_EVIDENCE_BYTES {
+            return Err(CatalogTrustError::InvalidEvidence(format!(
+                "aggregate evidence exceeds {MAX_TOTAL_COEXISTENCE_EVIDENCE_BYTES} bytes"
+            ))
+            .into());
+        }
+        if result.insert(request.owner.clone(), bytes).is_some() {
+            return Err(CatalogTrustError::InvalidEvidence(format!(
+                "duplicate evidence owner {}:{}",
+                match request.owner.kind {
+                    EvidenceOwnerKind::Component => "component",
+                    EvidenceOwnerKind::RuntimeAdapter => "runtime-adapter",
+                },
+                request.owner.id
+            ))
+            .into());
+        }
+    }
+    Ok(result)
+}
+
+fn verify_selected_catalog_evidence(
+    source_root: &Path,
+    resolution: &crate::resolver::Resolution,
+    trust: &CatalogTrustInputCommitment,
+) -> Result<(), ComposeError> {
+    for record in &trust.evidence {
+        let selected = match record.owner_kind {
+            EvidenceOwnerKind::Component => resolution
+                .selected_components
+                .binary_search(&record.owner)
+                .is_ok(),
+            EvidenceOwnerKind::RuntimeAdapter => record.owner == resolution.runtime_adapter,
+        };
+        if !selected {
+            continue;
+        }
+        let expected = trust
+            .evidence_bytes(record.owner_kind, &record.owner)?
+            .ok_or_else(|| {
+                CatalogTrustError::MissingEvidence(format!(
+                    "selected {}:{}",
+                    match record.owner_kind {
+                        EvidenceOwnerKind::Component => "component",
+                        EvidenceOwnerKind::RuntimeAdapter => "runtime-adapter",
+                    },
+                    record.owner
+                ))
+            })?;
+        let path = source_root.join(&record.package_path).join(&record.source);
+        let actual = read_composition_regular_file_bounded(
+            &path,
+            MAX_COEXISTENCE_EVIDENCE_BYTES as u64,
+            Some(expected.len() as u64),
+        )?;
+        if actual != expected {
+            return Err(ComposeError::Verification(format!(
+                "selected coexistence evidence differs from its catalog trust commitment for {}:{}",
+                match record.owner_kind {
+                    EvidenceOwnerKind::Component => "component",
+                    EvidenceOwnerKind::RuntimeAdapter => "runtime-adapter",
+                },
+                record.owner
+            )));
+        }
+    }
+    Ok(())
 }
 
 pub fn load_manifest(path: &Path) -> Result<CompositionManifest, ComposeError> {
@@ -1053,6 +1169,11 @@ fn verify_composition_with_location_policy(
             "source package closure differs from the committed catalog and resolution".into(),
         ));
     }
+    verify_selected_catalog_evidence(
+        &path.join("sources"),
+        &rederived_resolution,
+        &manifest.generator_inputs.catalog_trust_input,
+    )?;
 
     let mut expected_tree = BTreeMap::new();
     for directory in [".cargo", "sources", "src", "vendor"] {
@@ -3675,6 +3796,7 @@ fn validate_options(options: &ComposeOptions) -> Result<(), ComposeError> {
     for path in [
         &options.workspace_root,
         &options.profile_path,
+        &options.catalog_trust_policy_path,
         &options.output_root,
         &options.rustc_path,
         &options.cargo_path,
@@ -4008,6 +4130,7 @@ mod tests {
             .unwrap();
         ComposeOptions {
             profile_path: root.join(profile),
+            catalog_trust_policy_path: root.join("tests/fixtures/catalog-trust.toml"),
             output_root: temp.path().join("compositions"),
             rustc_path: tool("rustc"),
             cargo_path: tool("cargo"),
@@ -4190,6 +4313,7 @@ mod tests {
             ComposeOptions {
                 workspace_root: workspace_root.to_owned(),
                 profile_path: workspace_root.join("tests/fixtures/profiles/minimal.toml"),
+                catalog_trust_policy_path: workspace_root.join("tests/fixtures/catalog-trust.toml"),
                 output_root: temp.join(output),
                 rustc_path: rustc,
                 cargo_path: cargo,
@@ -5496,6 +5620,74 @@ helper = { path = "../link" }
     }
 
     #[test]
+    fn selected_coexistence_evidence_is_reverified_from_the_source_snapshot() {
+        let temp = TempDir::new().unwrap();
+        let generated = compose(&options(&temp, "tests/fixtures/profiles/minimal.toml")).unwrap();
+        let record = generated
+            .manifest
+            .generator_inputs
+            .catalog_trust_input
+            .evidence
+            .iter()
+            .find(|record| record.owner == "fixture-model")
+            .unwrap();
+        let evidence_path = generated
+            .path
+            .join("sources")
+            .join(&record.package_path)
+            .join(&record.source);
+        make_staging_tree_owner_writable(&generated.path).unwrap();
+        let mut bytes = fs::read(&evidence_path).unwrap();
+        bytes[0] ^= 1;
+        fs::write(&evidence_path, bytes).unwrap();
+
+        assert!(matches!(
+            verify_composition(&generated.path),
+            Err(ComposeError::Verification(message))
+                if message.contains("selected coexistence evidence differs")
+        ));
+    }
+
+    #[test]
+    fn aggregate_handoff_requires_every_selected_app_owner_to_be_concurrent() {
+        let concurrent_temp = TempDir::new().unwrap();
+        let concurrent = compose(&options(
+            &concurrent_temp,
+            "tests/fixtures/profiles/minimal.toml",
+        ))
+        .unwrap();
+        assert_eq!(
+            concurrent.manifest.app_handoff,
+            crate::resolver::AppHandoff::Concurrent
+        );
+        let committed_owners = concurrent
+            .manifest
+            .generator_inputs
+            .catalog_trust_input
+            .evidence
+            .iter()
+            .map(|record| record.owner.as_str())
+            .collect::<BTreeSet<_>>();
+        assert!(committed_owners.contains("fixture-model"));
+        assert!(committed_owners.contains("fixture-driver"));
+        assert!(committed_owners.contains("fixture-runtime"));
+
+        let exclusive_temp = TempDir::new().unwrap();
+        let exclusive = compose(&options(
+            &exclusive_temp,
+            "tests/fixtures/profiles/with-fs.toml",
+        ))
+        .unwrap();
+        assert_eq!(
+            exclusive.manifest.app_handoff,
+            crate::resolver::AppHandoff::StopOldApp
+        );
+
+        make_staging_tree_owner_writable(&concurrent.path).unwrap();
+        make_staging_tree_owner_writable(&exclusive.path).unwrap();
+    }
+
+    #[test]
     fn composition_verification_rejects_deployable_and_handoff_projection_forgery() {
         let temp = TempDir::new().unwrap();
         let generated = compose(&options(&temp, "tests/fixtures/profiles/minimal.toml")).unwrap();
@@ -5512,7 +5704,7 @@ helper = { path = "../link" }
         ));
 
         manifest = original.clone();
-        manifest.app_handoff = crate::resolver::AppHandoff::Concurrent;
+        manifest.app_handoff = crate::resolver::AppHandoff::StopOldApp;
         write_json(&manifest_path, &manifest).unwrap();
         assert!(matches!(
             verify_composition(&generated.path),

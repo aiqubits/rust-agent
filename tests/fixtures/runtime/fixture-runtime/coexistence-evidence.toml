@@ -1,0 +1,6 @@
+schema = 1
+owner = "fixture-runtime"
+mode = "concurrent-independent"
+rule-set = "phase-1a-independent-v1"
+claims = ["boundary-config", "different-config", "identical-config", "independent-real-resources", "two-app-in-process"]
+tests = ["rust_agent_fixture_runtime::tests::two_runtime_bundles_are_independently_owned"]

@@ -161,6 +161,7 @@ fn custom_target_development_preflight_uses_the_snapshot_and_stops_mismatch_befo
     let generated = compose(&ComposeOptions {
         workspace_root: workspace.clone(),
         profile_path: workspace.join("tests/fixtures/profiles/minimal.toml"),
+        catalog_trust_policy_path: workspace.join("tests/fixtures/catalog-trust.toml"),
         output_root: temp.path().join("compositions"),
         rustc_path: rustc.clone(),
         cargo_path: cargo.clone(),
@@ -228,6 +229,7 @@ fn custom_target_development_cargo_prioritizes_snapshot_drift_over_child_failure
     let generated = compose(&ComposeOptions {
         workspace_root: workspace.clone(),
         profile_path: workspace.join("tests/fixtures/profiles/minimal.toml"),
+        catalog_trust_policy_path: workspace.join("tests/fixtures/catalog-trust.toml"),
         output_root: temp.path().join("compositions"),
         rustc_path: rustc.clone(),
         cargo_path: cargo.clone(),

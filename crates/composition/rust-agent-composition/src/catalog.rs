@@ -697,6 +697,30 @@ fn validate_coexistence(
                     "shared-host-handle needs at least one field".into(),
                 ));
             }
+            let mut unique_fields = BTreeSet::new();
+            for path in host_config_fields {
+                let Some((component, field)) = path.split_once('.') else {
+                    return Err(CatalogError::InvalidAppCoexistence(
+                        owner.to_owned(),
+                        format!("shared-host-handle field `{path}` must use `<component>.<field>`"),
+                    ));
+                };
+                if component != owner
+                    || field.contains('.')
+                    || validate_rust_field(owner, field).is_err()
+                {
+                    return Err(CatalogError::InvalidAppCoexistence(
+                        owner.to_owned(),
+                        format!("shared-host-handle field `{path}` must name a field on `{owner}`"),
+                    ));
+                }
+                if !unique_fields.insert(path) {
+                    return Err(CatalogError::InvalidAppCoexistence(
+                        owner.to_owned(),
+                        format!("duplicate shared-host-handle field `{path}`"),
+                    ));
+                }
+            }
             validate_evidence(owner, evidence)
         }
     }
@@ -1228,6 +1252,34 @@ provides = [{ capability = "cap:model", priority = 1, effects = [] }]
         assert!(
             NormalizedCatalog::normalize(CatalogDocument::from_toml(&shorter).unwrap()).is_err()
         );
+    }
+
+    #[test]
+    fn shared_host_handle_fields_are_nonempty_unique_and_owner_bound() {
+        let shared = BASE
+            .replace(
+                "config-source = \"none\"",
+                "config-source = \"host\"\nconfig-key = \"model\"",
+            )
+            .replace(
+                "app-coexistence = { mode = \"requires-stop\" }",
+                "app-coexistence = { mode = \"concurrent-shared-host-handle\", host-config-fields = [\"model.shared\"], evidence = { source = \"coexistence.toml\", algorithm = \"sha256\", digest = \"0000000000000000000000000000000000000000000000000000000000000000\", reviewer-policy = \"fixture-review-v1\" } }",
+            );
+        NormalizedCatalog::normalize(CatalogDocument::from_toml(&shared).unwrap()).unwrap();
+
+        for fields in [
+            "[]",
+            "[\"model.shared\", \"model.shared\"]",
+            "[\"other.shared\"]",
+            "[\"model.shared.nested\"]",
+            "[\"shared\"]",
+        ] {
+            let invalid = shared.replace("[\"model.shared\"]", fields);
+            assert!(matches!(
+                NormalizedCatalog::normalize(CatalogDocument::from_toml(&invalid).unwrap()),
+                Err(CatalogError::InvalidAppCoexistence(_, _))
+            ));
+        }
     }
 
     fn namespace_catalog() -> String {

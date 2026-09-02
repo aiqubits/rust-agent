@@ -6,15 +6,16 @@ use thiserror::Error;
 use crate::{
     canonical::{self, CanonicalError},
     catalog::{CatalogError, NormalizedCatalog, validate_build_requirements},
+    catalog_trust::{CatalogTrustError, CatalogTrustInputCommitment},
     metadata::{
         BuildRequirements, CatalogDocument, CatalogResourceBoundsError, MAX_CATALOG_OWNERS,
     },
 };
 
-pub const GENERATOR_INPUT_SCHEMA: u32 = 1;
+pub const GENERATOR_INPUT_SCHEMA: u32 = 2;
 
 const NORMALIZED_CATALOG_IDENTITY_DOMAIN: &[u8] = b"rust-agent-normalized-catalog-v1\0";
-const GENERATOR_INPUT_IDENTITY_DOMAIN: &[u8] = b"rust-agent-generator-input-v1\0";
+const GENERATOR_INPUT_IDENTITY_DOMAIN: &[u8] = b"rust-agent-generator-input-v2\0";
 const PHASE_1A_MANDATORY_ROOT_PACKAGES: [&str; 2] = ["rust-agent-core", "rust-agent-runtime-api"];
 const MAX_GENERATOR_ROOT_BUILD_REQUIREMENTS: usize = MAX_CATALOG_OWNERS + 2;
 
@@ -25,6 +26,8 @@ pub struct GeneratorInputCommitment {
     pub normalized_catalog: CatalogDocument,
     #[serde(rename = "normalized-catalog-digest")]
     pub normalized_catalog_digest: String,
+    #[serde(rename = "catalog-trust-input")]
+    pub catalog_trust_input: CatalogTrustInputCommitment,
     #[serde(rename = "root-build-requirements")]
     pub root_build_requirements: BTreeMap<String, BuildRequirements>,
     #[serde(rename = "identity-digest")]
@@ -39,6 +42,8 @@ struct UncheckedGeneratorInputCommitment {
     normalized_catalog: CatalogDocument,
     #[serde(rename = "normalized-catalog-digest")]
     normalized_catalog_digest: String,
+    #[serde(rename = "catalog-trust-input")]
+    catalog_trust_input: CatalogTrustInputCommitment,
     #[serde(rename = "root-build-requirements")]
     root_build_requirements: BTreeMap<String, BuildRequirements>,
     #[serde(rename = "identity-digest")]
@@ -52,18 +57,22 @@ struct GeneratorInputIdentityPayload<'a> {
     normalized_catalog: &'a CatalogDocument,
     #[serde(rename = "normalized-catalog-digest")]
     normalized_catalog_digest: &'a str,
+    #[serde(rename = "catalog-trust-input")]
+    catalog_trust_input: &'a CatalogTrustInputCommitment,
     #[serde(rename = "root-build-requirements")]
     root_build_requirements: &'a BTreeMap<String, BuildRequirements>,
 }
 
 #[derive(Debug, Error)]
 pub enum GeneratorInputError {
-    #[error("unsupported generator-input schema {0}; expected 1")]
+    #[error("unsupported generator-input schema {0}; expected 2")]
     UnsupportedSchema(u32),
     #[error("generator-input record is invalid: {0}")]
     InvalidRecord(String),
     #[error("normalized catalog is invalid: {0}")]
     Catalog(#[from] CatalogError),
+    #[error("catalog trust input is invalid: {0}")]
+    CatalogTrust(#[from] CatalogTrustError),
     #[error("generator-input canonical encoding failed: {0}")]
     Canonical(#[from] CanonicalError),
 }
@@ -78,6 +87,7 @@ impl<'de> Deserialize<'de> for GeneratorInputCommitment {
             schema: unchecked.schema,
             normalized_catalog: unchecked.normalized_catalog,
             normalized_catalog_digest: unchecked.normalized_catalog_digest,
+            catalog_trust_input: unchecked.catalog_trust_input,
             root_build_requirements: unchecked.root_build_requirements,
             identity_digest: unchecked.identity_digest,
         };
@@ -89,6 +99,7 @@ impl<'de> Deserialize<'de> for GeneratorInputCommitment {
 impl GeneratorInputCommitment {
     pub(crate) fn new(
         catalog: &NormalizedCatalog,
+        catalog_trust_input: CatalogTrustInputCommitment,
         root_build_requirements: &BTreeMap<String, BuildRequirements>,
     ) -> Result<Self, GeneratorInputError> {
         let normalized_catalog = catalog.to_document();
@@ -97,6 +108,7 @@ impl GeneratorInputCommitment {
             schema: GENERATOR_INPUT_SCHEMA,
             normalized_catalog,
             normalized_catalog_digest,
+            catalog_trust_input,
             root_build_requirements: root_build_requirements.clone(),
             identity_digest: String::new(),
         };
@@ -131,6 +143,7 @@ impl GeneratorInputCommitment {
             ));
         }
         validate_exact_root_build_requirement_owners(&normalized, &self.root_build_requirements)?;
+        self.catalog_trust_input.validate(&normalized)?;
         let expected_catalog_digest = normalized_catalog_digest(&self.normalized_catalog)?;
         if !is_sha256(&self.normalized_catalog_digest)
             || self.normalized_catalog_digest != expected_catalog_digest
@@ -162,6 +175,7 @@ impl GeneratorInputCommitment {
                 schema: self.schema,
                 normalized_catalog: &self.normalized_catalog,
                 normalized_catalog_digest: &self.normalized_catalog_digest,
+                catalog_trust_input: &self.catalog_trust_input,
                 root_build_requirements: &self.root_build_requirements,
             },
         )?))
@@ -281,13 +295,29 @@ fn is_sha256(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::metadata::CatalogDocument;
+    use crate::catalog_trust::evidence_requests;
+    use crate::metadata::{CatalogDocument, CatalogTrustPolicy};
 
     fn fixture_record() -> GeneratorInputCommitment {
         let document =
             CatalogDocument::from_toml(include_str!("../../../../tests/fixtures/catalog.toml"))
                 .unwrap();
         let catalog = NormalizedCatalog::normalize(document).unwrap();
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../..")
+            .canonicalize()
+            .unwrap();
+        let evidence = evidence_requests(&catalog)
+            .into_iter()
+            .map(|request| {
+                let bytes = std::fs::read(
+                    root.join(&request.package_path)
+                        .join(&request.evidence.source),
+                )
+                .unwrap();
+                (request.owner, bytes)
+            })
+            .collect();
         let roots = BTreeMap::from([
             ("rust-agent-core".into(), BuildRequirements::default()),
             (
@@ -299,7 +329,16 @@ mod tests {
                 BuildRequirements::default(),
             ),
         ]);
-        GeneratorInputCommitment::new(&catalog, &roots).unwrap()
+        let trust = CatalogTrustInputCommitment::new(
+            &catalog,
+            &CatalogTrustPolicy::from_toml(include_str!(
+                "../../../../tests/fixtures/catalog-trust.toml"
+            ))
+            .unwrap(),
+            evidence,
+        )
+        .unwrap();
+        GeneratorInputCommitment::new(&catalog, trust, &roots).unwrap()
     }
 
     #[test]
