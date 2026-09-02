@@ -9,6 +9,7 @@ use crate::{
     resolver::{AppHandoff, Resolution},
     snapshot::CanonicalSnapshotEntry,
     target::{Target, TargetFactsRecord},
+    toolchain::ComposeRustcProvenance,
 };
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -62,6 +63,8 @@ pub struct CompositionIdentityPayload<'a> {
     pub target: &'a Target,
     #[serde(rename = "target-facts")]
     pub target_facts: &'a TargetFactsRecord,
+    #[serde(rename = "compose-rustc")]
+    pub compose_rustc: &'a ComposeRustcProvenance,
     #[serde(rename = "custom-target-spec")]
     pub custom_target_spec: Option<&'a CustomTargetSpecRecord>,
     pub resolution: &'a Resolution,
@@ -100,6 +103,8 @@ pub struct CompositionManifest {
     pub target_fact_digest: String,
     #[serde(rename = "target-facts")]
     pub target_facts: TargetFactsRecord,
+    #[serde(rename = "compose-rustc")]
+    pub compose_rustc: ComposeRustcProvenance,
     #[serde(rename = "custom-target-spec")]
     pub custom_target_spec: Option<CustomTargetSpecRecord>,
     #[serde(rename = "selected-components")]

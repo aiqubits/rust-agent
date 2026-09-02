@@ -13,6 +13,7 @@ pub mod profile;
 pub mod resolver;
 pub mod snapshot;
 pub mod target;
+pub mod toolchain;
 
 pub use cargo_context::{CargoConfigIsolationError, verify_cargo_config_isolation};
 pub use catalog::{CatalogError, NormalizedCatalog};
@@ -33,6 +34,9 @@ pub use metadata::CatalogDocument;
 pub use profile::CompositionProfile;
 pub use resolver::{Resolution, ResolutionError, resolve};
 pub use target::{Arch, Environment, Os, Target, TargetError};
+pub use toolchain::{
+    ComposeRustcError, ComposeRustcProvenance, RustcExecutableProvenance, RustcSysrootProvenance,
+};
 
 pub const WASM_BINDGEN_CLI_LOGICAL_ID: &str = "wasm-bindgen-cli";
 pub const WASM_BINDGEN_PROTOCOL_VERSION: &str = "0.2.127";

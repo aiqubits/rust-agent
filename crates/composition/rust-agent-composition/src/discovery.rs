@@ -1143,7 +1143,7 @@ mod tests {
     fn cargo_metadata_process_output_and_deadline_are_bounded() {
         let (root, workspace, working, cargo_home, config) = runner_fixture();
         let rustc = tool("rustc");
-        let cargo = root.path().join("fake-cargo");
+        let cargo = root.path().join("fake-cargo-valid");
         let invocation_log = root.path().join("invocation.log");
         write_executable(
             &cargo,
@@ -1188,11 +1188,15 @@ mod tests {
             .unwrap()
             .set_len(MAX_CARGO_METADATA_OUTPUT_BYTES as u64 + 1)
             .unwrap();
-        write_executable(&cargo, &format!("#!/bin/sh\nexec /bin/cat {payload:?}\n"));
+        let oversized_cargo = root.path().join("fake-cargo-oversized");
+        write_executable(
+            &oversized_cargo,
+            &format!("#!/bin/sh\nexec /bin/cat {payload:?}\n"),
+        );
         assert!(matches!(
             run_cargo_metadata(CargoMetadataInvocation {
                 workspace_root: &workspace,
-                cargo_path: &cargo,
+                cargo_path: &oversized_cargo,
                 rustc_path: &rustc,
                 working_directory: &working,
                 cargo_target_input: Path::new("x86_64-unknown-linux-gnu"),
@@ -1206,12 +1210,13 @@ mod tests {
             })
         ));
 
-        write_executable(&cargo, "#!/bin/sh\nexec /bin/sleep 5\n");
+        let timeout_cargo = root.path().join("fake-cargo-timeout");
+        write_executable(&timeout_cargo, "#!/bin/sh\nexec /bin/sleep 5\n");
         let started = Instant::now();
         assert!(matches!(
             run_cargo_metadata(CargoMetadataInvocation {
                 workspace_root: &workspace,
-                cargo_path: &cargo,
+                cargo_path: &timeout_cargo,
                 rustc_path: &rustc,
                 working_directory: &working,
                 cargo_target_input: Path::new("x86_64-unknown-linux-gnu"),

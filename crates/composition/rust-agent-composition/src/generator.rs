@@ -46,6 +46,7 @@ use crate::{
         MAX_CANONICAL_SNAPSHOT_JSON_BYTES, MAX_CANONICAL_SNAPSHOT_TOTAL_FILE_BYTES,
     },
     target::{MAX_CANONICAL_TARGET_FACTS_RECORD_BYTES, Target, TargetError, TargetFactsRecord},
+    toolchain::{ComposeRustcError, ComposeRustcSnapshot},
 };
 
 static STAGING_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -100,6 +101,8 @@ pub enum ComposeError {
     Catalog(#[from] CatalogError),
     #[error("target is invalid: {0}")]
     Target(#[from] TargetError),
+    #[error("compose rustc provenance is invalid: {0}")]
+    ComposeRustc(#[from] ComposeRustcError),
     #[error("custom target spec is invalid: {0}")]
     CustomTargetSpec(#[from] CustomTargetSpecError),
     #[error("composition cannot be resolved: {0}")]
@@ -158,20 +161,25 @@ pub fn compose(options: &ComposeOptions) -> Result<GeneratedComposition, Compose
         .as_ref()
         .map(|path| prepare_custom_target_spec(&options.workspace_root, path, &profile.target))
         .transpose()?;
+    let compose_rustc = ComposeRustcSnapshot::capture(&options.rustc_path)?;
     fs::create_dir_all(&options.output_root)?;
     let staging = unique_staging(&options.output_root);
     fs::create_dir(&staging)?;
     let result = (|| {
         let target = if let Some(spec) = &custom_target_spec {
             materialize_custom_target_spec(staging.as_path(), spec)?;
-            Target::query_with_custom_spec(
+            let target = Target::query_with_custom_spec(
                 &options.rustc_path,
                 profile.environment,
                 &spec.record,
                 &staging.join(&spec.record.snapshot_path),
-            )?
+            );
+            compose_rustc.ensure_unchanged("rustc target-fact query")?;
+            target?
         } else {
-            Target::query(&options.rustc_path, &profile.target, profile.environment)?
+            let target = Target::query(&options.rustc_path, &profile.target, profile.environment);
+            compose_rustc.ensure_unchanged("rustc target-fact query")?;
+            target?
         };
         fs::create_dir_all(staging.join(".cargo"))?;
         let cargo_config = generate_cargo_config(
@@ -224,6 +232,7 @@ pub fn compose(options: &ComposeOptions) -> Result<GeneratedComposition, Compose
                 "Cargo metadata discovery changed the generated Cargo config".into(),
             ));
         }
+        compose_rustc.ensure_unchanged("Cargo metadata discovery")?;
         let DiscoveredCatalog {
             document,
             root_build_requirements,
@@ -243,12 +252,15 @@ pub fn compose(options: &ComposeOptions) -> Result<GeneratedComposition, Compose
             root_build_requirements: &root_build_requirements,
         };
         compose_in_staging(
-            options,
-            &composition_catalog,
-            &profile,
-            &target,
-            &resolution,
-            custom_target_spec.as_ref().map(|spec| &spec.record),
+            &StagingCompositionInputs {
+                options,
+                composition_catalog: &composition_catalog,
+                profile: &profile,
+                target: &target,
+                resolution: &resolution,
+                custom_target_spec: custom_target_spec.as_ref().map(|spec| &spec.record),
+                compose_rustc: &compose_rustc,
+            },
             &staging,
         )
     })();
@@ -259,18 +271,26 @@ pub fn compose(options: &ComposeOptions) -> Result<GeneratedComposition, Compose
 }
 
 fn compose_in_staging(
-    options: &ComposeOptions,
-    composition_catalog: &CompositionCatalog<'_>,
-    profile: &CompositionProfile,
-    target: &Target,
-    resolution: &crate::resolver::Resolution,
-    custom_target_spec: Option<&CustomTargetSpecRecord>,
+    inputs: &StagingCompositionInputs<'_>,
     staging: &Path,
 ) -> Result<GeneratedComposition, ComposeError> {
+    let &StagingCompositionInputs {
+        options,
+        composition_catalog,
+        profile,
+        target,
+        resolution,
+        custom_target_spec,
+        compose_rustc,
+    } = inputs;
     let catalog = composition_catalog.normalized;
     let root_build_requirements = composition_catalog.root_build_requirements;
     let target_facts = TargetFactsRecord::from_target(target)?;
     write_canonical_target_facts(&staging.join("target-facts.json"), &target_facts)?;
+    write_json(
+        &staging.join("compose-rustc.json"),
+        compose_rustc.provenance(),
+    )?;
 
     let source_root = staging.join("sources");
     fs::create_dir_all(&source_root)?;
@@ -309,7 +329,9 @@ fn compose_in_staging(
         "pub const COMPOSITION_HASH: &str = \"pending\";\n",
     )?;
 
-    generate_lockfile(options, staging, custom_target_spec)?;
+    let lockfile = generate_lockfile(options, staging, custom_target_spec);
+    compose_rustc.ensure_unchanged("Cargo lockfile generation")?;
+    lockfile?;
     let (registries, git_sources) = locked_cargo_sources(&staging.join("Cargo.lock"))?;
     let cargo_resolution = CargoResolutionRecord {
         schema: 1,
@@ -331,6 +353,7 @@ fn compose_in_staging(
     let mut generated_paths = vec![
         "Cargo.toml",
         "cargo-resolution.json",
+        "compose-rustc.json",
         "target-facts.json",
         ".cargo/config.toml",
         "src/lib.rs",
@@ -360,6 +383,7 @@ fn compose_in_staging(
         profile,
         target,
         target_facts: &target_facts,
+        compose_rustc: compose_rustc.provenance(),
         custom_target_spec,
         resolution,
         component_runtime_effects: &component_runtime_effects,
@@ -391,6 +415,7 @@ fn compose_in_staging(
         normalized_target: target.clone(),
         target_fact_digest: target.target_fact_digest.clone(),
         target_facts,
+        compose_rustc: compose_rustc.provenance().clone(),
         custom_target_spec: custom_target_spec.cloned(),
         selected_components: resolution.selected_components.clone(),
         runtime_adapter: resolution.runtime_adapter.clone(),
@@ -778,6 +803,32 @@ fn verify_composition_with_location_policy(
             "target-facts.json differs from the manifest target-facts record".into(),
         ));
     }
+    manifest.compose_rustc.validate().map_err(|error| {
+        ComposeError::Verification(format!("compose rustc provenance is invalid: {error}"))
+    })?;
+    let compose_rustc_bytes = read_composition_regular_file_bounded(
+        &path.join("compose-rustc.json"),
+        MAX_COMPOSITION_CONTROL_FILE_BYTES,
+        None,
+    )?;
+    let stored_compose_rustc =
+        serde_json::from_slice::<crate::toolchain::ComposeRustcProvenance>(&compose_rustc_bytes)
+            .map_err(|error| {
+                ComposeError::Verification(format!("compose-rustc.json is invalid: {error}"))
+            })?;
+    let expected_compose_rustc_bytes =
+        deterministic_json_bytes(&manifest.compose_rustc).map_err(|error| {
+            ComposeError::Verification(format!(
+                "compose rustc provenance deterministic encoding failed: {error}"
+            ))
+        })?;
+    if stored_compose_rustc != manifest.compose_rustc
+        || compose_rustc_bytes != expected_compose_rustc_bytes
+    {
+        return Err(ComposeError::Verification(
+            "compose-rustc.json drifted from its exact deterministic provenance".into(),
+        ));
+    }
     let mut runtime_effect_union = manifest.component_runtime_effects.clone();
     runtime_effect_union.extend(manifest.host_runtime_effects.iter().cloned());
     if runtime_effect_union != manifest.compiled_runtime_effects {
@@ -1036,6 +1087,7 @@ fn verify_composition_with_location_policy(
         profile: &manifest.normalized_profile,
         target: &manifest.normalized_target,
         target_facts: &manifest.target_facts,
+        compose_rustc: &manifest.compose_rustc,
         custom_target_spec: manifest.custom_target_spec.as_ref(),
         resolution: &manifest.resolution,
         component_runtime_effects: &manifest.component_runtime_effects,
@@ -1107,6 +1159,7 @@ fn expected_generated_file_paths(
         ".cargo/config.toml".into(),
         "Cargo.toml".into(),
         "cargo-resolution.json".into(),
+        "compose-rustc.json".into(),
         "target-facts.json".into(),
         "src/lib.rs".into(),
     ]);
@@ -1475,6 +1528,16 @@ struct PreparedCustomTargetSpec {
 struct CompositionCatalog<'a> {
     normalized: &'a NormalizedCatalog,
     root_build_requirements: &'a BTreeMap<String, BuildRequirements>,
+}
+
+struct StagingCompositionInputs<'a> {
+    options: &'a ComposeOptions,
+    composition_catalog: &'a CompositionCatalog<'a>,
+    profile: &'a CompositionProfile,
+    target: &'a Target,
+    resolution: &'a crate::resolver::Resolution,
+    custom_target_spec: Option<&'a CustomTargetSpecRecord>,
+    compose_rustc: &'a ComposeRustcSnapshot,
 }
 
 fn prepare_custom_target_spec(
@@ -3005,6 +3068,7 @@ mod tests {
             profile: &manifest.normalized_profile,
             target: &manifest.normalized_target,
             target_facts: &manifest.target_facts,
+            compose_rustc: &manifest.compose_rustc,
             custom_target_spec: manifest.custom_target_spec.as_ref(),
             resolution: &manifest.resolution,
             component_runtime_effects: &manifest.component_runtime_effects,
@@ -3060,18 +3124,43 @@ mod tests {
     }
 
     #[cfg(unix)]
-    fn custom_target_tools(temp: &Path) -> (PathBuf, PathBuf, PathBuf) {
-        let rustc = temp.join("fake-rustc");
-        let cargo = temp.join("fake-cargo");
-        let rustc_log = temp.join("rustc-args.log");
+    fn write_fake_rustc(temp: &Path, body: &str) -> (PathBuf, PathBuf) {
+        let sysroot = temp.join("fake-toolchain");
+        let rustc = sysroot.join("bin/rustc");
         let real_rustc = tool("rustc");
-        let real_cargo = tool("cargo");
+        fs::create_dir_all(sysroot.join("bin")).unwrap();
+        fs::create_dir_all(sysroot.join("lib/rustlib/fixture/lib")).unwrap();
+        fs::write(
+            sysroot.join("lib/rustlib/fixture/lib/libcore-fixture.rlib"),
+            b"fixture-sysroot-v1",
+        )
+        .unwrap();
         write_executable(
             &rustc,
             &format!(
                 concat!(
                     "#!/bin/sh\n",
                     "if [ \"$1\" = -vV ]; then exec {:?} \"$@\"; fi\n",
+                    "if [ \"$1 $2\" = \"--print sysroot\" ]; then printf '%s\\n' {:?}; exit 0; fi\n",
+                    "{}\n"
+                ),
+                real_rustc,
+                sysroot.display().to_string(),
+                body,
+            ),
+        );
+        (rustc, sysroot)
+    }
+
+    #[cfg(unix)]
+    fn custom_target_tools(temp: &Path) -> (PathBuf, PathBuf, PathBuf) {
+        let cargo = temp.join("fake-cargo");
+        let rustc_log = temp.join("rustc-args.log");
+        let real_cargo = tool("cargo");
+        let (rustc, _) = write_fake_rustc(
+            temp,
+            &format!(
+                concat!(
                     "IFS= read -r observed < \"$4\"\n",
                     "[ -n \"$observed\" ] || exit 41\n",
                     "printf 'rustc-args:%s\\nrustc-spec:%s\\n' \"$*\" \"$observed\" >> {:?}\n",
@@ -3079,9 +3168,9 @@ mod tests {
                     "'target_arch=\"x86_64\"' 'target_endian=\"little\"' ",
                     "'target_env=\"gnu\"' 'target_family=\"unix\"' ",
                     "'target_os=\"linux\"' 'target_pointer_width=\"64\"' ",
-                    "'target_vendor=\"unknown\"' 'unix'\n"
+                    "'target_vendor=\"unknown\"' 'unix'"
                 ),
-                real_rustc, rustc_log,
+                rustc_log,
             ),
         );
         write_executable(
@@ -3401,6 +3490,7 @@ mod tests {
             profile: &resealed.normalized_profile,
             target: &resealed.normalized_target,
             target_facts: &resealed.target_facts,
+            compose_rustc: &resealed.compose_rustc,
             custom_target_spec: resealed.custom_target_spec.as_ref(),
             resolution: &resealed.resolution,
             component_runtime_effects: &resealed.component_runtime_effects,
@@ -3598,10 +3688,9 @@ mod tests {
     #[test]
     fn invalid_target_facts_fail_before_cargo_side_effects() {
         let temp = TempDir::new().unwrap();
-        let rustc = temp.path().join("incomplete-rustc");
+        let (rustc, _) = write_fake_rustc(temp.path(), "printf '%s\\n' 'panic=\"unwind\"'");
         let cargo = temp.path().join("side-effect-cargo");
         let cargo_marker = temp.path().join("cargo-ran");
-        write_executable(&rustc, "#!/bin/sh\nprintf '%s\\n' 'panic=\"unwind\"'\n");
         write_executable(
             &cargo,
             &format!("#!/bin/sh\nprintf cargo-ran > {cargo_marker:?}\n"),
@@ -3616,6 +3705,133 @@ mod tests {
                 if message.contains("missing required scalar")
         ));
         assert!(!cargo_marker.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn compose_rustc_provenance_is_identity_bound_but_separate_from_target_facts() {
+        let temp = TempDir::new().unwrap();
+        let target_facts = concat!(
+            "printf '%s\\n' 'panic=\"unwind\"' 'target_abi=\"\"' ",
+            "'target_arch=\"x86_64\"' 'target_endian=\"little\"' ",
+            "'target_env=\"gnu\"' 'target_family=\"unix\"' ",
+            "'target_os=\"linux\"' 'target_pointer_width=\"64\"' ",
+            "'target_vendor=\"unknown\"' 'unix'",
+        );
+        let (rustc, sysroot) = write_fake_rustc(temp.path(), target_facts);
+        let mut first_options = options(&temp, "tests/fixtures/profiles/minimal.toml");
+        first_options.rustc_path = rustc.clone();
+        first_options.output_root = temp.path().join("first-compositions");
+        let first = compose(&first_options).unwrap();
+
+        fs::write(
+            sysroot.join("lib/rustlib/fixture/lib/libcore-fixture.rlib"),
+            b"fixture-sysroot-v2",
+        )
+        .unwrap();
+        let mut second_options = first_options.clone();
+        second_options.output_root = temp.path().join("second-compositions");
+        let second = compose(&second_options).unwrap();
+
+        assert_eq!(
+            first.manifest.target_fact_digest,
+            second.manifest.target_fact_digest
+        );
+        assert_eq!(
+            first.manifest.compose_rustc.rustc.sha256,
+            second.manifest.compose_rustc.rustc.sha256
+        );
+        assert_eq!(
+            first.manifest.compose_rustc.rustc.verbose_version,
+            second.manifest.compose_rustc.rustc.verbose_version
+        );
+        assert_ne!(
+            first.manifest.compose_rustc.sysroot.tree_digest,
+            second.manifest.compose_rustc.sysroot.tree_digest
+        );
+        assert_ne!(
+            first.manifest.compose_rustc.identity_digest,
+            second.manifest.compose_rustc.identity_digest
+        );
+        assert_ne!(first.composition_hash, second.composition_hash);
+        verify_composition(&first.path).unwrap();
+        verify_composition(&second.path).unwrap();
+        make_staging_tree_owner_writable(&first.path).unwrap();
+        make_staging_tree_owner_writable(&second.path).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn compose_rustc_drift_takes_priority_over_target_query_failure() {
+        let temp = TempDir::new().unwrap();
+        let sysroot = temp.path().join("fake-toolchain");
+        let mutation = sysroot.join("lib/rustlib/fixture/lib/libcore-fixture.rlib");
+        let (rustc, _) = write_fake_rustc(
+            temp.path(),
+            &format!("printf changed-sysroot > {mutation:?}\nexit 79"),
+        );
+        let cargo = temp.path().join("side-effect-cargo");
+        let cargo_marker = temp.path().join("cargo-ran");
+        write_executable(
+            &cargo,
+            &format!("#!/bin/sh\nprintf cargo-ran > {cargo_marker:?}\nexit 80\n"),
+        );
+        let mut compose_options = options(&temp, "tests/fixtures/profiles/minimal.toml");
+        compose_options.rustc_path = rustc;
+        compose_options.cargo_path = cargo;
+
+        let result = compose(&compose_options);
+        assert!(matches!(
+            result,
+            Err(ComposeError::ComposeRustc(ComposeRustcError::Drift {
+                phase,
+                surface: "sysroot tree metadata",
+            })) if phase == "rustc target-fact query"
+        ));
+        assert!(!cargo_marker.exists());
+        assert!(
+            fs::read_dir(&compose_options.output_root)
+                .unwrap()
+                .next()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn compose_rustc_record_rejects_encoding_and_manifest_tampering() {
+        let temp = TempDir::new().unwrap();
+        let generated = compose(&options(&temp, "tests/fixtures/profiles/minimal.toml")).unwrap();
+        let record_path = generated.path.join("compose-rustc.json");
+        let manifest_path = generated.path.join("rust-agent-composition.json");
+        let original_record = fs::read(&record_path).unwrap();
+        let original_manifest = fs::read(&manifest_path).unwrap();
+
+        fs::write(
+            &record_path,
+            serde_json::to_vec(&generated.manifest.compose_rustc).unwrap(),
+        )
+        .unwrap();
+        assert!(matches!(
+            verify_composition(&generated.path),
+            Err(ComposeError::Verification(message))
+                if message.contains("exact deterministic provenance")
+        ));
+        fs::write(&record_path, &original_record).unwrap();
+
+        let mut manifest: serde_json::Value = serde_json::from_slice(&original_manifest).unwrap();
+        manifest["compose-rustc"]["identity-digest"] = serde_json::Value::String("0".repeat(64));
+        let mut forged = serde_json::to_vec_pretty(&manifest).unwrap();
+        forged.push(b'\n');
+        fs::write(&manifest_path, forged).unwrap();
+        assert!(matches!(
+            verify_composition(&generated.path),
+            Err(ComposeError::ManifestNormalization { message, .. })
+                if message.contains("identity digest")
+        ));
+
+        fs::write(&manifest_path, original_manifest).unwrap();
+        verify_composition(&generated.path).unwrap();
+        make_staging_tree_owner_writable(&generated.path).unwrap();
     }
 
     #[cfg(unix)]
@@ -4370,6 +4586,7 @@ mod tests {
                 profile: &manifest.normalized_profile,
                 target: &manifest.normalized_target,
                 target_facts: &manifest.target_facts,
+                compose_rustc: &manifest.compose_rustc,
                 custom_target_spec: manifest.custom_target_spec.as_ref(),
                 resolution: &manifest.resolution,
                 component_runtime_effects: &manifest.component_runtime_effects,
@@ -4813,6 +5030,7 @@ mod tests {
             .unwrap();
         for (actual, golden) in [
             ("Cargo.toml", "Cargo.toml"),
+            ("compose-rustc.json", "compose-rustc.json"),
             ("src/lib.rs", "lib.rs"),
             ("target-facts.json", "target-facts.json"),
             ("rust-agent-composition.json", "rust-agent-composition.json"),
@@ -4846,6 +5064,7 @@ mod tests {
             .unwrap();
         for (actual, golden) in [
             ("Cargo.toml", "Cargo.toml"),
+            ("compose-rustc.json", "compose-rustc.json"),
             ("src/lib.rs", "lib.rs"),
             ("src/wasm.rs", "wasm.rs"),
             ("target-facts.json", "target-facts.json"),

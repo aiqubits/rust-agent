@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "algorithm": "sha256-rust-agent-composition-v1",
-  "composition-hash": "19c8615925033e691a71276c9e5291f6f38bac37854dc829cdcd352edc68d6c3",
+  "composition-hash": "880fa101ca9a76b3ac0090ab0702e6b0f8779a0afe85cae4579876e23d64c304",
   "build-kind": "library",
   "profile-name": "fixture-minimal",
   "normalized-profile": {
@@ -157,6 +157,24 @@
       ]
     },
     "custom-target-spec-digest": null
+  },
+  "compose-rustc": {
+    "schema": 1,
+    "source": "explicit-compose-rustc",
+    "rustc": {
+      "bytes": 645000,
+      "sha256": "d3a664c970a9fd8361b64194861bebc1ae37b9054e5ee3400dc1c9e691797eea",
+      "verbose-version": "rustc 1.97.1 (8bab26f4f 2026-07-14)\nbinary: rustc\ncommit-hash: 8bab26f4f68e0e26f0bb7960be334d5b520ea452\ncommit-date: 2026-07-14\nhost: x86_64-unknown-linux-gnu\nrelease: 1.97.1\nLLVM version: 22.1.6\n",
+      "verbose-version-sha256": "b2bdf493bcf6d1dc55181a0efc2774b6d9cf7bf5c8dcc5bed592c994b2ad38c4"
+    },
+    "sysroot": {
+      "tree-digest": "f7192e448c8ae5d3ef49758c60d629c61424f8deb25ec697dcf7e478e322c446",
+      "entries": 474,
+      "files": 442,
+      "directories": 32,
+      "file-bytes": 1292690160
+    },
+    "identity-digest": "7caccecd721c4320ef2be5ccccafc3c626e1d786c952a48b0b563a9d5bc605cd"
   },
   "custom-target-spec": null,
   "selected-components": [
@@ -1001,6 +1019,11 @@
       "path": "cargo-resolution.json",
       "digest": "acbbbc450e8390feda7f5e81cff47ba3c303903da3d7b22138f3e19b14133172",
       "bytes": 383
+    },
+    {
+      "path": "compose-rustc.json",
+      "digest": "bb8373cd71577e39297cf9fde7aebdbeb6bb5150c0d80c75dec88370a86d2153",
+      "bytes": 790
     },
     {
       "path": "src/lib.rs",

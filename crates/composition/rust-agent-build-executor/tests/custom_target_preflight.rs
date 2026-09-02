@@ -43,12 +43,25 @@ fn write_executable(path: &Path, body: &str) {
 
 fn write_fake_rustc(path: &Path, arch: &str) {
     let real_rustc = tool("rustc");
+    let sysroot = path
+        .parent()
+        .and_then(Path::parent)
+        .expect("fake rustc must be below the fake sysroot bin directory");
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::create_dir_all(sysroot.join("lib/rustlib/fixture/lib")).unwrap();
+    fs::write(
+        sysroot.join("lib/rustlib/fixture/lib/libfixture.rlib"),
+        b"fixture sysroot library",
+    )
+    .unwrap();
     write_executable(
         path,
         &format!(
             concat!(
                 "#!/bin/sh\n",
                 "if [ \"$1\" = -vV ]; then exec {:?} \"$@\"; fi\n",
+                "if [ \"$1\" = --print ] && [ \"$2\" = sysroot ]; then ",
+                "printf '%s\\n' {:?}; exit 0; fi\n",
                 "IFS= read -r observed < \"$4\"\n",
                 "[ \"$observed\" = '{{\"arch\":\"x86_64\"}}' ] || exit 41\n",
                 "printf '%s\\n' 'panic=\"unwind\"' 'target_abi=\"\"' ",
@@ -58,6 +71,7 @@ fn write_fake_rustc(path: &Path, arch: &str) {
                 "'target_vendor=\"unknown\"' 'unix'\n"
             ),
             real_rustc,
+            sysroot,
             arch = arch,
         ),
     );
@@ -137,7 +151,7 @@ fn custom_target_development_preflight_uses_the_snapshot_and_stops_mismatch_befo
     fs::create_dir_all(workspace.join("target/custom-target-build-tests")).unwrap();
     let temp = TempDir::new_in(workspace.join("target/custom-target-build-tests")).unwrap();
     let spec = temp.path().join("target.json");
-    let rustc = temp.path().join("rustc");
+    let rustc = temp.path().join("fake-toolchain/bin/rustc");
     let cargo = temp.path().join("cargo");
     let cargo_marker = temp.path().join("cargo-invocations");
     fs::write(&spec, br#"{"arch":"x86_64"}"#).unwrap();
@@ -204,7 +218,7 @@ fn custom_target_development_cargo_prioritizes_snapshot_drift_over_child_failure
     fs::create_dir_all(workspace.join("target/custom-target-build-tests")).unwrap();
     let temp = TempDir::new_in(workspace.join("target/custom-target-build-tests")).unwrap();
     let spec = temp.path().join("target.json");
-    let rustc = temp.path().join("rustc");
+    let rustc = temp.path().join("fake-toolchain/bin/rustc");
     let cargo = temp.path().join("cargo");
     let cargo_marker = temp.path().join("cargo-invocations");
     fs::write(&spec, br#"{"arch":"x86_64"}"#).unwrap();

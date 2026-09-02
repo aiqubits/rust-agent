@@ -63,3 +63,9 @@ missing_errors_doc = "allow"
 missing_panics_doc = "allow"
 too_many_lines = "allow"
 format_push_string = "allow"
+
+# Composition provenance hashes a bounded pinned sysroot once per process. Keep the
+# cryptographic compression implementation optimized in development/test profiles so
+# a security check over large toolchain files does not become prohibitively slow.
+[profile.dev.package.sha2]
+opt-level = 3
