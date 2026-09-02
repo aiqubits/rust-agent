@@ -33,6 +33,7 @@ use crate::{
         verify_custom_target_snapshot,
     },
     discovery::{DiscoveredCatalog, DiscoveryError, discover_workspace_catalog},
+    generator_input::{GeneratorInputCommitment, GeneratorInputError},
     manifest::{
         CargoResolutionRecord, CompositionIdentityPayload, CompositionManifest,
         GeneratedFileRecord, SecurityManifest, SourcePackageRecord,
@@ -103,6 +104,8 @@ pub enum ComposeError {
     Target(#[from] TargetError),
     #[error("compose rustc provenance is invalid: {0}")]
     ComposeRustc(#[from] ComposeRustcError),
+    #[error("generator-input commitment is invalid: {0}")]
+    GeneratorInput(#[from] GeneratorInputError),
     #[error("custom target spec is invalid: {0}")]
     CustomTargetSpec(#[from] CustomTargetSpecError),
     #[error("composition cannot be resolved: {0}")]
@@ -239,6 +242,7 @@ pub fn compose(options: &ComposeOptions) -> Result<GeneratedComposition, Compose
         } = discovered?;
         validate_mandatory_root_build_requirements(&root_build_requirements)?;
         let catalog = NormalizedCatalog::normalize(document)?;
+        let generator_inputs = GeneratorInputCommitment::new(&catalog, &root_build_requirements)?;
         let resolution = resolve(&catalog, &profile, &target)?;
         let requires_registry = profile.build_kind == BuildKind::Wasm
             || selected_packages_require_registry(&options.workspace_root, &catalog, &resolution)?;
@@ -249,7 +253,7 @@ pub fn compose(options: &ComposeOptions) -> Result<GeneratedComposition, Compose
         }
         let composition_catalog = CompositionCatalog {
             normalized: &catalog,
-            root_build_requirements: &root_build_requirements,
+            generator_inputs: &generator_inputs,
         };
         compose_in_staging(
             &StagingCompositionInputs {
@@ -284,13 +288,14 @@ fn compose_in_staging(
         compose_rustc,
     } = inputs;
     let catalog = composition_catalog.normalized;
-    let root_build_requirements = composition_catalog.root_build_requirements;
+    let generator_inputs = composition_catalog.generator_inputs;
     let target_facts = TargetFactsRecord::from_target(target)?;
     write_canonical_target_facts(&staging.join("target-facts.json"), &target_facts)?;
     write_json(
         &staging.join("compose-rustc.json"),
         compose_rustc.provenance(),
     )?;
+    write_json(&staging.join("generator-inputs.json"), generator_inputs)?;
 
     let source_root = staging.join("sources");
     fs::create_dir_all(&source_root)?;
@@ -354,6 +359,7 @@ fn compose_in_staging(
         "Cargo.toml",
         "cargo-resolution.json",
         "compose-rustc.json",
+        "generator-inputs.json",
         "target-facts.json",
         ".cargo/config.toml",
         "src/lib.rs",
@@ -365,8 +371,11 @@ fn compose_in_staging(
         generated_paths.push(&spec.snapshot_path);
     }
     let generated_files = generated_file_records(staging, &generated_paths)?;
-    let direct_root_build_requirements =
-        direct_root_build_requirements(catalog, resolution, root_build_requirements)?;
+    let direct_root_build_requirements = direct_root_build_requirements(
+        catalog,
+        resolution,
+        &generator_inputs.root_build_requirements,
+    )?;
     let build_requirements = build_requirement_union(&direct_root_build_requirements);
     let mut component_runtime_effects = BTreeSet::new();
     for id in &resolution.selected_components {
@@ -384,6 +393,7 @@ fn compose_in_staging(
         target,
         target_facts: &target_facts,
         compose_rustc: compose_rustc.provenance(),
+        generator_inputs,
         custom_target_spec,
         resolution,
         component_runtime_effects: &component_runtime_effects,
@@ -416,6 +426,7 @@ fn compose_in_staging(
         target_fact_digest: target.target_fact_digest.clone(),
         target_facts,
         compose_rustc: compose_rustc.provenance().clone(),
+        generator_inputs: generator_inputs.clone(),
         custom_target_spec: custom_target_spec.cloned(),
         selected_components: resolution.selected_components.clone(),
         runtime_adapter: resolution.runtime_adapter.clone(),
@@ -638,6 +649,27 @@ pub fn load_manifest(path: &Path) -> Result<CompositionManifest, ComposeError> {
                 .into(),
         });
     }
+    let catalog = manifest.generator_inputs.catalog().map_err(|error| {
+        ComposeError::ManifestNormalization {
+            path: manifest_path.display().to_string(),
+            message: format!("generator-input commitment is invalid: {error}"),
+        }
+    })?;
+    let expected_resolution = resolve(
+        &catalog,
+        &manifest.normalized_profile,
+        &manifest.normalized_target,
+    )
+    .map_err(|error| ComposeError::ManifestNormalization {
+        path: manifest_path.display().to_string(),
+        message: format!("committed resolver inputs cannot be resolved: {error}"),
+    })?;
+    if expected_resolution != manifest.resolution {
+        return Err(ComposeError::ManifestNormalization {
+            path: manifest_path.display().to_string(),
+            message: "resolution differs from the committed normalized catalog inputs".into(),
+        });
+    }
     manifest
         .resolution
         .verify_canonical_semantics(&manifest.normalized_profile, &manifest.normalized_target)
@@ -829,12 +861,97 @@ fn verify_composition_with_location_policy(
             "compose-rustc.json drifted from its exact deterministic provenance".into(),
         ));
     }
-    let mut runtime_effect_union = manifest.component_runtime_effects.clone();
-    runtime_effect_union.extend(manifest.host_runtime_effects.iter().cloned());
-    if runtime_effect_union != manifest.compiled_runtime_effects {
+    manifest.generator_inputs.validate().map_err(|error| {
+        ComposeError::Verification(format!("generator-input commitment is invalid: {error}"))
+    })?;
+    let generator_input_bytes = read_composition_regular_file_bounded(
+        &path.join("generator-inputs.json"),
+        MAX_COMPOSITION_CONTROL_FILE_BYTES,
+        None,
+    )?;
+    let stored_generator_inputs = serde_json::from_slice::<GeneratorInputCommitment>(
+        &generator_input_bytes,
+    )
+    .map_err(|error| {
+        ComposeError::Verification(format!("generator-inputs.json is invalid: {error}"))
+    })?;
+    let expected_generator_input_bytes = deterministic_json_bytes(&manifest.generator_inputs)
+        .map_err(|error| {
+            ComposeError::Verification(format!(
+                "generator-input commitment deterministic encoding failed: {error}"
+            ))
+        })?;
+    if stored_generator_inputs != manifest.generator_inputs
+        || generator_input_bytes != expected_generator_input_bytes
+    {
+        return Err(ComposeError::Verification(
+            "generator-inputs.json drifted from its exact deterministic commitment".into(),
+        ));
+    }
+    let committed_catalog = manifest.generator_inputs.catalog().map_err(|error| {
+        ComposeError::Verification(format!("generator-input commitment is invalid: {error}"))
+    })?;
+    let rederived_resolution = resolve(
+        &committed_catalog,
+        &manifest.normalized_profile,
+        &manifest.normalized_target,
+    )
+    .map_err(|error| {
+        ComposeError::Verification(format!(
+            "committed resolver inputs cannot be resolved: {error}"
+        ))
+    })?;
+    if rederived_resolution != manifest.resolution {
+        return Err(ComposeError::Verification(
+            "resolution differs from the committed normalized catalog inputs".into(),
+        ));
+    }
+    let mut component_runtime_effects = BTreeSet::new();
+    for component in &rederived_resolution.selected_components {
+        component_runtime_effects.extend(
+            committed_catalog.components[component]
+                .security
+                .iter()
+                .cloned(),
+        );
+    }
+    let host_runtime_effects = rederived_resolution
+        .host_boundary
+        .as_ref()
+        .map_or_else(BTreeSet::new, |boundary| {
+            committed_catalog.host_boundaries[boundary].security.clone()
+        });
+    if component_runtime_effects != manifest.component_runtime_effects
+        || host_runtime_effects != manifest.host_runtime_effects
+    {
+        return Err(ComposeError::Verification(
+            "Component or Host runtime effects attribution differs from the committed catalog"
+                .into(),
+        ));
+    }
+    let mut runtime_effect_union = component_runtime_effects;
+    runtime_effect_union.extend(host_runtime_effects);
+    if runtime_effect_union != rederived_resolution.compiled_runtime_effects
+        || runtime_effect_union != manifest.compiled_runtime_effects
+    {
         return Err(ComposeError::Verification(
             "Component and Host runtime effects do not equal the compiled runtime-effect union"
                 .into(),
+        ));
+    }
+    let expected_direct_root_build_requirements = direct_root_build_requirements(
+        &committed_catalog,
+        &rederived_resolution,
+        &manifest.generator_inputs.root_build_requirements,
+    )
+    .map_err(|error| {
+        ComposeError::Verification(format!(
+            "direct root build-requirement attribution cannot be rederived: {error}"
+        ))
+    })?;
+    if expected_direct_root_build_requirements != manifest.direct_root_build_requirements {
+        return Err(ComposeError::Verification(
+            "direct root build requirements differ from the committed generator inputs".into(),
         ));
     }
     let mut expected_roots = BTreeSet::from([
@@ -879,6 +996,35 @@ fn verify_composition_with_location_policy(
     if requirement_union != manifest.build_requirements {
         return Err(ComposeError::Verification(
             "direct root build requirements do not equal the authorized union".into(),
+        ));
+    }
+
+    let package_inputs = selected_packages(&committed_catalog, &rederived_resolution)?;
+    let mut expected_source_headers = package_inputs
+        .iter()
+        .map(|package| {
+            (
+                package.id.clone(),
+                package.package.clone(),
+                package.path.clone(),
+            )
+        })
+        .collect::<Vec<_>>();
+    expected_source_headers.sort();
+    let actual_source_headers = manifest
+        .sources
+        .iter()
+        .map(|package| {
+            (
+                package.id.clone(),
+                package.package.clone(),
+                package.logical_path.clone(),
+            )
+        })
+        .collect::<Vec<_>>();
+    if actual_source_headers != expected_source_headers {
+        return Err(ComposeError::Verification(
+            "source package closure differs from the committed catalog and resolution".into(),
         ));
     }
 
@@ -977,6 +1123,44 @@ fn verify_composition_with_location_policy(
         }
     }
     verify_composition_tree_topology(path, &expected_tree)?;
+
+    let mut rederived_generated_sources = vec![
+        (
+            "Cargo.toml",
+            generate_cargo_toml(
+                &committed_catalog,
+                &rederived_resolution,
+                &package_inputs,
+                manifest.build_kind,
+            ),
+        ),
+        (
+            "src/lib.rs",
+            generate_lib_rs(
+                &committed_catalog,
+                &rederived_resolution,
+                manifest.build_kind,
+            )?,
+        ),
+    ];
+    if manifest.build_kind == BuildKind::Wasm {
+        rederived_generated_sources.push((
+            "src/wasm.rs",
+            generate_wasm_rs(&committed_catalog, &rederived_resolution)?,
+        ));
+    }
+    for (relative_path, expected) in rederived_generated_sources {
+        if read_composition_regular_file_bounded(
+            &path.join(relative_path),
+            MAX_COMPOSITION_CONTROL_FILE_BYTES,
+            None,
+        )? != expected.as_bytes()
+        {
+            return Err(ComposeError::Verification(format!(
+                "generated `{relative_path}` differs from the committed catalog and resolution"
+            )));
+        }
+    }
 
     let cargo_resolution_bytes = read_composition_regular_file_bounded(
         &path.join("cargo-resolution.json"),
@@ -1088,6 +1272,7 @@ fn verify_composition_with_location_policy(
         target: &manifest.normalized_target,
         target_facts: &manifest.target_facts,
         compose_rustc: &manifest.compose_rustc,
+        generator_inputs: &manifest.generator_inputs,
         custom_target_spec: manifest.custom_target_spec.as_ref(),
         resolution: &manifest.resolution,
         component_runtime_effects: &manifest.component_runtime_effects,
@@ -1160,6 +1345,7 @@ fn expected_generated_file_paths(
         "Cargo.toml".into(),
         "cargo-resolution.json".into(),
         "compose-rustc.json".into(),
+        "generator-inputs.json".into(),
         "target-facts.json".into(),
         "src/lib.rs".into(),
     ]);
@@ -1527,7 +1713,7 @@ struct PreparedCustomTargetSpec {
 
 struct CompositionCatalog<'a> {
     normalized: &'a NormalizedCatalog,
-    root_build_requirements: &'a BTreeMap<String, BuildRequirements>,
+    generator_inputs: &'a GeneratorInputCommitment,
 }
 
 struct StagingCompositionInputs<'a> {
@@ -3049,26 +3235,14 @@ mod tests {
         }
     }
 
-    fn reseal_with_cargo_resolution_bytes(
-        path: &Path,
-        manifest: &mut CompositionManifest,
-        cargo_resolution_bytes: &[u8],
-    ) -> PathBuf {
-        fs::write(path.join("cargo-resolution.json"), cargo_resolution_bytes).unwrap();
-        manifest.cargo_resolution_digest = sha256_hex(cargo_resolution_bytes);
-        let generated_record = manifest
-            .generated_files
-            .iter_mut()
-            .find(|record| record.path == "cargo-resolution.json")
-            .unwrap();
-        generated_record.digest = sha256_hex(cargo_resolution_bytes);
-        generated_record.bytes = cargo_resolution_bytes.len() as u64;
+    fn reseal_manifest(path: &Path, manifest: &mut CompositionManifest) -> PathBuf {
         let payload = CompositionIdentityPayload {
             schema: 1,
             profile: &manifest.normalized_profile,
             target: &manifest.normalized_target,
             target_facts: &manifest.target_facts,
             compose_rustc: &manifest.compose_rustc,
+            generator_inputs: &manifest.generator_inputs,
             custom_target_spec: manifest.custom_target_spec.as_ref(),
             resolution: &manifest.resolution,
             component_runtime_effects: &manifest.component_runtime_effects,
@@ -3105,6 +3279,23 @@ mod tests {
         let resealed_path = path.parent().unwrap().join(&manifest.composition_hash);
         fs::rename(path, &resealed_path).unwrap();
         resealed_path
+    }
+
+    fn reseal_with_cargo_resolution_bytes(
+        path: &Path,
+        manifest: &mut CompositionManifest,
+        cargo_resolution_bytes: &[u8],
+    ) -> PathBuf {
+        fs::write(path.join("cargo-resolution.json"), cargo_resolution_bytes).unwrap();
+        manifest.cargo_resolution_digest = sha256_hex(cargo_resolution_bytes);
+        let generated_record = manifest
+            .generated_files
+            .iter_mut()
+            .find(|record| record.path == "cargo-resolution.json")
+            .unwrap();
+        generated_record.digest = sha256_hex(cargo_resolution_bytes);
+        generated_record.bytes = cargo_resolution_bytes.len() as u64;
+        reseal_manifest(path, manifest)
     }
 
     fn registry_cache() -> PathBuf {
@@ -3491,6 +3682,7 @@ mod tests {
             target: &resealed.normalized_target,
             target_facts: &resealed.target_facts,
             compose_rustc: &resealed.compose_rustc,
+            generator_inputs: &resealed.generator_inputs,
             custom_target_spec: resealed.custom_target_spec.as_ref(),
             resolution: &resealed.resolution,
             component_runtime_effects: &resealed.component_runtime_effects,
@@ -4269,7 +4461,7 @@ mod tests {
     }
 
     #[test]
-    fn composition_manifest_load_runs_resolution_semantic_verification() {
+    fn composition_manifest_load_rederives_resolution_from_committed_inputs() {
         let temp = TempDir::new().unwrap();
         let generated = compose(&options(&temp, "tests/fixtures/profiles/minimal.toml")).unwrap();
         let manifest_path = generated.path.join("rust-agent-composition.json");
@@ -4280,8 +4472,7 @@ mod tests {
         assert!(matches!(
             load_manifest(&generated.path),
             Err(ComposeError::ManifestNormalization { message, .. })
-                if message.contains("resolution semantics are invalid")
-                    && message.contains("projection `profile`")
+                if message.contains("resolution differs from the committed normalized catalog")
         ));
         make_staging_tree_owner_writable(&generated.path).unwrap();
     }
@@ -4393,6 +4584,7 @@ mod tests {
                     &result,
                     Err(ComposeError::ManifestNormalization { message, .. })
                         if message.contains("resolution semantics")
+                            || message.contains("resolution differs from the committed normalized catalog")
                             || message.contains("unsupported profile schema")
                             || message.contains("unsupported resolution schema")
                 ),
@@ -4447,7 +4639,7 @@ mod tests {
         assert!(matches!(
             verify_composition(&generated.path),
             Err(ComposeError::Verification(message))
-                if message.contains("composition identity mismatch")
+                if message.contains("runtime effects attribution")
         ));
 
         write_json(&manifest_path, &original).unwrap();
@@ -4587,6 +4779,7 @@ mod tests {
                 target: &manifest.normalized_target,
                 target_facts: &manifest.target_facts,
                 compose_rustc: &manifest.compose_rustc,
+                generator_inputs: &manifest.generator_inputs,
                 custom_target_spec: manifest.custom_target_spec.as_ref(),
                 resolution: &manifest.resolution,
                 component_runtime_effects: &manifest.component_runtime_effects,
@@ -4654,6 +4847,89 @@ mod tests {
                 if message.contains("strict canonical path order")
         ));
         make_staging_tree_owner_writable(&generated_path).unwrap();
+    }
+
+    #[test]
+    fn generator_input_commitment_rederives_resolution_and_exact_sidecar() {
+        let temp = TempDir::new().unwrap();
+
+        let mut resolution_options = options(&temp, "tests/fixtures/profiles/minimal.toml");
+        resolution_options.output_root = temp.path().join("resolution-forgery");
+        let generated = compose(&resolution_options).unwrap();
+        let mut manifest = generated.manifest.clone();
+        manifest.resolution.explored_decisions += 1;
+        assert!(
+            manifest.resolution.explored_decisions
+                <= manifest.normalized_profile.resolver_decision_budget
+        );
+        let forged_path = reseal_manifest(&generated.path, &mut manifest);
+        assert!(matches!(
+            verify_composition(&forged_path),
+            Err(ComposeError::ManifestNormalization { message, .. })
+                if message.contains("resolution differs from the committed normalized catalog")
+        ));
+        make_staging_tree_owner_writable(&forged_path).unwrap();
+
+        let mut sidecar_options = options(&temp, "tests/fixtures/profiles/minimal.toml");
+        sidecar_options.output_root = temp.path().join("sidecar-forgery");
+        let generated = compose(&sidecar_options).unwrap();
+        let mut manifest = generated.manifest.clone();
+        let compact = serde_json::to_vec(&manifest.generator_inputs).unwrap();
+        fs::write(generated.path.join("generator-inputs.json"), &compact).unwrap();
+        let record = manifest
+            .generated_files
+            .iter_mut()
+            .find(|record| record.path == "generator-inputs.json")
+            .unwrap();
+        record.digest = sha256_hex(&compact);
+        record.bytes = compact.len() as u64;
+        let forged_path = reseal_manifest(&generated.path, &mut manifest);
+        assert!(matches!(
+            verify_composition(&forged_path),
+            Err(ComposeError::Verification(message))
+                if message.contains("exact deterministic commitment")
+        ));
+        make_staging_tree_owner_writable(&forged_path).unwrap();
+    }
+
+    #[test]
+    fn generator_input_commitment_rederives_generated_and_source_closure() {
+        let temp = TempDir::new().unwrap();
+
+        let mut cargo_options = options(&temp, "tests/fixtures/profiles/minimal.toml");
+        cargo_options.output_root = temp.path().join("cargo-forgery");
+        let generated = compose(&cargo_options).unwrap();
+        let mut manifest = generated.manifest.clone();
+        let mut forged_cargo = fs::read(generated.path.join("Cargo.toml")).unwrap();
+        forged_cargo.extend_from_slice(b"# identity-consistent forgery\n");
+        fs::write(generated.path.join("Cargo.toml"), &forged_cargo).unwrap();
+        let record = manifest
+            .generated_files
+            .iter_mut()
+            .find(|record| record.path == "Cargo.toml")
+            .unwrap();
+        record.digest = sha256_hex(&forged_cargo);
+        record.bytes = forged_cargo.len() as u64;
+        let forged_path = reseal_manifest(&generated.path, &mut manifest);
+        assert!(matches!(
+            verify_composition(&forged_path),
+            Err(ComposeError::Verification(message))
+                if message.contains("generated `Cargo.toml` differs")
+        ));
+        make_staging_tree_owner_writable(&forged_path).unwrap();
+
+        let mut source_options = options(&temp, "tests/fixtures/profiles/minimal.toml");
+        source_options.output_root = temp.path().join("source-forgery");
+        let generated = compose(&source_options).unwrap();
+        let mut manifest = generated.manifest.clone();
+        manifest.sources[0].package.push_str("-forged");
+        let forged_path = reseal_manifest(&generated.path, &mut manifest);
+        assert!(matches!(
+            verify_composition(&forged_path),
+            Err(ComposeError::Verification(message))
+                if message.contains("source package closure differs")
+        ));
+        make_staging_tree_owner_writable(&forged_path).unwrap();
     }
 
     #[cfg(any(
@@ -5031,6 +5307,7 @@ mod tests {
         for (actual, golden) in [
             ("Cargo.toml", "Cargo.toml"),
             ("compose-rustc.json", "compose-rustc.json"),
+            ("generator-inputs.json", "generator-inputs.json"),
             ("src/lib.rs", "lib.rs"),
             ("target-facts.json", "target-facts.json"),
             ("rust-agent-composition.json", "rust-agent-composition.json"),
@@ -5065,6 +5342,7 @@ mod tests {
         for (actual, golden) in [
             ("Cargo.toml", "Cargo.toml"),
             ("compose-rustc.json", "compose-rustc.json"),
+            ("generator-inputs.json", "generator-inputs.json"),
             ("src/lib.rs", "lib.rs"),
             ("src/wasm.rs", "wasm.rs"),
             ("target-facts.json", "target-facts.json"),
@@ -5106,8 +5384,8 @@ mod tests {
         write_json(&manifest_path, &manifest).unwrap();
         assert!(matches!(
             verify_composition(&generated.path),
-            Err(ComposeError::Verification(message))
-                if message.contains("composition identity mismatch")
+            Err(ComposeError::ManifestNormalization { message, .. })
+                if message.contains("resolution differs from the committed normalized catalog")
         ));
     }
 

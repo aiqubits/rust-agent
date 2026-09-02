@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     custom_target::CustomTargetSpecRecord,
+    generator_input::GeneratorInputCommitment,
     metadata::BuildRequirements,
     profile::{BuildKind, CompositionProfile},
     resolver::{AppHandoff, Resolution},
@@ -65,6 +66,8 @@ pub struct CompositionIdentityPayload<'a> {
     pub target_facts: &'a TargetFactsRecord,
     #[serde(rename = "compose-rustc")]
     pub compose_rustc: &'a ComposeRustcProvenance,
+    #[serde(rename = "generator-inputs")]
+    pub generator_inputs: &'a GeneratorInputCommitment,
     #[serde(rename = "custom-target-spec")]
     pub custom_target_spec: Option<&'a CustomTargetSpecRecord>,
     pub resolution: &'a Resolution,
@@ -105,6 +108,8 @@ pub struct CompositionManifest {
     pub target_facts: TargetFactsRecord,
     #[serde(rename = "compose-rustc")]
     pub compose_rustc: ComposeRustcProvenance,
+    #[serde(rename = "generator-inputs")]
+    pub generator_inputs: GeneratorInputCommitment,
     #[serde(rename = "custom-target-spec")]
     pub custom_target_spec: Option<CustomTargetSpecRecord>,
     #[serde(rename = "selected-components")]

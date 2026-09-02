@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "algorithm": "sha256-rust-agent-composition-v1",
-  "composition-hash": "d69b99c366d66004c1a9ea4fb4b74f0d6d006762a4ba5c8bad083c9f289d0b0d",
+  "composition-hash": "b80d56ca9a9ac928128a9aecbb7526e69ba2eaaea3b836aadb13b9e85eee6841",
   "build-kind": "wasm",
   "profile-name": "fixture-wasm-js",
   "normalized-profile": {
@@ -174,6 +174,408 @@
       "file-bytes": 1292690160
     },
     "identity-digest": "7caccecd721c4320ef2be5ccccafc3c626e1d786c952a48b0b563a9d5bc605cd"
+  },
+  "generator-inputs": {
+    "schema": 1,
+    "normalized-catalog": {
+      "schema": 1,
+      "capabilities": [
+        {
+          "id": "cap:build-proof",
+          "api-package": "rust-agent-fixture-api",
+          "rust-api": "rust_agent_fixture_api::BuildProof",
+          "binding-type": "rust_agent_fixture_api::BuildProofBinding",
+          "binding-adapter": "rust_agent_fixture_api::BuildProofBinding::from_provider",
+          "binding": "singleton",
+          "scope": "app"
+        },
+        {
+          "id": "cap:driver",
+          "api-package": "rust-agent-fixture-api",
+          "rust-api": "rust_agent_fixture_api::Driver",
+          "binding-type": "rust_agent_fixture_api::DriverBinding",
+          "binding-adapter": "rust_agent_fixture_api::DriverBinding::from_provider",
+          "binding": "singleton",
+          "scope": "app"
+        },
+        {
+          "id": "cap:fs-read",
+          "api-package": "rust-agent-fixture-api",
+          "rust-api": "rust_agent_fixture_api::FileReader",
+          "binding-type": "rust_agent_fixture_api::FileReaderBinding",
+          "binding-adapter": "rust_agent_fixture_api::FileReaderBinding::from_provider",
+          "binding": "singleton",
+          "scope": "app"
+        },
+        {
+          "id": "cap:model",
+          "api-package": "rust-agent-fixture-api",
+          "rust-api": "rust_agent_fixture_api::Model",
+          "binding-type": "rust_agent_fixture_api::ModelBinding",
+          "binding-adapter": "rust_agent_fixture_api::ModelBinding::from_provider",
+          "binding": "singleton",
+          "scope": "app"
+        }
+      ],
+      "components": [
+        {
+          "id": "fixture-build-proof",
+          "package": "rust-agent-fixture-build-proof",
+          "package-path": "tests/fixtures/components/fixture-build-proof",
+          "scope": "app",
+          "factory": "rust_agent_fixture_build_proof::build",
+          "dependencies-type": "rust_agent_fixture_build_proof::Dependencies",
+          "config-type": "rust_agent_fixture_build_proof::Config",
+          "config-source": "none",
+          "config-key": null,
+          "resource-namespace-preparer": null,
+          "prepared-config-type": null,
+          "targets": "cfg(true)",
+          "target-support": [
+            {
+              "predicate": "cfg(true)",
+              "tier": "production"
+            }
+          ],
+          "lifecycle-effects": [],
+          "provides": [
+            {
+              "capability": "cap:build-proof",
+              "key": null,
+              "priority": 100,
+              "order": 0,
+              "layer": "provider",
+              "resource-namespace": {
+                "mode": "none"
+              },
+              "effects": []
+            }
+          ],
+          "requires": [],
+          "conflicts": [],
+          "security": [],
+          "runtime-primitives": [],
+          "build-requirements": {
+            "executables": [
+              "fixture-codegen"
+            ],
+            "read-inputs": [
+              "fixture-sdk"
+            ],
+            "environment": []
+          },
+          "app-coexistence": {
+            "mode": "requires-stop"
+          },
+          "cargo-features": []
+        },
+        {
+          "id": "fixture-driver",
+          "package": "rust-agent-fixture-driver",
+          "package-path": "tests/fixtures/components/fixture-driver",
+          "scope": "app",
+          "factory": "rust_agent_fixture_driver::build",
+          "dependencies-type": "rust_agent_fixture_driver::Dependencies",
+          "config-type": "rust_agent_fixture_driver::Config",
+          "config-source": "none",
+          "config-key": null,
+          "resource-namespace-preparer": null,
+          "prepared-config-type": null,
+          "targets": "cfg(true)",
+          "target-support": [
+            {
+              "predicate": "cfg(true)",
+              "tier": "production"
+            }
+          ],
+          "lifecycle-effects": [],
+          "provides": [
+            {
+              "capability": "cap:driver",
+              "key": null,
+              "priority": 100,
+              "order": 0,
+              "layer": "provider",
+              "resource-namespace": {
+                "mode": "none"
+              },
+              "effects": []
+            }
+          ],
+          "requires": [
+            {
+              "capability": "cap:model",
+              "mode": "required",
+              "field": "model",
+              "key": null
+            }
+          ],
+          "conflicts": [],
+          "security": [],
+          "runtime-primitives": [],
+          "build-requirements": {
+            "executables": [],
+            "read-inputs": [],
+            "environment": []
+          },
+          "app-coexistence": {
+            "mode": "requires-stop"
+          },
+          "cargo-features": []
+        },
+        {
+          "id": "fixture-fs-read",
+          "package": "rust-agent-fixture-fs-read",
+          "package-path": "tests/fixtures/components/fixture-fs-read",
+          "scope": "app",
+          "factory": "rust_agent_fixture_fs_read::build",
+          "dependencies-type": "rust_agent_fixture_fs_read::Dependencies",
+          "config-type": "rust_agent_fixture_fs_read::Config",
+          "config-source": "none",
+          "config-key": null,
+          "resource-namespace-preparer": null,
+          "prepared-config-type": null,
+          "targets": "cfg(not(target_arch = \"wasm32\"))",
+          "target-support": [
+            {
+              "predicate": "cfg(not(target_arch = \"wasm32\"))",
+              "tier": "production"
+            }
+          ],
+          "lifecycle-effects": [],
+          "provides": [
+            {
+              "capability": "cap:fs-read",
+              "key": null,
+              "priority": 100,
+              "order": 0,
+              "layer": "provider",
+              "resource-namespace": {
+                "mode": "none"
+              },
+              "effects": [
+                "read-local"
+              ]
+            }
+          ],
+          "requires": [],
+          "conflicts": [],
+          "security": [
+            "read-local"
+          ],
+          "runtime-primitives": [],
+          "build-requirements": {
+            "executables": [],
+            "read-inputs": [],
+            "environment": []
+          },
+          "app-coexistence": {
+            "mode": "requires-stop"
+          },
+          "cargo-features": []
+        },
+        {
+          "id": "fixture-model",
+          "package": "rust-agent-fixture-model",
+          "package-path": "tests/fixtures/components/fixture-model",
+          "scope": "app",
+          "factory": "rust_agent_fixture_model::build",
+          "dependencies-type": "rust_agent_fixture_model::Dependencies",
+          "config-type": "rust_agent_fixture_model::Config",
+          "config-source": "none",
+          "config-key": null,
+          "resource-namespace-preparer": null,
+          "prepared-config-type": null,
+          "targets": "cfg(true)",
+          "target-support": [
+            {
+              "predicate": "cfg(true)",
+              "tier": "production"
+            }
+          ],
+          "lifecycle-effects": [],
+          "provides": [
+            {
+              "capability": "cap:model",
+              "key": null,
+              "priority": 100,
+              "order": 0,
+              "layer": "provider",
+              "resource-namespace": {
+                "mode": "none"
+              },
+              "effects": []
+            }
+          ],
+          "requires": [],
+          "conflicts": [],
+          "security": [],
+          "runtime-primitives": [],
+          "build-requirements": {
+            "executables": [],
+            "read-inputs": [],
+            "environment": []
+          },
+          "app-coexistence": {
+            "mode": "requires-stop"
+          },
+          "cargo-features": []
+        },
+        {
+          "id": "fixture-model-fallback",
+          "package": "rust-agent-fixture-model-fallback",
+          "package-path": "tests/fixtures/components/fixture-model-fallback",
+          "scope": "app",
+          "factory": "rust_agent_fixture_model_fallback::build",
+          "dependencies-type": "rust_agent_fixture_model_fallback::Dependencies",
+          "config-type": "rust_agent_fixture_model_fallback::Config",
+          "config-source": "none",
+          "config-key": null,
+          "resource-namespace-preparer": null,
+          "prepared-config-type": null,
+          "targets": "cfg(true)",
+          "target-support": [
+            {
+              "predicate": "cfg(true)",
+              "tier": "production"
+            }
+          ],
+          "lifecycle-effects": [],
+          "provides": [
+            {
+              "capability": "cap:model",
+              "key": null,
+              "priority": 200,
+              "order": 0,
+              "layer": "provider",
+              "resource-namespace": {
+                "mode": "none"
+              },
+              "effects": []
+            }
+          ],
+          "requires": [],
+          "conflicts": [
+            "fixture-driver"
+          ],
+          "security": [],
+          "runtime-primitives": [],
+          "build-requirements": {
+            "executables": [],
+            "read-inputs": [],
+            "environment": []
+          },
+          "app-coexistence": {
+            "mode": "requires-stop"
+          },
+          "cargo-features": []
+        }
+      ],
+      "runtime-adapters": [
+        {
+          "id": "fixture-runtime",
+          "package": "rust-agent-fixture-runtime",
+          "package-path": "tests/fixtures/runtime/fixture-runtime",
+          "constructor": "rust_agent_fixture_runtime::create_runtime_primitives",
+          "targets": "cfg(true)",
+          "target-support": [
+            {
+              "predicate": "cfg(true)",
+              "tier": "production"
+            }
+          ],
+          "primitives": [],
+          "security": [],
+          "app-coexistence": {
+            "mode": "requires-stop"
+          },
+          "build-requirements": {
+            "executables": [],
+            "read-inputs": [],
+            "environment": []
+          }
+        }
+      ],
+      "host-boundaries": [
+        {
+          "id": "fixture-host-entry",
+          "package": "rust-agent-fixture-host-entry",
+          "package-path": "tests/fixtures/hosts/fixture-host-entry",
+          "kind": "entry",
+          "entry": "rust_agent_fixture_host_entry::run",
+          "export-module": null,
+          "targets": "cfg(any(target_os = \"linux\", target_os = \"macos\", target_os = \"windows\"))",
+          "target-support": [
+            {
+              "predicate": "cfg(any(target_os = \"macos\", target_os = \"windows\"))",
+              "tier": "experimental"
+            },
+            {
+              "predicate": "cfg(target_os = \"linux\")",
+              "tier": "production"
+            }
+          ],
+          "security": [
+            "host-bridge"
+          ],
+          "runtime-adapters": [
+            "fixture-runtime"
+          ],
+          "build-requirements": {
+            "executables": [],
+            "read-inputs": [],
+            "environment": []
+          }
+        },
+        {
+          "id": "fixture-host-export",
+          "package": "rust-agent-fixture-host-export",
+          "package-path": "tests/fixtures/hosts/fixture-host-export",
+          "kind": "wasm-export",
+          "entry": null,
+          "export-module": "rust_agent_fixture_host_export",
+          "targets": "cfg(target_arch = \"wasm32\")",
+          "target-support": [
+            {
+              "predicate": "cfg(target_arch = \"wasm32\")",
+              "tier": "production"
+            }
+          ],
+          "security": [
+            "host-bridge"
+          ],
+          "runtime-adapters": [
+            "fixture-runtime"
+          ],
+          "build-requirements": {
+            "executables": [
+              "wasm-bindgen-cli"
+            ],
+            "read-inputs": [],
+            "environment": []
+          }
+        }
+      ]
+    },
+    "normalized-catalog-digest": "9e6aa08d79b33d2818fbdc052f062373502225234b65f040b28e2aeb827b11b8",
+    "root-build-requirements": {
+      "rust-agent-core": {
+        "executables": [],
+        "read-inputs": [],
+        "environment": []
+      },
+      "rust-agent-fixture-api": {
+        "executables": [],
+        "read-inputs": [],
+        "environment": []
+      },
+      "rust-agent-runtime-api": {
+        "executables": [],
+        "read-inputs": [],
+        "environment": []
+      }
+    },
+    "identity-digest": "d54d4a85dbc593a44525a4d3a35b9a4e14632d4b2e0f70db52227ae05f1f084c"
   },
   "custom-target-spec": null,
   "selected-components": [
@@ -1123,6 +1525,11 @@
       "path": "compose-rustc.json",
       "digest": "bb8373cd71577e39297cf9fde7aebdbeb6bb5150c0d80c75dec88370a86d2153",
       "bytes": 790
+    },
+    {
+      "path": "generator-inputs.json",
+      "digest": "fa558712e48993d3f094f94ecf5426e6a6db62167f3f5c12468f00c5f7287a89",
+      "bytes": 11891
     },
     {
       "path": "src/lib.rs",

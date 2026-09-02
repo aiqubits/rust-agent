@@ -206,6 +206,16 @@ impl NormalizedCatalog {
             resource_namespace_requirements,
         })
     }
+
+    pub(crate) fn to_document(&self) -> CatalogDocument {
+        CatalogDocument {
+            schema: SCHEMA_VERSION,
+            capabilities: self.capabilities.values().cloned().collect(),
+            components: self.components.values().cloned().collect(),
+            runtime_adapters: self.runtime_adapters.values().cloned().collect(),
+            host_boundaries: self.host_boundaries.values().cloned().collect(),
+        }
+    }
 }
 
 fn collect_unique<T, F>(

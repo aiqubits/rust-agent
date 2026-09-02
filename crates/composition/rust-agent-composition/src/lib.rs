@@ -7,6 +7,7 @@ pub mod custom_target;
 pub mod diagnostics;
 mod discovery;
 pub mod generator;
+pub mod generator_input;
 pub mod manifest;
 pub mod metadata;
 pub mod profile;
@@ -29,6 +30,7 @@ pub use generator::{
     ComposeError, ComposeOptions, GeneratedComposition, compose, load_manifest, verify_composition,
     verify_emitted_composition,
 };
+pub use generator_input::{GeneratorInputCommitment, GeneratorInputError};
 pub use manifest::CompositionManifest;
 pub use metadata::CatalogDocument;
 pub use profile::CompositionProfile;

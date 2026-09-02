@@ -33,7 +33,7 @@ impl fmt::Display for CatalogResourceBoundsError {
     }
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct CatalogDocument {
     pub schema: u32,
     #[serde(default)]
@@ -109,7 +109,7 @@ impl CatalogDocument {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct CapabilitySpec {
     pub id: String,
@@ -152,7 +152,7 @@ impl ScopeKind {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ComponentSpec {
     pub id: String,
@@ -223,7 +223,7 @@ pub struct TargetSupport {
     pub tier: SupportTier,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct CapabilityProvide {
     pub capability: String,
@@ -258,7 +258,7 @@ pub enum ProvideLayer {
     Decorator,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct CapabilityRequirement {
     pub capability: String,
@@ -275,7 +275,7 @@ pub enum RequirementMode {
     UsesIfPresent,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "mode", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum AppCoexistence {
     ConcurrentIndependent {
@@ -289,7 +289,7 @@ pub enum AppCoexistence {
     RequiresStop,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct EvidenceRef {
     pub source: String,
@@ -320,7 +320,7 @@ impl BuildRequirements {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct RuntimeAdapterSpec {
     pub id: String,
@@ -346,7 +346,7 @@ pub struct RuntimeAdapterSpec {
     pub build_requirements: BuildRequirements,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct HostBoundarySpec {
     pub id: String,

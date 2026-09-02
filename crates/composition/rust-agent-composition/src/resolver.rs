@@ -1194,9 +1194,10 @@ impl Resolution {
     }
 
     /// Verifies every canonical invariant derivable from the committed Resolution plus the
-    /// normalized profile and target. Catalog-derived binding, effect, build-requirement, and
-    /// handoff truth still requires the Phase 1A §26 normalized catalog/resolver-input commitment
-    /// gate; this method deliberately does not present structural self-consistency as that proof.
+    /// normalized profile and target. Composition loading and verification additionally rerun the
+    /// resolver from the identity-bound generator-input commitment to prove catalog-derived
+    /// binding, diagnostic, effect, build-requirement, and handoff truth. This standalone check
+    /// deliberately does not present structural self-consistency as that stronger proof.
     pub(crate) fn verify_canonical_semantics(
         &self,
         profile: &CompositionProfile,
