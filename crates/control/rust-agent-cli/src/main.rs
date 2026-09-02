@@ -30,8 +30,6 @@ enum Command {
         #[arg(long)]
         workspace: PathBuf,
         #[arg(long)]
-        catalog: PathBuf,
-        #[arg(long)]
         profile: PathBuf,
         #[arg(long)]
         output: PathBuf,
@@ -102,7 +100,6 @@ fn main() -> Result<()> {
     match cli.command {
         Command::Compose {
             workspace,
-            catalog,
             profile,
             output,
             rustc,
@@ -115,7 +112,6 @@ fn main() -> Result<()> {
                 // Preserve each input path component so the compiler can reject
                 // symlink provenance instead of receiving an already-resolved
                 // path. The canonical workspace above remains the trust root.
-                catalog_path: absolute_output(&catalog)?,
                 profile_path: absolute_output(&profile)?,
                 output_root: absolute_output(&output)?,
                 rustc_path: canonical_existing(&rustc)?,

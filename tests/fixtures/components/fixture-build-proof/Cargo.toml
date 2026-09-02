@@ -7,6 +7,26 @@ rust-version.workspace = true
 license.workspace = true
 publish = false
 
+[package.metadata.rust-agent]
+schema = 1
+id = "fixture-build-proof"
+scope = "app"
+factory = "rust_agent_fixture_build_proof::build"
+dependencies-type = "rust_agent_fixture_build_proof::Dependencies"
+config-type = "rust_agent_fixture_build_proof::Config"
+config-source = "none"
+targets = ["cfg(true)"]
+support = "production"
+lifecycle-effects = []
+provides = [{ capability = "cap:build-proof", priority = 100, effects = [] }]
+requires = []
+conflicts = []
+security = []
+runtime-primitives = []
+build-requirements = { executables = ["fixture-codegen"], read-inputs = ["fixture-sdk"], environment = [] }
+app-coexistence = { mode = "requires-stop" }
+cargo-features = []
+
 [features]
 default = []
 

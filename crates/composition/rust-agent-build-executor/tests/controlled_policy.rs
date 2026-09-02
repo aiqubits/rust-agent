@@ -50,7 +50,6 @@ fn build_requirements_need_exact_policy_kind_but_never_expand_runtime_effects() 
     let registry = registry_cache();
     let generated = compose(&ComposeOptions {
         workspace_root: root.clone(),
-        catalog_path: root.join("tests/fixtures/catalog.toml"),
         profile_path: root.join("tests/fixtures/profiles/controlled-build.toml"),
         output_root: temp.path().join("compositions"),
         rustc_path: rustc.clone(),
@@ -132,7 +131,6 @@ fn development_build_rejects_ancestor_cargo_config_before_cargo_side_effects() {
     let linker = tool("cc");
     let generated = compose(&ComposeOptions {
         workspace_root: root.clone(),
-        catalog_path: root.join("tests/fixtures/catalog.toml"),
         profile_path: root.join("tests/fixtures/profiles/minimal.toml"),
         output_root: temp.path().join("compositions"),
         rustc_path: rustc.clone(),
@@ -190,7 +188,6 @@ fn development_build_rejects_noncanonical_and_duplicate_composition_manifests_be
     let linker = tool("cc");
     let generated = compose(&ComposeOptions {
         workspace_root: root.clone(),
-        catalog_path: root.join("tests/fixtures/catalog.toml"),
         profile_path: root.join("tests/fixtures/profiles/minimal.toml"),
         output_root: temp.path().join("compositions"),
         rustc_path: rustc.clone(),

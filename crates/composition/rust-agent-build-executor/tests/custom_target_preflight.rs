@@ -1,9 +1,12 @@
 #![cfg(unix)]
 
 use std::{
+    env,
+    ffi::OsString,
     fs,
     os::unix::fs::PermissionsExt as _,
     path::{Path, PathBuf},
+    process::Command,
 };
 
 use rust_agent_build_executor::{
@@ -14,17 +17,38 @@ use tempfile::TempDir;
 
 const LOGICAL_TARGET: &str = "x86_64-unknown-linux-gnu";
 
+fn tool(name: &str) -> PathBuf {
+    let selected = Command::new("rustup")
+        .args(["which", name])
+        .output()
+        .expect("rustup must resolve the selected test toolchain");
+    if selected.status.success() {
+        return PathBuf::from(String::from_utf8(selected.stdout).unwrap().trim())
+            .canonicalize()
+            .unwrap();
+    }
+    let path = env::var_os("PATH").unwrap_or_else(|| OsString::from(""));
+    env::split_paths(&path)
+        .map(|directory| directory.join(name))
+        .find(|candidate| candidate.is_file())
+        .unwrap()
+        .canonicalize()
+        .unwrap()
+}
+
 fn write_executable(path: &Path, body: &str) {
     fs::write(path, body).unwrap();
     fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
 }
 
 fn write_fake_rustc(path: &Path, arch: &str) {
+    let real_rustc = tool("rustc");
     write_executable(
         path,
         &format!(
             concat!(
                 "#!/bin/sh\n",
+                "if [ \"$1\" = -vV ]; then exec {:?} \"$@\"; fi\n",
                 "IFS= read -r observed < \"$4\"\n",
                 "[ \"$observed\" = '{{\"arch\":\"x86_64\"}}' ] || exit 41\n",
                 "printf '%s\\n' 'panic=\"unwind\"' 'target_abi=\"\"' ",
@@ -33,17 +57,20 @@ fn write_fake_rustc(path: &Path, arch: &str) {
                 "'target_os=\"linux\"' 'target_pointer_width=\"64\"' ",
                 "'target_vendor=\"unknown\"' 'unix'\n"
             ),
+            real_rustc,
             arch = arch,
         ),
     );
 }
 
 fn write_fake_cargo(path: &Path, marker: &Path) {
+    let real_cargo = tool("cargo");
     write_executable(
         path,
         &format!(
             concat!(
                 "#!/bin/sh\n",
+                "if [ \"$1\" = metadata ]; then exec {:?} \"$@\"; fi\n",
                 "manifest=\nconfig=\nnext=\n",
                 "for arg in \"$@\"; do\n",
                 "  if [ \"$next\" = manifest ]; then manifest=\"$arg\"; next=; continue; fi\n",
@@ -77,6 +104,7 @@ fn write_fake_cargo(path: &Path, marker: &Path) {
                 "  *) exit 32 ;;\n",
                 "esac\n"
             ),
+            real_cargo,
             marker,
             LOGICAL_TARGET = LOGICAL_TARGET,
         ),
@@ -118,7 +146,6 @@ fn custom_target_development_preflight_uses_the_snapshot_and_stops_mismatch_befo
 
     let generated = compose(&ComposeOptions {
         workspace_root: workspace.clone(),
-        catalog_path: workspace.join("tests/fixtures/catalog.toml"),
         profile_path: workspace.join("tests/fixtures/profiles/minimal.toml"),
         output_root: temp.path().join("compositions"),
         rustc_path: rustc.clone(),
@@ -186,7 +213,6 @@ fn custom_target_development_cargo_prioritizes_snapshot_drift_over_child_failure
 
     let generated = compose(&ComposeOptions {
         workspace_root: workspace.clone(),
-        catalog_path: workspace.join("tests/fixtures/catalog.toml"),
         profile_path: workspace.join("tests/fixtures/profiles/minimal.toml"),
         output_root: temp.path().join("compositions"),
         rustc_path: rustc.clone(),

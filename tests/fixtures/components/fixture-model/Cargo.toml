@@ -7,6 +7,26 @@ rust-version.workspace = true
 license.workspace = true
 publish = false
 
+[package.metadata.rust-agent]
+schema = 1
+id = "fixture-model"
+scope = "app"
+factory = "rust_agent_fixture_model::build"
+dependencies-type = "rust_agent_fixture_model::Dependencies"
+config-type = "rust_agent_fixture_model::Config"
+config-source = "none"
+targets = ["cfg(true)"]
+support = "production"
+lifecycle-effects = []
+provides = [{ capability = "cap:model", priority = 100, effects = [] }]
+requires = []
+conflicts = []
+security = []
+runtime-primitives = []
+build-requirements = { executables = [], read-inputs = [], environment = [] }
+app-coexistence = { mode = "requires-stop" }
+cargo-features = []
+
 [features]
 default = []
 

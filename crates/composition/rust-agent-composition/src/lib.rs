@@ -5,6 +5,7 @@ pub mod cargo_context;
 pub mod catalog;
 pub mod custom_target;
 pub mod diagnostics;
+mod discovery;
 pub mod generator;
 pub mod manifest;
 pub mod metadata;
@@ -18,6 +19,10 @@ pub use catalog::{CatalogError, NormalizedCatalog};
 pub use custom_target::{
     CustomTargetSnapshotObservation, CustomTargetSpecError, CustomTargetSpecRecord,
     MAX_CUSTOM_TARGET_SPEC_BYTES, verify_custom_target_snapshot,
+};
+pub use discovery::{
+    DiscoveryError, MAX_CARGO_METADATA_DIAGNOSTIC_BYTES, MAX_CARGO_METADATA_OUTPUT_BYTES,
+    MAX_CARGO_METADATA_PACKAGES,
 };
 pub use generator::{
     ComposeError, ComposeOptions, GeneratedComposition, compose, load_manifest, verify_composition,

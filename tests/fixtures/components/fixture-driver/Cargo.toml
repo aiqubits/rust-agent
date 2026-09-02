@@ -7,6 +7,26 @@ rust-version.workspace = true
 license.workspace = true
 publish = false
 
+[package.metadata.rust-agent]
+schema = 1
+id = "fixture-driver"
+scope = "app"
+factory = "rust_agent_fixture_driver::build"
+dependencies-type = "rust_agent_fixture_driver::Dependencies"
+config-type = "rust_agent_fixture_driver::Config"
+config-source = "none"
+targets = ["cfg(true)"]
+support = "production"
+lifecycle-effects = []
+provides = [{ capability = "cap:driver", priority = 100, effects = [] }]
+requires = [{ capability = "cap:model", mode = "required", field = "model" }]
+conflicts = []
+security = []
+runtime-primitives = []
+build-requirements = { executables = [], read-inputs = [], environment = [] }
+app-coexistence = { mode = "requires-stop" }
+cargo-features = []
+
 [features]
 default = []
 

@@ -76,8 +76,6 @@ fn registry_backed_compose_requires_explicit_cache_end_to_end() {
         "compose".into(),
         "--workspace".into(),
         root.as_os_str().into(),
-        "--catalog".into(),
-        root.join("tests/fixtures/catalog.toml").into_os_string(),
         "--profile".into(),
         root.join("tests/fixtures/profiles/controlled-build.toml")
             .into_os_string(),
@@ -142,8 +140,6 @@ fn custom_target_cli_preserves_symlink_provenance_and_fails_before_tools() {
             "compose".into(),
             "--workspace".into(),
             root.as_os_str().into(),
-            "--catalog".into(),
-            root.join("tests/fixtures/catalog.toml").into_os_string(),
             "--profile".into(),
             root.join("tests/fixtures/profiles/minimal.toml")
                 .into_os_string(),
@@ -170,7 +166,7 @@ fn custom_target_cli_preserves_symlink_provenance_and_fails_before_tools() {
 
 #[cfg(unix)]
 #[test]
-fn catalog_and_profile_cli_preserve_symlink_provenance_and_fail_before_tools() {
+fn profile_cli_preserves_symlink_provenance_and_fails_before_tools() {
     use std::os::unix::fs::symlink;
 
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -180,9 +176,7 @@ fn catalog_and_profile_cli_preserve_symlink_provenance_and_fail_before_tools() {
     let binary = PathBuf::from(env!("CARGO_BIN_EXE_rust-agent"));
     fs::create_dir_all(root.join("target/workspace-input-cli-tests")).unwrap();
     let temp = TempDir::new_in(root.join("target/workspace-input-cli-tests")).unwrap();
-    let linked_catalog = temp.path().join("catalog.toml");
     let linked_profile = temp.path().join("profile.toml");
-    symlink(root.join("tests/fixtures/catalog.toml"), &linked_catalog).unwrap();
     symlink(
         root.join("tests/fixtures/profiles/minimal.toml"),
         &linked_profile,
@@ -195,49 +189,34 @@ fn catalog_and_profile_cli_preserve_symlink_provenance_and_fail_before_tools() {
     write_executable(&rustc, &format!("printf ran > {}", rustc_marker.display()));
     write_executable(&cargo, &format!("printf ran > {}", cargo_marker.display()));
 
-    for (name, catalog, profile) in [
-        (
-            "catalog",
-            linked_catalog.clone(),
-            root.join("tests/fixtures/profiles/minimal.toml"),
-        ),
-        (
-            "profile",
-            root.join("tests/fixtures/catalog.toml"),
-            linked_profile.clone(),
-        ),
-    ] {
-        let output_root = temp.path().join(format!("{name}-compositions"));
-        let output = run(
-            &binary,
-            &[
-                "compose".into(),
-                "--workspace".into(),
-                root.as_os_str().into(),
-                "--catalog".into(),
-                catalog.as_os_str().into(),
-                "--profile".into(),
-                profile.as_os_str().into(),
-                "--output".into(),
-                output_root.as_os_str().into(),
-                "--rustc".into(),
-                rustc.as_os_str().into(),
-                "--cargo".into(),
-                cargo.as_os_str().into(),
-            ],
-        );
+    let output_root = temp.path().join("profile-compositions");
+    let output = run(
+        &binary,
+        &[
+            "compose".into(),
+            "--workspace".into(),
+            root.as_os_str().into(),
+            "--profile".into(),
+            linked_profile.as_os_str().into(),
+            "--output".into(),
+            output_root.as_os_str().into(),
+            "--rustc".into(),
+            rustc.as_os_str().into(),
+            "--cargo".into(),
+            cargo.as_os_str().into(),
+        ],
+    );
 
-        assert!(!output.status.success(), "{name} symlink was accepted");
-        assert!(
-            String::from_utf8_lossy(&output.stderr)
-                .contains("source tree contains a symlink or unsupported file"),
-            "unexpected {name} error: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        assert!(!rustc_marker.exists());
-        assert!(!cargo_marker.exists());
-        assert!(!output_root.exists());
-    }
+    assert!(!output.status.success(), "profile symlink was accepted");
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("source tree contains a symlink or unsupported file"),
+        "unexpected profile error: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!rustc_marker.exists());
+    assert!(!cargo_marker.exists());
+    assert!(!output_root.exists());
 }
 
 #[cfg(unix)]
@@ -261,8 +240,6 @@ fn composition_and_integration_cli_preserve_root_symlink_provenance() {
             "compose".into(),
             "--workspace".into(),
             root.as_os_str().into(),
-            "--catalog".into(),
-            root.join("tests/fixtures/catalog.toml").into_os_string(),
             "--profile".into(),
             root.join("tests/fixtures/profiles/minimal.toml")
                 .into_os_string(),
@@ -384,8 +361,6 @@ fn compose_build_inspect_emit_verify_end_to_end() {
             "compose".into(),
             "--workspace".into(),
             root.as_os_str().into(),
-            "--catalog".into(),
-            root.join("tests/fixtures/catalog.toml").into_os_string(),
             "--profile".into(),
             root.join("tests/fixtures/profiles/minimal.toml")
                 .into_os_string(),
@@ -515,8 +490,6 @@ fn javascript_wasm_compose_build_and_inspect_end_to_end() {
             "compose".into(),
             "--workspace".into(),
             root.as_os_str().into(),
-            "--catalog".into(),
-            root.join("tests/fixtures/catalog.toml").into_os_string(),
             "--profile".into(),
             root.join("tests/fixtures/profiles/wasm-js.toml")
                 .into_os_string(),

@@ -55,7 +55,6 @@ fn compose_fixture(
 ) -> GeneratedComposition {
     compose(&ComposeOptions {
         workspace_root: root.to_owned(),
-        catalog_path: root.join("tests/fixtures/catalog.toml"),
         profile_path: root.join("tests/fixtures/profiles").join(profile),
         output_root: temp.join("compositions"),
         rustc_path: rustc.to_owned(),

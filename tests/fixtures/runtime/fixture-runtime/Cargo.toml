@@ -7,6 +7,17 @@ rust-version.workspace = true
 license.workspace = true
 publish = false
 
+[package.metadata.rust-agent.runtime-adapter]
+schema = 1
+id = "fixture-runtime"
+constructor = "rust_agent_fixture_runtime::create_runtime_primitives"
+targets = ["cfg(true)"]
+support = "production"
+primitives = []
+security = []
+app-coexistence = { mode = "requires-stop" }
+build-requirements = { executables = [], read-inputs = [], environment = [] }
+
 [features]
 default = []
 

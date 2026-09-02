@@ -13,6 +13,38 @@ executables = []
 read-inputs = []
 environment = []
 
+[[package.metadata.rust-agent.capability]]
+id = "cap:model"
+api = "rust_agent_fixture_api::Model"
+binding-type = "rust_agent_fixture_api::ModelBinding"
+binding-adapter = "rust_agent_fixture_api::ModelBinding::from_provider"
+binding = "singleton"
+scope = "app"
+
+[[package.metadata.rust-agent.capability]]
+id = "cap:driver"
+api = "rust_agent_fixture_api::Driver"
+binding-type = "rust_agent_fixture_api::DriverBinding"
+binding-adapter = "rust_agent_fixture_api::DriverBinding::from_provider"
+binding = "singleton"
+scope = "app"
+
+[[package.metadata.rust-agent.capability]]
+id = "cap:fs-read"
+api = "rust_agent_fixture_api::FileReader"
+binding-type = "rust_agent_fixture_api::FileReaderBinding"
+binding-adapter = "rust_agent_fixture_api::FileReaderBinding::from_provider"
+binding = "singleton"
+scope = "app"
+
+[[package.metadata.rust-agent.capability]]
+id = "cap:build-proof"
+api = "rust_agent_fixture_api::BuildProof"
+binding-type = "rust_agent_fixture_api::BuildProofBinding"
+binding-adapter = "rust_agent_fixture_api::BuildProofBinding::from_provider"
+binding = "singleton"
+scope = "app"
+
 [features]
 default = []
 

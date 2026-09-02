@@ -32,11 +32,12 @@ use crate::{
         CustomTargetSpecError, CustomTargetSpecRecord, MAX_CUSTOM_TARGET_SPEC_BYTES,
         verify_custom_target_snapshot,
     },
+    discovery::{DiscoveredCatalog, DiscoveryError, discover_workspace_catalog},
     manifest::{
         CargoResolutionRecord, CompositionIdentityPayload, CompositionManifest,
         GeneratedFileRecord, SecurityManifest, SourcePackageRecord,
     },
-    metadata::{BuildRequirements, CatalogDocument, HostBoundaryKind, MAX_CATALOG_DOCUMENT_BYTES},
+    metadata::{BuildRequirements, HostBoundaryKind},
     profile::{BuildKind, CompositionProfile, MAX_PROFILE_DOCUMENT_BYTES},
     resolver::{ResolutionError, resolve},
     snapshot::{
@@ -62,7 +63,6 @@ enum CompositionTreeEntryKind {
 #[derive(Clone, Debug)]
 pub struct ComposeOptions {
     pub workspace_root: PathBuf,
-    pub catalog_path: PathBuf,
     pub profile_path: PathBuf,
     pub output_root: PathBuf,
     pub rustc_path: PathBuf,
@@ -92,8 +92,8 @@ pub enum ComposeError {
     },
     #[error("I/O failed while composing: {0}")]
     Io(#[from] io::Error),
-    #[error("catalog TOML is invalid: {0}")]
-    CatalogToml(#[source] toml::de::Error),
+    #[error("workspace package metadata discovery failed: {0}")]
+    Discovery(#[from] DiscoveryError),
     #[error("profile TOML is invalid: {0}")]
     ProfileToml(#[source] toml::de::Error),
     #[error("catalog is invalid: {0}")]
@@ -134,25 +134,11 @@ pub fn compose(options: &ComposeOptions) -> Result<GeneratedComposition, Compose
     validate_options(options)?;
     reject_ambient_cargo_config_for_planned_path(&options.workspace_root)?;
     reject_ambient_cargo_config_for_planned_path(&options.output_root)?;
-    let catalog_bytes = read_workspace_input(
-        &options.workspace_root,
-        &options.catalog_path,
-        MAX_CATALOG_DOCUMENT_BYTES,
-    )?;
     let profile_bytes = read_workspace_input(
         &options.workspace_root,
         &options.profile_path,
         MAX_PROFILE_DOCUMENT_BYTES,
     )?;
-    let document =
-        CatalogDocument::from_toml(std::str::from_utf8(&catalog_bytes).map_err(|error| {
-            ComposeError::ManifestNormalization {
-                path: options.catalog_path.display().to_string(),
-                message: error.to_string(),
-            }
-        })?)
-        .map_err(ComposeError::CatalogToml)?;
-    let catalog = NormalizedCatalog::normalize(document)?;
     let profile =
         CompositionProfile::from_toml(std::str::from_utf8(&profile_bytes).map_err(|error| {
             ComposeError::ManifestNormalization {
@@ -187,6 +173,63 @@ pub fn compose(options: &ComposeOptions) -> Result<GeneratedComposition, Compose
         } else {
             Target::query(&options.rustc_path, &profile.target, profile.environment)?
         };
+        fs::create_dir_all(staging.join(".cargo"))?;
+        let cargo_config = generate_cargo_config(
+            &target,
+            custom_target_spec.as_ref().map(|spec| &spec.record),
+        );
+        write_text(&staging.join(".cargo/config.toml"), &cargo_config)?;
+        let cargo_target_input = custom_target_spec.as_ref().map_or_else(
+            || PathBuf::from(&target.triple),
+            |spec| staging.join(&spec.record.snapshot_path),
+        );
+        let custom_snapshot_before = custom_target_spec
+            .as_ref()
+            .map(|spec| {
+                verify_custom_target_snapshot(
+                    &spec.record,
+                    &staging.join(&spec.record.snapshot_path),
+                )
+            })
+            .transpose()?;
+        let discovered = discover_workspace_catalog(
+            &options.workspace_root,
+            &options.cargo_path,
+            &options.rustc_path,
+            &staging,
+            &cargo_target_input,
+        );
+        let cargo_config_after = (|| {
+            verify_cargo_config_isolation(&staging, &staging.join(".cargo/config.toml"))?;
+            read_composition_regular_file_bounded(
+                &staging.join(".cargo/config.toml"),
+                MAX_COMPOSITION_CONTROL_FILE_BYTES,
+                None,
+            )
+        })();
+        let custom_snapshot_after = custom_target_spec
+            .as_ref()
+            .map(|spec| {
+                verify_custom_target_snapshot(
+                    &spec.record,
+                    &staging.join(&spec.record.snapshot_path),
+                )
+            })
+            .transpose()?;
+        if let (Some(before), Some(after)) = (&custom_snapshot_before, &custom_snapshot_after) {
+            before.ensure_unchanged(after, "Cargo metadata discovery")?;
+        }
+        if cargo_config_after? != cargo_config.as_bytes() {
+            return Err(ComposeError::Verification(
+                "Cargo metadata discovery changed the generated Cargo config".into(),
+            ));
+        }
+        let DiscoveredCatalog {
+            document,
+            root_build_requirements,
+        } = discovered?;
+        validate_mandatory_root_build_requirements(&root_build_requirements)?;
+        let catalog = NormalizedCatalog::normalize(document)?;
         let resolution = resolve(&catalog, &profile, &target)?;
         let requires_registry = profile.build_kind == BuildKind::Wasm
             || selected_packages_require_registry(&options.workspace_root, &catalog, &resolution)?;
@@ -195,9 +238,13 @@ pub fn compose(options: &ComposeOptions) -> Result<GeneratedComposition, Compose
                 "composition Cargo graph requires an explicit offline registry cache".into(),
             ));
         }
+        let composition_catalog = CompositionCatalog {
+            normalized: &catalog,
+            root_build_requirements: &root_build_requirements,
+        };
         compose_in_staging(
             options,
-            &catalog,
+            &composition_catalog,
             &profile,
             &target,
             &resolution,
@@ -213,13 +260,15 @@ pub fn compose(options: &ComposeOptions) -> Result<GeneratedComposition, Compose
 
 fn compose_in_staging(
     options: &ComposeOptions,
-    catalog: &NormalizedCatalog,
+    composition_catalog: &CompositionCatalog<'_>,
     profile: &CompositionProfile,
     target: &Target,
     resolution: &crate::resolver::Resolution,
     custom_target_spec: Option<&CustomTargetSpecRecord>,
     staging: &Path,
 ) -> Result<GeneratedComposition, ComposeError> {
+    let catalog = composition_catalog.normalized;
+    let root_build_requirements = composition_catalog.root_build_requirements;
     let target_facts = TargetFactsRecord::from_target(target)?;
     write_canonical_target_facts(&staging.join("target-facts.json"), &target_facts)?;
 
@@ -260,11 +309,6 @@ fn compose_in_staging(
         "pub const COMPOSITION_HASH: &str = \"pending\";\n",
     )?;
 
-    write_text(
-        &staging.join(".cargo/config.toml"),
-        &generate_cargo_config(target, custom_target_spec),
-    )?;
-
     generate_lockfile(options, staging, custom_target_spec)?;
     let (registries, git_sources) = locked_cargo_sources(&staging.join("Cargo.lock"))?;
     let cargo_resolution = CargoResolutionRecord {
@@ -298,7 +342,9 @@ fn compose_in_staging(
         generated_paths.push(&spec.snapshot_path);
     }
     let generated_files = generated_file_records(staging, &generated_paths)?;
-    let direct_root_build_requirements = direct_root_build_requirements(catalog, resolution);
+    let direct_root_build_requirements =
+        direct_root_build_requirements(catalog, resolution, root_build_requirements)?;
+    let build_requirements = build_requirement_union(&direct_root_build_requirements);
     let mut component_runtime_effects = BTreeSet::new();
     for id in &resolution.selected_components {
         component_runtime_effects.extend(catalog.components[id].security.iter().cloned());
@@ -352,7 +398,7 @@ fn compose_in_staging(
         component_runtime_effects: component_runtime_effects.clone(),
         host_runtime_effects: host_runtime_effects.clone(),
         compiled_runtime_effects: resolution.compiled_runtime_effects.clone(),
-        build_requirements: resolution.build_requirements.clone(),
+        build_requirements: build_requirements.clone(),
         direct_root_build_requirements,
         app_handoff: resolution.app_handoff,
         deployable: false,
@@ -372,7 +418,7 @@ fn compose_in_staging(
             component_runtime_effects,
             host_runtime_effects,
             compiled_runtime_effects: resolution.compiled_runtime_effects.clone(),
-            build_requirements: resolution.build_requirements.clone(),
+            build_requirements,
         },
     )?;
 
@@ -482,18 +528,18 @@ fn reuse_existing_composition(
 fn direct_root_build_requirements(
     catalog: &NormalizedCatalog,
     resolution: &crate::resolver::Resolution,
-) -> BTreeMap<String, crate::metadata::BuildRequirements> {
-    let mut roots = BTreeMap::from([
-        ("api:rust-agent-core".into(), BuildRequirements::default()),
-        (
-            "api:rust-agent-runtime-api".into(),
-            BuildRequirements::default(),
-        ),
-        (
-            "api:rust-agent-fixture-api".into(),
-            BuildRequirements::default(),
-        ),
-    ]);
+    root_build_requirements: &BTreeMap<String, BuildRequirements>,
+) -> Result<BTreeMap<String, crate::metadata::BuildRequirements>, ComposeError> {
+    validate_mandatory_root_build_requirements(root_build_requirements)?;
+    let mut roots = BTreeMap::new();
+    for package in [
+        "rust-agent-core",
+        "rust-agent-runtime-api",
+        "rust-agent-fixture-api",
+    ] {
+        let requirements = &root_build_requirements[package];
+        roots.insert(format!("api:{package}"), requirements.clone());
+    }
     for component in &resolution.selected_components {
         roots.insert(
             format!("component:{component}"),
@@ -512,7 +558,34 @@ fn direct_root_build_requirements(
             catalog.host_boundaries[boundary].build_requirements.clone(),
         );
     }
-    roots
+    Ok(roots)
+}
+
+fn validate_mandatory_root_build_requirements(
+    root_build_requirements: &BTreeMap<String, BuildRequirements>,
+) -> Result<(), ComposeError> {
+    for package in [
+        "rust-agent-core",
+        "rust-agent-runtime-api",
+        "rust-agent-fixture-api",
+    ] {
+        if !root_build_requirements.contains_key(package) {
+            return Err(ComposeError::UnsupportedPhase1A(format!(
+                "mandatory API package `{package}` is missing package-owned build requirements"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn build_requirement_union(
+    direct_root_build_requirements: &BTreeMap<String, BuildRequirements>,
+) -> BuildRequirements {
+    let mut union = BuildRequirements::default();
+    for requirements in direct_root_build_requirements.values() {
+        union.merge_from(requirements);
+    }
+    union
 }
 
 pub fn load_manifest(path: &Path) -> Result<CompositionManifest, ComposeError> {
@@ -640,7 +713,6 @@ fn verify_composition_with_location_policy(
         || manifest.host_boundary != manifest.resolution.host_boundary
         || manifest.app_handoff != manifest.resolution.app_handoff
         || manifest.compiled_runtime_effects != manifest.resolution.compiled_runtime_effects
-        || manifest.build_requirements != manifest.resolution.build_requirements
         || manifest.cargo_resolution.target != manifest.target
         || manifest.cargo_resolution.cargo_target_input
             != manifest.custom_target_spec.as_ref().map_or_else(
@@ -740,18 +812,19 @@ fn verify_composition_with_location_policy(
             "direct root build-requirement keys differ from the resolved Cargo roots".into(),
         ));
     }
-    let mut requirement_union = crate::metadata::BuildRequirements::default();
-    for requirements in manifest.direct_root_build_requirements.values() {
-        requirement_union
-            .executables
-            .extend(requirements.executables.iter().cloned());
-        requirement_union
-            .read_inputs
-            .extend(requirements.read_inputs.iter().cloned());
-        requirement_union
-            .environment
-            .extend(requirements.environment.iter().cloned());
+    let mut resolution_requirement_union = BuildRequirements::default();
+    for (root, requirements) in &manifest.direct_root_build_requirements {
+        if !root.starts_with("api:") {
+            resolution_requirement_union.merge_from(requirements);
+        }
     }
+    if resolution_requirement_union != manifest.resolution.build_requirements {
+        return Err(ComposeError::Verification(
+            "resolved Component/runtime/Host build requirements differ from their direct roots"
+                .into(),
+        ));
+    }
+    let requirement_union = build_requirement_union(&manifest.direct_root_build_requirements);
     if requirement_union != manifest.build_requirements {
         return Err(ComposeError::Verification(
             "direct root build requirements do not equal the authorized union".into(),
@@ -1397,6 +1470,11 @@ struct PackageInput {
 struct PreparedCustomTargetSpec {
     record: CustomTargetSpecRecord,
     bytes: Vec<u8>,
+}
+
+struct CompositionCatalog<'a> {
+    normalized: &'a NormalizedCatalog,
+    root_build_requirements: &'a BTreeMap<String, BuildRequirements>,
 }
 
 fn prepare_custom_target_spec(
@@ -2565,7 +2643,6 @@ fn generated_file_records(
 fn validate_options(options: &ComposeOptions) -> Result<(), ComposeError> {
     for path in [
         &options.workspace_root,
-        &options.catalog_path,
         &options.profile_path,
         &options.output_root,
         &options.rustc_path,
@@ -2899,7 +2976,6 @@ mod tests {
             .canonicalize()
             .unwrap();
         ComposeOptions {
-            catalog_path: root.join("tests/fixtures/catalog.toml"),
             profile_path: root.join(profile),
             output_root: temp.path().join("compositions"),
             rustc_path: tool("rustc"),
@@ -2988,11 +3064,14 @@ mod tests {
         let rustc = temp.join("fake-rustc");
         let cargo = temp.join("fake-cargo");
         let rustc_log = temp.join("rustc-args.log");
+        let real_rustc = tool("rustc");
+        let real_cargo = tool("cargo");
         write_executable(
             &rustc,
             &format!(
                 concat!(
                     "#!/bin/sh\n",
+                    "if [ \"$1\" = -vV ]; then exec {:?} \"$@\"; fi\n",
                     "IFS= read -r observed < \"$4\"\n",
                     "[ -n \"$observed\" ] || exit 41\n",
                     "printf 'rustc-args:%s\\nrustc-spec:%s\\n' \"$*\" \"$observed\" >> {:?}\n",
@@ -3002,7 +3081,7 @@ mod tests {
                     "'target_os=\"linux\"' 'target_pointer_width=\"64\"' ",
                     "'target_vendor=\"unknown\"' 'unix'\n"
                 ),
-                rustc_log,
+                real_rustc, rustc_log,
             ),
         );
         write_executable(
@@ -3010,6 +3089,7 @@ mod tests {
             &format!(
                 concat!(
                     "#!/bin/sh\n",
+                    "if [ \"$1\" = metadata ]; then exec {:?} \"$@\"; fi\n",
                     "manifest=\nconfig=\nnext=\n",
                     "for arg in \"$@\"; do\n",
                     "  if [ \"$next\" = manifest ]; then manifest=\"$arg\"; next=; continue; fi\n",
@@ -3030,7 +3110,7 @@ mod tests {
                     "printf '# generated by bounded custom-target fixture\\nversion = 4\\n' ",
                     "> \"${{manifest%/*}}/Cargo.lock\"\n"
                 ),
-                rustc_log,
+                real_cargo, rustc_log,
             ),
         );
         (rustc, cargo, rustc_log)
@@ -3047,7 +3127,6 @@ mod tests {
         (
             ComposeOptions {
                 workspace_root: workspace_root.to_owned(),
-                catalog_path: workspace_root.join("tests/fixtures/catalog.toml"),
                 profile_path: workspace_root.join("tests/fixtures/profiles/minimal.toml"),
                 output_root: temp.join(output),
                 rustc_path: rustc,
@@ -3247,7 +3326,7 @@ mod tests {
         let result = compose(&options);
         assert!(cargo_marker.exists());
         assert!(matches!(
-            result,
+            &result,
             Err(ComposeError::CustomTargetSpec(
                 CustomTargetSpecError::SnapshotChanged(_)
                     | CustomTargetSpecError::IdentityMismatch(_)
@@ -3541,7 +3620,175 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn oversized_catalog_and_profile_fail_before_tool_or_output_side_effects() {
+    fn missing_package_owned_root_requirements_fail_before_lockfile_side_effects() {
+        let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../..")
+            .canonicalize()
+            .unwrap();
+        let temp = TempDir::new().unwrap();
+        let metadata_path = temp.path().join("cargo-metadata.json");
+        let lock_marker = temp.path().join("lockfile-command-ran");
+        let fake_cargo = temp.path().join("fake-cargo");
+        let output = Command::new(tool("cargo"))
+            .args([
+                "metadata",
+                "--format-version",
+                "1",
+                "--no-deps",
+                "--locked",
+                "--offline",
+            ])
+            .current_dir(&workspace)
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let mut metadata: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        let core = metadata["packages"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|package| package["name"] == "rust-agent-core")
+            .unwrap();
+        core["metadata"] = serde_json::json!({});
+        fs::write(&metadata_path, serde_json::to_vec(&metadata).unwrap()).unwrap();
+        write_executable(
+            &fake_cargo,
+            &format!(
+                concat!(
+                    "#!/bin/sh\n",
+                    "if [ \"$1\" = metadata ]; then exec /bin/cat {:?}; fi\n",
+                    ": > {:?}\n",
+                    "exit 91\n"
+                ),
+                metadata_path, lock_marker,
+            ),
+        );
+        let mut compose_options = options(&temp, "tests/fixtures/profiles/minimal.toml");
+        compose_options.cargo_path = fake_cargo;
+
+        let result = compose(&compose_options);
+        assert!(
+            matches!(
+                &result,
+                Err(ComposeError::UnsupportedPhase1A(message))
+                    if message.contains("rust-agent-core")
+                        && message.contains("package-owned build requirements")
+            ),
+            "unexpected result: {result:?}"
+        );
+        assert!(!lock_marker.exists());
+        assert!(
+            fs::read_dir(&compose_options.output_root)
+                .unwrap()
+                .next()
+                .is_none()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn package_owned_api_requirements_flow_into_the_composition_manifest() {
+        let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../..")
+            .canonicalize()
+            .unwrap();
+        let temp = TempDir::new().unwrap();
+        let metadata_path = temp.path().join("cargo-metadata.json");
+        let fake_cargo = temp.path().join("fake-cargo");
+        let real_cargo = tool("cargo");
+        let output = Command::new(&real_cargo)
+            .args([
+                "metadata",
+                "--format-version",
+                "1",
+                "--no-deps",
+                "--locked",
+                "--offline",
+            ])
+            .current_dir(&workspace)
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let mut metadata: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        let core = metadata["packages"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|package| package["name"] == "rust-agent-core")
+            .unwrap();
+        core["metadata"]["rust-agent"]["build-requirements"]["executables"] =
+            serde_json::json!(["fixture-codegen"]);
+        fs::write(&metadata_path, serde_json::to_vec(&metadata).unwrap()).unwrap();
+        write_executable(
+            &fake_cargo,
+            &format!(
+                concat!(
+                    "#!/bin/sh\n",
+                    "if [ \"$1\" = metadata ]; then exec /bin/cat {:?}; fi\n",
+                    "exec {:?} \"$@\"\n"
+                ),
+                metadata_path, real_cargo,
+            ),
+        );
+        let mut compose_options = options(&temp, "tests/fixtures/profiles/minimal.toml");
+        compose_options.cargo_path = fake_cargo;
+
+        let generated = compose(&compose_options).unwrap();
+        let requirements =
+            &generated.manifest.direct_root_build_requirements["api:rust-agent-core"];
+        assert_eq!(
+            requirements.executables,
+            BTreeSet::from(["fixture-codegen".into()])
+        );
+        assert!(
+            generated
+                .manifest
+                .build_requirements
+                .executables
+                .contains("fixture-codegen")
+        );
+        assert!(generated.manifest.compiled_runtime_effects.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cargo_metadata_config_drift_takes_priority_over_child_failure() {
+        let temp = TempDir::new().unwrap();
+        let cargo = temp.path().join("mutating-cargo");
+        let marker = temp.path().join("cargo-ran");
+        write_executable(
+            &cargo,
+            &format!(
+                concat!(
+                    "#!/bin/sh\n",
+                    ": > {:?}\n",
+                    "printf '[net]\\noffline = false\\n' > \"$PWD/.cargo/config.toml\"\n",
+                    "exit 71\n"
+                ),
+                marker,
+            ),
+        );
+        let mut compose_options = options(&temp, "tests/fixtures/profiles/minimal.toml");
+        compose_options.cargo_path = cargo;
+
+        let result = compose(&compose_options);
+        assert!(marker.exists());
+        assert!(matches!(
+            result,
+            Err(ComposeError::Verification(message))
+                if message.contains("changed the generated Cargo config")
+        ));
+        assert!(
+            fs::read_dir(&compose_options.output_root)
+                .unwrap()
+                .next()
+                .is_none()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn oversized_profile_fails_before_tool_or_output_side_effects() {
         let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../..")
             .canonicalize()
@@ -3561,37 +3808,28 @@ mod tests {
             &format!("#!/bin/sh\nprintf cargo-ran > {cargo_marker:?}\nexit 97\n"),
         );
 
-        for (name, maximum) in [
-            ("catalog", MAX_CATALOG_DOCUMENT_BYTES),
-            ("profile", MAX_PROFILE_DOCUMENT_BYTES),
-        ] {
-            let oversized = inputs.path().join(format!("oversized-{name}.toml"));
-            File::create(&oversized)
-                .unwrap()
-                .set_len(maximum as u64 + 1)
-                .unwrap();
-            let output_root = effects.path().join(format!("{name}-compositions"));
-            let mut compose_options = options(&effects, "tests/fixtures/profiles/minimal.toml");
-            compose_options.rustc_path = rustc.clone();
-            compose_options.cargo_path = cargo.clone();
-            compose_options.output_root = output_root.clone();
-            if name == "catalog" {
-                compose_options.catalog_path = oversized;
-            } else {
-                compose_options.profile_path = oversized;
-            }
+        let oversized = inputs.path().join("oversized-profile.toml");
+        File::create(&oversized)
+            .unwrap()
+            .set_len(MAX_PROFILE_DOCUMENT_BYTES as u64 + 1)
+            .unwrap();
+        let output_root = effects.path().join("profile-compositions");
+        let mut compose_options = options(&effects, "tests/fixtures/profiles/minimal.toml");
+        compose_options.rustc_path = rustc;
+        compose_options.cargo_path = cargo;
+        compose_options.output_root = output_root.clone();
+        compose_options.profile_path = oversized;
 
-            assert!(matches!(
-                compose(&compose_options),
-                Err(ComposeError::InputTooLarge {
-                    maximum: actual_maximum,
-                    ..
-                }) if actual_maximum == maximum as u64
-            ));
-            assert!(!rustc_marker.exists());
-            assert!(!cargo_marker.exists());
-            assert!(!output_root.exists());
-        }
+        assert!(matches!(
+            compose(&compose_options),
+            Err(ComposeError::InputTooLarge {
+                maximum: actual_maximum,
+                ..
+            }) if actual_maximum == MAX_PROFILE_DOCUMENT_BYTES as u64
+        ));
+        assert!(!rustc_marker.exists());
+        assert!(!cargo_marker.exists());
+        assert!(!output_root.exists());
     }
 
     #[cfg(unix)]

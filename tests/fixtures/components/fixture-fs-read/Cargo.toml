@@ -7,6 +7,26 @@ rust-version.workspace = true
 license.workspace = true
 publish = false
 
+[package.metadata.rust-agent]
+schema = 1
+id = "fixture-fs-read"
+scope = "app"
+factory = "rust_agent_fixture_fs_read::build"
+dependencies-type = "rust_agent_fixture_fs_read::Dependencies"
+config-type = "rust_agent_fixture_fs_read::Config"
+config-source = "none"
+targets = ['cfg(not(target_arch = "wasm32"))']
+support = "production"
+lifecycle-effects = []
+provides = [{ capability = "cap:fs-read", priority = 100, effects = ["read-local"] }]
+requires = []
+conflicts = []
+security = ["read-local"]
+runtime-primitives = []
+build-requirements = { executables = [], read-inputs = [], environment = [] }
+app-coexistence = { mode = "requires-stop" }
+cargo-features = []
+
 [features]
 default = []
 

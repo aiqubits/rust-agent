@@ -643,7 +643,10 @@ fn validate_effects(owner: &str, effects: &BTreeSet<String>) -> Result<(), Catal
     Ok(())
 }
 
-fn validate_build_requirements(owner: &str, value: &BuildRequirements) -> Result<(), CatalogError> {
+pub(crate) fn validate_build_requirements(
+    owner: &str,
+    value: &BuildRequirements,
+) -> Result<(), CatalogError> {
     for id in value
         .executables
         .iter()

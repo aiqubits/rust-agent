@@ -1,3 +1,5 @@
+# Test-only normalized catalog oracle for parser/resolver and package-metadata round-trip tests.
+# Production composition discovers these declarations from Cargo package metadata.
 schema = 1
 
 [[capabilities]]

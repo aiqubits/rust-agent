@@ -7,6 +7,16 @@ rust-version.workspace = true
 license.workspace = true
 publish = false
 
+[package.metadata.rust-agent.host-export]
+schema = 1
+id = "fixture-host-export"
+export-module = "rust_agent_fixture_host_export"
+targets = ['cfg(target_arch = "wasm32")']
+support = "production"
+security = ["host-bridge"]
+runtime-adapters = ["fixture-runtime"]
+build-requirements = { executables = ["wasm-bindgen-cli"], read-inputs = [], environment = [] }
+
 [features]
 default = []
 

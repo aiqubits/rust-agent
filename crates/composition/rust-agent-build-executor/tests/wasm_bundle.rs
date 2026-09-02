@@ -109,7 +109,6 @@ fn javascript_wasm_bundle_is_closed_verified_and_executable_end_to_end() {
     let registry = registry_cache();
     let generated = compose(&ComposeOptions {
         workspace_root: root.clone(),
-        catalog_path: root.join("tests/fixtures/catalog.toml"),
         profile_path: root.join("tests/fixtures/profiles/wasm-js.toml"),
         output_root: temp.path().join("compositions"),
         rustc_path: rustc.clone(),

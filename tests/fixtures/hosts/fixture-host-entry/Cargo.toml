@@ -7,6 +7,19 @@ rust-version.workspace = true
 license.workspace = true
 publish = false
 
+[package.metadata.rust-agent.host-entry]
+schema = 1
+id = "fixture-host-entry"
+entry = "rust_agent_fixture_host_entry::run"
+targets = ['cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))']
+target-support = [
+    { predicate = 'cfg(target_os = "linux")', tier = "production" },
+    { predicate = 'cfg(any(target_os = "macos", target_os = "windows"))', tier = "experimental" },
+]
+security = ["host-bridge"]
+runtime-adapters = ["fixture-runtime"]
+build-requirements = { executables = [], read-inputs = [], environment = [] }
+
 [features]
 default = []
 

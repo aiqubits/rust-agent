@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "algorithm": "sha256-rust-agent-composition-v1",
-  "composition-hash": "48a64ca5a319a6cb644106cc1d679382f275b4a4f17e9985e99e6f1526ff6092",
+  "composition-hash": "19c8615925033e691a71276c9e5291f6f38bac37854dc829cdcd352edc68d6c3",
   "build-kind": "library",
   "profile-name": "fixture-minimal",
   "normalized-profile": {
@@ -319,14 +319,14 @@
       "id": "fixture-api",
       "package": "rust-agent-fixture-api",
       "logical-path": "tests/fixtures/api/fixture-api",
-      "tree-digest": "1c7fb2bfc3b449c6edf542722e73dab37fbeb1ef171a644ebdc0d115f7b95eea",
+      "tree-digest": "fdbe9e843742cf4028a8c278c92480b6d91b4cf13e82a985c71d254d8f77bf12",
       "tree-entries": [
         {
           "path": "Cargo.toml",
           "kind": {
             "kind": "regular-file",
-            "sha256": "c6d030d5208e9a6b7f19973f03a741fea138597d12711ee981456a584632f935",
-            "bytes": 494
+            "sha256": "666a0969cd4da274ba686a38073ca25b271f324368886e0e9bc8b01efb1138df",
+            "bytes": 1580
           },
           "metadata": {
             "contract": "read-only-epoch-v1",
@@ -391,14 +391,14 @@
       "id": "fixture-driver",
       "package": "rust-agent-fixture-driver",
       "logical-path": "tests/fixtures/components/fixture-driver",
-      "tree-digest": "df3111b875fc8c2abdd5e82fcff38d3ad370f5804ee9490bf7d02727dbd396c0",
+      "tree-digest": "3169e69551afe5d9659daa981cadba89aedc6182db7cbca226d9186804e0249a",
       "tree-entries": [
         {
           "path": "Cargo.toml",
           "kind": {
             "kind": "regular-file",
-            "sha256": "aafd15ea80f3472425371bc3116d262e3bb087a89a0a382a1ecbe4f1e2889fea",
-            "bytes": 465
+            "sha256": "36b002a5a9ce835a67d831bd55258ac18d329b189a753bd48e23060d8c3c3cd1",
+            "bytes": 1234
           },
           "metadata": {
             "contract": "read-only-epoch-v1",
@@ -463,14 +463,14 @@
       "id": "fixture-model",
       "package": "rust-agent-fixture-model",
       "logical-path": "tests/fixtures/components/fixture-model",
-      "tree-digest": "eb98bd973eb454f8677787e8b71083427b9cdd1abd07fcc9862798b93bc09d4f",
+      "tree-digest": "c8ea84ed365eca85961fd2ec6142cd3c8fcf52079cba730c781c31440bccbbee",
       "tree-entries": [
         {
           "path": "Cargo.toml",
           "kind": {
             "kind": "regular-file",
-            "sha256": "e51b6086536fac7e0a12fa3946f378ffbe546eb464ae18f17aa91a64ebbf16de",
-            "bytes": 465
+            "sha256": "4dc30c1308d7d826e055f02ed24e0e597477545879ce649121ce278ab9baa33d",
+            "bytes": 1142
           },
           "metadata": {
             "contract": "read-only-epoch-v1",
@@ -535,14 +535,14 @@
       "id": "fixture-runtime",
       "package": "rust-agent-fixture-runtime",
       "logical-path": "tests/fixtures/runtime/fixture-runtime",
-      "tree-digest": "4005bdec814b17bfa7ae11f551404919e3ffb6bf1bb35995725fc6337602ca8c",
+      "tree-digest": "13fda7ca5d7c475d5047cd54d2fd3703bb327d602ae3aa4a6c4b442c675e2093",
       "tree-entries": [
         {
           "path": "Cargo.toml",
           "kind": {
             "kind": "regular-file",
-            "sha256": "5280eebc75fee3fa1e3b52619563f594f3c07b925770ae89af1ed41d8ea6c507",
-            "bytes": 378
+            "sha256": "0a73dcb688de0d5bc1b7978df384d0bc6c4ab09678c476f054cb73c631b6a26e",
+            "bytes": 809
           },
           "metadata": {
             "contract": "read-only-epoch-v1",
