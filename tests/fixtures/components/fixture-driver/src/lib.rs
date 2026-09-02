@@ -1,6 +1,11 @@
 use rust_agent_fixture_api::{Driver, ModelBinding};
 use rust_agent_runtime_api::{ComponentBuildError, ComponentOutput, RuntimePrimitiveBindings};
 
+#[cfg(not(target_arch = "wasm32"))]
+pub use rust_agent_fixture_target_native::TARGET_DEPENDENCY_MARKER;
+#[cfg(target_arch = "wasm32")]
+pub use rust_agent_fixture_target_wasm::TARGET_DEPENDENCY_MARKER;
+
 #[derive(Clone, Debug, Default)]
 pub struct Config;
 
@@ -48,6 +53,7 @@ mod tests {
 
     #[test]
     fn driver_uses_only_the_model_binding() {
+        assert_eq!(TARGET_DEPENDENCY_MARKER, "native");
         let model = ModelBinding::from_provider(Arc::new(Echo));
         let output = build(
             &Config,

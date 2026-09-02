@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "algorithm": "sha256-rust-agent-composition-v1",
-  "composition-hash": "1e3d6951fd5b8790e1b770485663c5790654c241401b131a0b6c5b6ad48f8340",
+  "composition-hash": "07052f97e885cd49463849715d0cd31f7c1cffe49e277e0cec5a4c9eaccc540e",
   "build-kind": "library",
   "profile-name": "fixture-minimal",
   "normalized-profile": {
@@ -811,14 +811,14 @@
       "id": "fixture-driver",
       "package": "rust-agent-fixture-driver",
       "logical-path": "tests/fixtures/components/fixture-driver",
-      "tree-digest": "3169e69551afe5d9659daa981cadba89aedc6182db7cbca226d9186804e0249a",
+      "tree-digest": "8d7277eeb670e58c9d404641b12f846ed5e6f805f6864a1a7506da662936b1db",
       "tree-entries": [
         {
           "path": "Cargo.toml",
           "kind": {
             "kind": "regular-file",
-            "sha256": "36b002a5a9ce835a67d831bd55258ac18d329b189a753bd48e23060d8c3c3cd1",
-            "bytes": 1234
+            "sha256": "53a26dce176bf4ab6fa63e3bf23b8866e3a99eb26caad5d954ce493f3d23a3b6",
+            "bytes": 1371
           },
           "metadata": {
             "contract": "read-only-epoch-v1",
@@ -859,8 +859,8 @@
           "path": "src/lib.rs",
           "kind": {
             "kind": "regular-file",
-            "sha256": "cee9ac2b2cf8b66591c96272890b5634b89063b0eb5c29bfb95e6df744fc6498",
-            "bytes": 1368
+            "sha256": "a0b4b8a68bf7c68eac5e36f6a029de7d36aee9e49b2082a2581a42bdc8393480",
+            "bytes": 1626
           },
           "metadata": {
             "contract": "read-only-epoch-v1",
@@ -1005,6 +1005,78 @@
             "kind": "regular-file",
             "sha256": "3c1dd048db25921b2b7b711e9641eae9f20e56aa6ed1cf8370e0108c65340a8f",
             "bytes": 535
+          },
+          "metadata": {
+            "contract": "read-only-epoch-v1",
+            "mode": 292,
+            "uid": 0,
+            "gid": 0,
+            "atime-nanos": 0,
+            "mtime-nanos": 0,
+            "ctime-nanos": 0,
+            "birthtime-nanos": 0,
+            "link-count": 1,
+            "device": 0,
+            "inode": 0,
+            "generation": 0
+          }
+        }
+      ]
+    },
+    {
+      "id": "path-dependency-rust-agent-fixture-target-native",
+      "package": "rust-agent-fixture-target-native",
+      "logical-path": "tests/fixtures/helpers/fixture-target-native",
+      "tree-digest": "ae6f9127dcf7d98da6cf875f981777541f5b3ce05966b9db5d8d2a4736705517",
+      "tree-entries": [
+        {
+          "path": "Cargo.toml",
+          "kind": {
+            "kind": "regular-file",
+            "sha256": "ee389285d370a9efa508bb38308a67a9c0eeda6ce0c9218fc4be49a47ab586e9",
+            "bytes": 250
+          },
+          "metadata": {
+            "contract": "read-only-epoch-v1",
+            "mode": 292,
+            "uid": 0,
+            "gid": 0,
+            "atime-nanos": 0,
+            "mtime-nanos": 0,
+            "ctime-nanos": 0,
+            "birthtime-nanos": 0,
+            "link-count": 1,
+            "device": 0,
+            "inode": 0,
+            "generation": 0
+          }
+        },
+        {
+          "path": "src",
+          "kind": {
+            "kind": "directory"
+          },
+          "metadata": {
+            "contract": "read-only-epoch-v1",
+            "mode": 365,
+            "uid": 0,
+            "gid": 0,
+            "atime-nanos": 0,
+            "mtime-nanos": 0,
+            "ctime-nanos": 0,
+            "birthtime-nanos": 0,
+            "link-count": 1,
+            "device": 0,
+            "inode": 0,
+            "generation": 0
+          }
+        },
+        {
+          "path": "src/lib.rs",
+          "kind": {
+            "kind": "regular-file",
+            "sha256": "803c72853a01bda8ea252b9f91a7a40be533840e81e4d8af131d27a1ef7a3951",
+            "bytes": 236
           },
           "metadata": {
             "contract": "read-only-epoch-v1",
@@ -1414,8 +1486,8 @@
     },
     {
       "path": "Cargo.toml",
-      "digest": "ea0d9d2d9a4a7c3cac26309845c1e14b58d73102b805b1d844292e42b46d0d14",
-      "bytes": 1288
+      "digest": "be48103af88ccb94dc4b4de41db5ef26c83623fecefab21de461c0b8ac6cc61b",
+      "bytes": 1348
     },
     {
       "path": "cargo-resolution.json",
@@ -1443,7 +1515,7 @@
       "bytes": 499
     }
   ],
-  "cargo-lock-digest": "c2b26cfaf8190297043770d999c71e78000ed284e0319b84227bedbc61bdf37e",
+  "cargo-lock-digest": "83b1cb01b4c0375203f013198df864489d1dadb8b5593c70133ad3a556a97dee",
   "cargo-resolution-digest": "acbbbc450e8390feda7f5e81cff47ba3c303903da3d7b22138f3e19b14133172",
   "cargo-resolution": {
     "schema": 1,

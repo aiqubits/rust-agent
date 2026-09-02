@@ -14,6 +14,7 @@ exclude = [
     "sources/tests/fixtures/api/fixture-api",
     "sources/tests/fixtures/components/fixture-driver",
     "sources/tests/fixtures/components/fixture-model",
+    "sources/tests/fixtures/helpers/fixture-target-wasm",
     "sources/tests/fixtures/hosts/fixture-host-export",
     "sources/tests/fixtures/runtime/fixture-runtime",
 ]

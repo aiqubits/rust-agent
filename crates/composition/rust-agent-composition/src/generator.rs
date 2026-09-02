@@ -55,6 +55,9 @@ const PINNED_RUST_VERSION: &str = env!("CARGO_PKG_RUST_VERSION");
 const MAX_SOURCE_MANIFEST_BYTES: u64 = MAX_CANONICAL_SNAPSHOT_JSON_BYTES as u64;
 const MAX_COMPOSITION_CONTROL_FILE_BYTES: u64 = MAX_CANONICAL_SNAPSHOT_JSON_BYTES as u64;
 const SNAPSHOT_COPY_BUFFER_BYTES: usize = 64 * 1024;
+const MAX_SNAPSHOT_PACKAGES: usize = 1_024;
+const MAX_MANIFEST_TARGET_SELECTORS: usize = 256;
+const MAX_MANIFEST_DEPENDENCIES: usize = 4_096;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum CompositionTreeEntryKind {
@@ -244,8 +247,12 @@ pub fn compose(options: &ComposeOptions) -> Result<GeneratedComposition, Compose
         let catalog = NormalizedCatalog::normalize(document)?;
         let generator_inputs = GeneratorInputCommitment::new(&catalog, &root_build_requirements)?;
         let resolution = resolve(&catalog, &profile, &target)?;
+        let package_inputs =
+            selected_packages(&options.workspace_root, &catalog, &resolution, &target)?;
         let requires_registry = profile.build_kind == BuildKind::Wasm
-            || selected_packages_require_registry(&options.workspace_root, &catalog, &resolution)?;
+            || package_inputs
+                .iter()
+                .any(|package| package.manifest.requires_registry);
         if requires_registry && options.registry_cache_path.is_none() {
             return Err(ComposeError::InvalidRegistryCache(
                 "composition Cargo graph requires an explicit offline registry cache".into(),
@@ -262,6 +269,7 @@ pub fn compose(options: &ComposeOptions) -> Result<GeneratedComposition, Compose
                 profile: &profile,
                 target: &target,
                 resolution: &resolution,
+                package_inputs: &package_inputs,
                 custom_target_spec: custom_target_spec.as_ref().map(|spec| &spec.record),
                 compose_rustc: &compose_rustc,
             },
@@ -284,6 +292,7 @@ fn compose_in_staging(
         profile,
         target,
         resolution,
+        package_inputs,
         custom_target_spec,
         compose_rustc,
     } = inputs;
@@ -299,15 +308,13 @@ fn compose_in_staging(
 
     let source_root = staging.join("sources");
     fs::create_dir_all(&source_root)?;
-    let package_inputs = selected_packages(catalog, resolution)?;
     let mut sources = Vec::new();
-    for package in &package_inputs {
-        sources.push(snapshot_package(
+    for package in package_inputs {
+        sources.push(snapshot_planned_package(
             &options.workspace_root,
             &source_root,
-            &package.id,
-            &package.package,
-            &package.path,
+            package,
+            target,
         )?);
     }
     sources.sort_by(|left, right| left.id.cmp(&right.id));
@@ -317,7 +324,7 @@ fn compose_in_staging(
     fs::create_dir_all(staging.join("vendor"))?;
     write_text(
         &staging.join("Cargo.toml"),
-        &generate_cargo_toml(catalog, resolution, &package_inputs, profile.build_kind),
+        &generate_cargo_toml(catalog, resolution, package_inputs, profile.build_kind),
     )?;
     write_text(
         &staging.join("src/lib.rs"),
@@ -999,7 +1006,26 @@ fn verify_composition_with_location_policy(
         ));
     }
 
-    let package_inputs = selected_packages(&committed_catalog, &rederived_resolution)?;
+    let package_inputs = selected_packages(
+        &path.join("sources"),
+        &committed_catalog,
+        &rederived_resolution,
+        &manifest.normalized_target,
+    )?;
+    for package in &package_inputs {
+        let snapshot_manifest = path.join("sources").join(&package.path).join("Cargo.toml");
+        let bytes = read_composition_regular_file_bounded(
+            &snapshot_manifest,
+            MAX_SOURCE_MANIFEST_BYTES,
+            None,
+        )?;
+        if bytes != package.manifest.bytes {
+            return Err(ComposeError::Verification(format!(
+                "source manifest `{}` is not the exact target-fact-derived normalized manifest",
+                package.path
+            )));
+        }
+    }
     let mut expected_source_headers = package_inputs
         .iter()
         .map(|package| {
@@ -1703,6 +1729,23 @@ struct PackageInput {
     id: String,
     package: String,
     path: String,
+    direct: bool,
+    manifest: NormalizedPackageManifest,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct NormalizedPackageManifest {
+    bytes: Vec<u8>,
+    package: String,
+    path_dependencies: Vec<PathDependency>,
+    requires_registry: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct PathDependency {
+    alias: String,
+    package: String,
+    logical_path: String,
 }
 
 #[derive(Clone, Debug)]
@@ -1722,6 +1765,7 @@ struct StagingCompositionInputs<'a> {
     profile: &'a CompositionProfile,
     target: &'a Target,
     resolution: &'a crate::resolver::Resolution,
+    package_inputs: &'a [PackageInput],
     custom_target_spec: Option<&'a CustomTargetSpecRecord>,
     compose_rustc: &'a ComposeRustcSnapshot,
 }
@@ -1828,10 +1872,18 @@ fn materialize_custom_target_spec(
     Ok(())
 }
 
-fn selected_packages(
+#[derive(Clone, Debug)]
+struct PackageSeed {
+    id: String,
+    package: String,
+    path: String,
+    direct: bool,
+}
+
+fn selected_package_roots(
     catalog: &NormalizedCatalog,
     resolution: &crate::resolver::Resolution,
-) -> Result<Vec<PackageInput>, ComposeError> {
+) -> Result<Vec<PackageSeed>, ComposeError> {
     let mut packages = BTreeMap::new();
     let mandatory = [
         (
@@ -1853,10 +1905,11 @@ fn selected_packages(
     for (id, package, path) in mandatory {
         packages.insert(
             path.to_owned(),
-            PackageInput {
+            PackageSeed {
                 id: id.to_owned(),
                 package: package.to_owned(),
                 path: path.to_owned(),
+                direct: true,
             },
         );
     }
@@ -1864,20 +1917,22 @@ fn selected_packages(
         let component = &catalog.components[id];
         packages.insert(
             component.package_path.clone(),
-            PackageInput {
+            PackageSeed {
                 id: component.id.clone(),
                 package: component.package.clone(),
                 path: component.package_path.clone(),
+                direct: true,
             },
         );
     }
     let adapter = &catalog.runtime_adapters[&resolution.runtime_adapter];
     packages.insert(
         adapter.package_path.clone(),
-        PackageInput {
+        PackageSeed {
             id: adapter.id.clone(),
             package: adapter.package.clone(),
             path: adapter.package_path.clone(),
+            direct: true,
         },
     );
     if let Some(boundary_id) = &resolution.host_boundary {
@@ -1890,72 +1945,806 @@ fn selected_packages(
         }
         packages.insert(
             boundary.package_path.clone(),
-            PackageInput {
+            PackageSeed {
                 id: boundary.id.clone(),
                 package: boundary.package.clone(),
                 path: boundary.package_path.clone(),
+                direct: true,
             },
         );
     }
     Ok(packages.into_values().collect())
 }
 
-fn selected_packages_require_registry(
+fn selected_packages(
     workspace_root: &Path,
     catalog: &NormalizedCatalog,
     resolution: &crate::resolver::Resolution,
-) -> Result<bool, ComposeError> {
-    for package in selected_packages(catalog, resolution)? {
-        let manifest_path = workspace_root.join(&package.path).join("Cargo.toml");
-        let manifest_bytes =
-            read_bounded_snapshot_source_file(&manifest_path, MAX_SOURCE_MANIFEST_BYTES)?;
-        let input = std::str::from_utf8(&manifest_bytes).map_err(|error| {
-            ComposeError::ManifestNormalization {
-                path: manifest_path.display().to_string(),
-                message: error.to_string(),
-            }
-        })?;
-        let document: toml::Value =
-            toml::from_str(input).map_err(|error| ComposeError::ManifestNormalization {
-                path: manifest_path.display().to_string(),
-                message: error.to_string(),
-            })?;
-        if manifest_requires_registry(&document) {
-            return Ok(true);
+    target: &Target,
+) -> Result<Vec<PackageInput>, ComposeError> {
+    package_closure(
+        workspace_root,
+        selected_package_roots(catalog, resolution)?,
+        target,
+    )
+}
+
+fn package_closure(
+    workspace_root: &Path,
+    roots: Vec<PackageSeed>,
+    target: &Target,
+) -> Result<Vec<PackageInput>, ComposeError> {
+    let mut seeds = BTreeMap::new();
+    for seed in roots {
+        if let Some(previous) = seeds.insert(seed.path.clone(), seed.clone())
+            && (previous.id != seed.id || previous.package != seed.package)
+        {
+            return manifest_error(
+                workspace_root.join(&seed.path).join("Cargo.toml"),
+                format!(
+                    "package path `{}` is claimed by both `{}` and `{}`",
+                    seed.path, previous.id, seed.id
+                ),
+            );
         }
     }
-    Ok(false)
-}
+    let mut pending = seeds.keys().cloned().collect::<BTreeSet<_>>();
+    let mut packages = BTreeMap::new();
+    let mut package_paths = BTreeMap::<String, String>::new();
 
-fn manifest_requires_registry(document: &toml::Value) -> bool {
-    let Some(root) = document.as_table() else {
-        return false;
-    };
-    if dependency_sections_require_registry(root) {
-        return true;
-    }
-    root.get("target")
-        .and_then(toml::Value::as_table)
-        .is_some_and(|targets| {
-            targets.values().any(|target| {
-                target
-                    .as_table()
-                    .is_some_and(dependency_sections_require_registry)
-            })
-        })
-}
-
-fn dependency_sections_require_registry(table: &toml::Table) -> bool {
-    ["dependencies", "build-dependencies"]
-        .into_iter()
-        .filter_map(|section| table.get(section).and_then(toml::Value::as_table))
-        .flatten()
-        .any(|(_, dependency)| match dependency {
-            toml::Value::Table(specification) => {
-                !specification.contains_key("path") && !specification.contains_key("git")
+    while let Some(path) = pending.pop_first() {
+        let seed = seeds
+            .get(&path)
+            .expect("pending package always has a seed")
+            .clone();
+        let manifest = normalize_package_manifest(workspace_root, &path, target)?;
+        if manifest.package != seed.package {
+            return manifest_error(
+                workspace_root.join(&path).join("Cargo.toml"),
+                format!(
+                    "resolved package is `{}` but the dependency/catalog requires `{}`",
+                    manifest.package, seed.package
+                ),
+            );
+        }
+        if let Some(previous) = package_paths.insert(manifest.package.clone(), path.clone())
+            && previous != path
+        {
+            return manifest_error(
+                workspace_root.join(&path).join("Cargo.toml"),
+                format!(
+                    "package `{}` is ambiguous between `{previous}` and `{path}`",
+                    manifest.package
+                ),
+            );
+        }
+        let dependencies = manifest.path_dependencies.clone();
+        packages.insert(
+            path.clone(),
+            PackageInput {
+                id: seed.id,
+                package: seed.package,
+                path: path.clone(),
+                direct: seed.direct,
+                manifest,
+            },
+        );
+        for dependency in dependencies {
+            if packages.len() + pending.len() >= MAX_SNAPSHOT_PACKAGES
+                && !seeds.contains_key(&dependency.logical_path)
+            {
+                return manifest_error(
+                    workspace_root.join(&path).join("Cargo.toml"),
+                    format!("path dependency closure exceeds {MAX_SNAPSHOT_PACKAGES} packages"),
+                );
             }
-            _ => true,
+            if let Some(existing) = seeds.get(&dependency.logical_path) {
+                if existing.package != dependency.package {
+                    return manifest_error(
+                        workspace_root.join(&path).join("Cargo.toml"),
+                        format!(
+                            "dependency `{}` expects package `{}` at `{}`, already committed as `{}`",
+                            dependency.alias,
+                            dependency.package,
+                            dependency.logical_path,
+                            existing.package
+                        ),
+                    );
+                }
+                continue;
+            }
+            let dependency_path = dependency.logical_path.clone();
+            seeds.insert(
+                dependency_path.clone(),
+                PackageSeed {
+                    id: format!("path-dependency-{}", dependency.package),
+                    package: dependency.package,
+                    path: dependency_path.clone(),
+                    direct: false,
+                },
+            );
+            pending.insert(dependency_path);
+        }
+    }
+
+    if packages.len() > MAX_SNAPSHOT_PACKAGES {
+        return manifest_error(
+            workspace_root.join("Cargo.toml"),
+            format!("path dependency closure exceeds {MAX_SNAPSHOT_PACKAGES} packages"),
+        );
+    }
+    let mut source_ids = BTreeMap::new();
+    for package in packages.values() {
+        if let Some(previous) = source_ids.insert(package.id.clone(), package.path.clone()) {
+            return manifest_error(
+                workspace_root.join(&package.path).join("Cargo.toml"),
+                format!(
+                    "source id `{}` is ambiguous between `{previous}` and `{}`",
+                    package.id, package.path
+                ),
+            );
+        }
+    }
+    Ok(packages.into_values().collect())
+}
+
+fn manifest_error<T>(
+    path: impl AsRef<Path>,
+    message: impl Into<String>,
+) -> Result<T, ComposeError> {
+    Err(ComposeError::ManifestNormalization {
+        path: path.as_ref().display().to_string(),
+        message: message.into(),
+    })
+}
+
+fn normalize_package_manifest(
+    workspace_root: &Path,
+    logical_path: &str,
+    target: &Target,
+) -> Result<NormalizedPackageManifest, ComposeError> {
+    let package_root = resolve_package_root(workspace_root, logical_path)?;
+    let manifest_path = package_root.join("Cargo.toml");
+    let input = read_bounded_snapshot_source_file(&manifest_path, MAX_SOURCE_MANIFEST_BYTES)?;
+    let input =
+        std::str::from_utf8(&input).map_err(|error| ComposeError::ManifestNormalization {
+            path: manifest_path.display().to_string(),
+            message: error.to_string(),
+        })?;
+    let mut value: toml::Value =
+        toml::from_str(input).map_err(|error| ComposeError::ManifestNormalization {
+            path: manifest_path.display().to_string(),
+            message: error.to_string(),
+        })?;
+    let table = value
+        .as_table_mut()
+        .ok_or_else(|| ComposeError::ManifestNormalization {
+            path: manifest_path.display().to_string(),
+            message: "manifest root is not a table".into(),
+        })?;
+    if table.contains_key("workspace") {
+        return manifest_error(
+            &manifest_path,
+            "snapshot packages cannot contain a nested [workspace] table",
+        );
+    }
+    let package = table
+        .get_mut("package")
+        .and_then(toml::Value::as_table_mut)
+        .ok_or_else(|| ComposeError::ManifestNormalization {
+            path: manifest_path.display().to_string(),
+            message: "manifest has no package table".into(),
+        })?;
+    let package_name = package
+        .get("name")
+        .and_then(toml::Value::as_str)
+        .filter(|name| valid_cargo_package_name(name))
+        .ok_or_else(|| ComposeError::ManifestNormalization {
+            path: manifest_path.display().to_string(),
+            message: "package.name must be a bounded canonical Cargo package name".into(),
+        })?
+        .to_owned();
+    if package.contains_key("workspace") {
+        return manifest_error(
+            &manifest_path,
+            "package.workspace cannot remain active in a source snapshot",
+        );
+    }
+    package.insert("version".into(), toml::Value::String("0.1.0".into()));
+    package.insert("edition".into(), toml::Value::String("2024".into()));
+    package.insert(
+        "rust-version".into(),
+        toml::Value::String(PINNED_RUST_VERSION.into()),
+    );
+    package.insert("license".into(), toml::Value::String("MIT".into()));
+    package.remove("repository");
+    reject_remaining_workspace_inheritance(package, &manifest_path)?;
+
+    table.remove("dev-dependencies");
+    table.remove("lints");
+    expand_target_dependencies(table, target, &manifest_path)?;
+
+    let mut path_dependencies = Vec::new();
+    let mut requires_registry = false;
+    for section in ["dependencies", "build-dependencies"] {
+        normalize_dependency_section(
+            table,
+            section,
+            workspace_root,
+            logical_path,
+            &manifest_path,
+            &mut path_dependencies,
+            &mut requires_registry,
+        )?;
+    }
+    path_dependencies.sort_by(|left, right| {
+        (&left.logical_path, &left.package, &left.alias).cmp(&(
+            &right.logical_path,
+            &right.package,
+            &right.alias,
+        ))
+    });
+    path_dependencies.dedup();
+
+    let mut output =
+        toml::to_string(&value).map_err(|error| ComposeError::ManifestNormalization {
+            path: manifest_path.display().to_string(),
+            message: error.to_string(),
+        })?;
+    if !output.ends_with('\n') {
+        output.push('\n');
+    }
+    Ok(NormalizedPackageManifest {
+        bytes: output.into_bytes(),
+        package: package_name,
+        path_dependencies,
+        requires_registry,
+    })
+}
+
+fn valid_cargo_package_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 128
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+}
+
+fn reject_remaining_workspace_inheritance(
+    package: &toml::Table,
+    manifest_path: &Path,
+) -> Result<(), ComposeError> {
+    if package.values().any(|value| {
+        value
+            .as_table()
+            .and_then(|table| table.get("workspace"))
+            .is_some()
+    }) {
+        return manifest_error(
+            manifest_path,
+            "package workspace inheritance is not resolved by the Phase 1A snapshot schema",
+        );
+    }
+    Ok(())
+}
+
+fn expand_target_dependencies(
+    root: &mut toml::Table,
+    target: &Target,
+    manifest_path: &Path,
+) -> Result<(), ComposeError> {
+    let Some(target_value) = root.remove("target") else {
+        return Ok(());
+    };
+    let targets = target_value
+        .as_table()
+        .ok_or_else(|| ComposeError::ManifestNormalization {
+            path: manifest_path.display().to_string(),
+            message: "target dependency clauses must be a table".into(),
+        })?;
+    if targets.len() > MAX_MANIFEST_TARGET_SELECTORS {
+        return manifest_error(
+            manifest_path,
+            format!(
+                "target dependency selector count {} exceeds {MAX_MANIFEST_TARGET_SELECTORS}",
+                targets.len()
+            ),
+        );
+    }
+
+    let mut active_dependencies = Vec::new();
+    for (selector, value) in targets {
+        let matches = target.matches_cargo_selector(selector).map_err(|error| {
+            ComposeError::ManifestNormalization {
+                path: manifest_path.display().to_string(),
+                message: format!("invalid Cargo target selector `{selector}`: {error}"),
+            }
+        })?;
+        let clause = value
+            .as_table()
+            .ok_or_else(|| ComposeError::ManifestNormalization {
+                path: manifest_path.display().to_string(),
+                message: format!("Cargo target selector `{selector}` is not a table"),
+            })?;
+        for key in clause.keys() {
+            if !matches!(
+                key.as_str(),
+                "dependencies" | "dev-dependencies" | "build-dependencies"
+            ) {
+                return manifest_error(
+                    manifest_path,
+                    format!("unsupported key `{key}` in Cargo target selector `{selector}`"),
+                );
+            }
+        }
+        for section in ["dependencies", "dev-dependencies"] {
+            if let Some(dependencies) = clause.get(section) {
+                validate_dependency_table_shape(
+                    dependencies,
+                    manifest_path,
+                    &format!("target `{selector}` {section}"),
+                )?;
+            }
+        }
+        if let Some(build_dependencies) = clause.get("build-dependencies") {
+            let build_dependencies = dependency_table(
+                build_dependencies,
+                manifest_path,
+                &format!("target `{selector}` build-dependencies"),
+            )?;
+            if !build_dependencies.is_empty() {
+                return manifest_error(
+                    manifest_path,
+                    format!(
+                        "target-specific build-dependencies under `{selector}` require committed BuildHost facts"
+                    ),
+                );
+            }
+        }
+        if matches && let Some(dependencies) = clause.get("dependencies") {
+            let dependencies = dependency_table(
+                dependencies,
+                manifest_path,
+                &format!("target `{selector}` dependencies"),
+            )?;
+            active_dependencies.extend(
+                dependencies
+                    .iter()
+                    .map(|(alias, specification)| (alias.clone(), specification.clone())),
+            );
+        }
+    }
+
+    if active_dependencies.is_empty() {
+        return Ok(());
+    }
+    if !root.contains_key("dependencies") {
+        root.insert(
+            "dependencies".into(),
+            toml::Value::Table(toml::Table::new()),
+        );
+    }
+    let dependencies = root
+        .get_mut("dependencies")
+        .and_then(toml::Value::as_table_mut)
+        .ok_or_else(|| ComposeError::ManifestNormalization {
+            path: manifest_path.display().to_string(),
+            message: "dependencies must be a table".into(),
+        })?;
+    for (alias, specification) in active_dependencies {
+        if dependencies.contains_key(&alias) {
+            return manifest_error(
+                manifest_path,
+                format!(
+                    "dependency alias `{alias}` is selected by more than one unconditional/target clause"
+                ),
+            );
+        }
+        dependencies.insert(alias, specification);
+    }
+    Ok(())
+}
+
+fn validate_dependency_table_shape(
+    value: &toml::Value,
+    manifest_path: &Path,
+    context: &str,
+) -> Result<(), ComposeError> {
+    let dependencies = dependency_table(value, manifest_path, context)?;
+    if dependencies.len() > MAX_MANIFEST_DEPENDENCIES {
+        return manifest_error(
+            manifest_path,
+            format!(
+                "{context} contains {} entries; maximum is {MAX_MANIFEST_DEPENDENCIES}",
+                dependencies.len()
+            ),
+        );
+    }
+    for (alias, specification) in dependencies {
+        if !valid_cargo_package_name(alias) {
+            return manifest_error(
+                manifest_path,
+                format!("{context} has invalid dependency alias `{alias}`"),
+            );
+        }
+        match specification {
+            toml::Value::String(_) => {}
+            toml::Value::Table(specification) => {
+                let allowed = BTreeSet::from([
+                    "branch",
+                    "default-features",
+                    "features",
+                    "git",
+                    "optional",
+                    "package",
+                    "path",
+                    "registry",
+                    "rev",
+                    "tag",
+                    "version",
+                    "workspace",
+                ]);
+                if let Some(unknown) = specification
+                    .keys()
+                    .find(|key| !allowed.contains(key.as_str()))
+                {
+                    return manifest_error(
+                        manifest_path,
+                        format!("{context} dependency `{alias}` has unsupported key `{unknown}`"),
+                    );
+                }
+                if specification.contains_key("workspace") {
+                    return manifest_error(
+                        manifest_path,
+                        format!("{context} dependency `{alias}` uses workspace inheritance"),
+                    );
+                }
+                if specification.contains_key("registry") {
+                    return manifest_error(
+                        manifest_path,
+                        format!("{context} dependency `{alias}` uses a named registry"),
+                    );
+                }
+                if let Some(package) = specification.get("package")
+                    && !package.as_str().is_some_and(valid_cargo_package_name)
+                {
+                    return manifest_error(
+                        manifest_path,
+                        format!("{context} dependency `{alias}` has an invalid package name"),
+                    );
+                }
+                for key in ["version", "git", "branch", "tag", "rev"] {
+                    if let Some(value) = specification.get(key)
+                        && value.as_str().is_none()
+                    {
+                        return manifest_error(
+                            manifest_path,
+                            format!("{context} dependency `{alias}` key `{key}` must be a string"),
+                        );
+                    }
+                }
+                for key in ["optional", "default-features"] {
+                    if let Some(value) = specification.get(key)
+                        && value.as_bool().is_none()
+                    {
+                        return manifest_error(
+                            manifest_path,
+                            format!("{context} dependency `{alias}` key `{key}` must be a boolean"),
+                        );
+                    }
+                }
+                if let Some(features) = specification.get("features") {
+                    let Some(features) = features.as_array() else {
+                        return manifest_error(
+                            manifest_path,
+                            format!("{context} dependency `{alias}` features must be an array"),
+                        );
+                    };
+                    if features.len() > MAX_MANIFEST_DEPENDENCIES
+                        || features.iter().any(|feature| {
+                            feature.as_str().is_none_or(|feature| {
+                                feature.is_empty()
+                                    || feature.len() > 256
+                                    || feature.contains(char::is_whitespace)
+                            })
+                        })
+                    {
+                        return manifest_error(
+                            manifest_path,
+                            format!(
+                                "{context} dependency `{alias}` features are invalid or exceed bounds"
+                            ),
+                        );
+                    }
+                }
+                let git_references = ["branch", "tag", "rev"]
+                    .into_iter()
+                    .filter(|key| specification.contains_key(*key))
+                    .count();
+                if git_references > 1 || (git_references == 1 && !specification.contains_key("git"))
+                {
+                    return manifest_error(
+                        manifest_path,
+                        format!("{context} dependency `{alias}` has an ambiguous git reference"),
+                    );
+                }
+                if let Some(path) = specification.get("path") {
+                    let path =
+                        path.as_str()
+                            .ok_or_else(|| ComposeError::ManifestNormalization {
+                                path: manifest_path.display().to_string(),
+                                message: format!(
+                                    "{context} dependency `{alias}` path must be a string"
+                                ),
+                            })?;
+                    validate_relative_dependency_path(path, manifest_path, context, alias)?;
+                    if specification.contains_key("git") {
+                        return manifest_error(
+                            manifest_path,
+                            format!("{context} dependency `{alias}` combines path and git"),
+                        );
+                    }
+                }
+            }
+            _ => {
+                return manifest_error(
+                    manifest_path,
+                    format!("{context} dependency `{alias}` has an invalid specification"),
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+fn dependency_table<'a>(
+    value: &'a toml::Value,
+    manifest_path: &Path,
+    context: &str,
+) -> Result<&'a toml::Table, ComposeError> {
+    value
+        .as_table()
+        .ok_or_else(|| ComposeError::ManifestNormalization {
+            path: manifest_path.display().to_string(),
+            message: format!("{context} must be a table"),
         })
+}
+
+fn normalize_dependency_section(
+    root: &mut toml::Table,
+    section: &str,
+    workspace_root: &Path,
+    package_logical_path: &str,
+    manifest_path: &Path,
+    path_dependencies: &mut Vec<PathDependency>,
+    requires_registry: &mut bool,
+) -> Result<(), ComposeError> {
+    let Some(value) = root.get_mut(section) else {
+        return Ok(());
+    };
+    validate_dependency_table_shape(value, manifest_path, section)?;
+    let dependencies = value
+        .as_table_mut()
+        .expect("dependency table shape was validated");
+    for (alias, specification) in dependencies {
+        match specification {
+            toml::Value::String(_) => *requires_registry = true,
+            toml::Value::Table(specification) => {
+                let expected_package = specification
+                    .get("package")
+                    .and_then(toml::Value::as_str)
+                    .unwrap_or(alias)
+                    .to_owned();
+                if let Some(raw_path) = specification
+                    .get("path")
+                    .and_then(toml::Value::as_str)
+                    .map(str::to_owned)
+                {
+                    if specification.get("optional").and_then(toml::Value::as_bool) == Some(true) {
+                        return manifest_error(
+                            manifest_path,
+                            format!(
+                                "{section} dependency `{alias}` is an optional path dependency; Phase 1A requires exact feature-unit planning before snapshot inclusion"
+                            ),
+                        );
+                    }
+                    let dependency_logical_path = resolve_dependency_logical_path(
+                        workspace_root,
+                        package_logical_path,
+                        &raw_path,
+                        manifest_path,
+                        alias,
+                    )?;
+                    let rewritten =
+                        relative_package_path(package_logical_path, &dependency_logical_path);
+                    specification.insert("path".into(), toml::Value::String(rewritten));
+                    path_dependencies.push(PathDependency {
+                        alias: alias.clone(),
+                        package: expected_package,
+                        logical_path: dependency_logical_path,
+                    });
+                } else if !specification.contains_key("git") {
+                    *requires_registry = true;
+                }
+            }
+            _ => unreachable!("dependency shape was validated"),
+        }
+    }
+    Ok(())
+}
+
+fn validate_relative_dependency_path(
+    raw_path: &str,
+    manifest_path: &Path,
+    context: &str,
+    alias: &str,
+) -> Result<(), ComposeError> {
+    let path = Path::new(raw_path);
+    if raw_path.is_empty()
+        || raw_path.contains('\\')
+        || path.is_absolute()
+        || !path.components().all(|component| {
+            matches!(
+                component,
+                std::path::Component::Normal(_)
+                    | std::path::Component::ParentDir
+                    | std::path::Component::CurDir
+            )
+        })
+    {
+        return manifest_error(
+            manifest_path,
+            format!("{context} dependency `{alias}` has an unsafe path `{raw_path}`"),
+        );
+    }
+    Ok(())
+}
+
+fn resolve_package_root(
+    workspace_root: &Path,
+    logical_path: &str,
+) -> Result<PathBuf, ComposeError> {
+    let logical = Path::new(logical_path);
+    if logical_path.is_empty()
+        || logical_path.contains('\\')
+        || logical.is_absolute()
+        || !logical
+            .components()
+            .all(|component| matches!(component, std::path::Component::Normal(_)))
+    {
+        return manifest_error(
+            workspace_root.join("Cargo.toml"),
+            format!("invalid package logical path `{logical_path}`"),
+        );
+    }
+    let canonical_workspace = workspace_root.canonicalize()?;
+    let root_metadata = fs::symlink_metadata(workspace_root)?;
+    if root_metadata.file_type().is_symlink() || !root_metadata.is_dir() {
+        return Err(ComposeError::UnsupportedSourceEntry(
+            workspace_root.display().to_string(),
+        ));
+    }
+    let mut current = canonical_workspace.clone();
+    for component in logical.components() {
+        current.push(component.as_os_str());
+        let metadata = fs::symlink_metadata(&current).map_err(|error| {
+            if error.kind() == io::ErrorKind::NotFound {
+                ComposeError::MissingSourcePackage(current.display().to_string())
+            } else {
+                error.into()
+            }
+        })?;
+        if metadata.file_type().is_symlink() {
+            return Err(ComposeError::UnsupportedSourceEntry(
+                current.display().to_string(),
+            ));
+        }
+    }
+    let metadata = fs::symlink_metadata(&current)?;
+    if !metadata.is_dir() {
+        return Err(ComposeError::MissingSourcePackage(
+            current.display().to_string(),
+        ));
+    }
+    let canonical = current.canonicalize()?;
+    if !canonical.starts_with(&canonical_workspace) {
+        return Err(ComposeError::InputOutsideWorkspace(
+            canonical.display().to_string(),
+        ));
+    }
+    Ok(canonical)
+}
+
+fn resolve_dependency_logical_path(
+    workspace_root: &Path,
+    package_logical_path: &str,
+    raw_path: &str,
+    manifest_path: &Path,
+    alias: &str,
+) -> Result<String, ComposeError> {
+    validate_relative_dependency_path(raw_path, manifest_path, "path", alias)?;
+    let canonical_workspace = workspace_root.canonicalize()?;
+    let mut current = resolve_package_root(workspace_root, package_logical_path)?;
+    for component in Path::new(raw_path).components() {
+        match component {
+            std::path::Component::Normal(value) => {
+                current.push(value);
+                let metadata = fs::symlink_metadata(&current).map_err(|error| {
+                    if error.kind() == io::ErrorKind::NotFound {
+                        ComposeError::MissingSourcePackage(current.display().to_string())
+                    } else {
+                        error.into()
+                    }
+                })?;
+                if metadata.file_type().is_symlink() {
+                    return Err(ComposeError::UnsupportedSourceEntry(
+                        current.display().to_string(),
+                    ));
+                }
+            }
+            std::path::Component::ParentDir => {
+                if current == canonical_workspace || !current.pop() {
+                    return Err(ComposeError::InputOutsideWorkspace(raw_path.into()));
+                }
+            }
+            std::path::Component::CurDir => {}
+            std::path::Component::Prefix(_) | std::path::Component::RootDir => {
+                return Err(ComposeError::InputOutsideWorkspace(raw_path.into()));
+            }
+        }
+        if !current.starts_with(&canonical_workspace) {
+            return Err(ComposeError::InputOutsideWorkspace(raw_path.into()));
+        }
+    }
+    let metadata = fs::symlink_metadata(&current).map_err(|error| {
+        if error.kind() == io::ErrorKind::NotFound {
+            ComposeError::MissingSourcePackage(current.display().to_string())
+        } else {
+            error.into()
+        }
+    })?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(ComposeError::MissingSourcePackage(
+            current.display().to_string(),
+        ));
+    }
+    let manifest = current.join("Cargo.toml");
+    let manifest_metadata = fs::symlink_metadata(&manifest).map_err(|error| {
+        if error.kind() == io::ErrorKind::NotFound {
+            ComposeError::MissingSourcePackage(manifest.display().to_string())
+        } else {
+            error.into()
+        }
+    })?;
+    if manifest_metadata.file_type().is_symlink() || !manifest_metadata.is_file() {
+        return Err(ComposeError::MissingSourcePackage(
+            manifest.display().to_string(),
+        ));
+    }
+    let logical = current
+        .strip_prefix(&canonical_workspace)
+        .map_err(|_| ComposeError::InputOutsideWorkspace(current.display().to_string()))?;
+    logical
+        .to_str()
+        .map(|path| path.replace('\\', "/"))
+        .ok_or_else(|| ComposeError::UnsupportedSourceEntry(current.display().to_string()))
+}
+
+fn relative_package_path(from: &str, to: &str) -> String {
+    let from = from.split('/').collect::<Vec<_>>();
+    let to = to.split('/').collect::<Vec<_>>();
+    let common = from
+        .iter()
+        .zip(&to)
+        .take_while(|(left, right)| left == right)
+        .count();
+    let mut parts = vec![".."; from.len() - common];
+    parts.extend(to[common..].iter().copied());
+    if parts.is_empty() {
+        ".".into()
+    } else {
+        parts.join("/")
+    }
 }
 
 #[derive(Debug)]
@@ -1973,14 +2762,13 @@ enum SnapshotPackagePlanContent {
     NormalizedManifest { bytes: Vec<u8> },
 }
 
-fn snapshot_package(
+fn snapshot_planned_package(
     workspace_root: &Path,
     source_root: &Path,
-    id: &str,
-    package: &str,
-    logical_path: &str,
+    package: &PackageInput,
+    target: &Target,
 ) -> Result<SourcePackageRecord, ComposeError> {
-    let source = workspace_root.join(logical_path);
+    let source = workspace_root.join(&package.path);
     let source_metadata = fs::symlink_metadata(&source).map_err(|error| {
         if error.kind() == io::ErrorKind::NotFound {
             ComposeError::MissingSourcePackage(source.display().to_string())
@@ -1993,8 +2781,15 @@ fn snapshot_package(
             source.display().to_string(),
         ));
     }
-    let plan = plan_snapshot_package(&source)?;
-    let destination = source_root.join(logical_path);
+    let current_manifest = normalize_package_manifest(workspace_root, &package.path, target)?;
+    if current_manifest != package.manifest {
+        return Err(ComposeError::Verification(format!(
+            "source manifest `{}` changed after dependency closure planning",
+            source.join("Cargo.toml").display()
+        )));
+    }
+    let plan = plan_snapshot_package(&source, &package.manifest.bytes)?;
+    let destination = source_root.join(&package.path);
     if fs::symlink_metadata(&destination).is_ok() {
         return Err(ComposeError::Verification(format!(
             "source snapshot destination already exists: {}",
@@ -2003,7 +2798,21 @@ fn snapshot_package(
     }
     fs::create_dir_all(&destination)?;
     let result = (|| {
+        let current_manifest = normalize_package_manifest(workspace_root, &package.path, target)?;
+        if current_manifest != package.manifest {
+            return Err(ComposeError::Verification(format!(
+                "source manifest `{}` changed while snapshotting",
+                source.join("Cargo.toml").display()
+            )));
+        }
         let copied_tree = materialize_snapshot_package_plan(&source, &destination, &plan)?;
+        let current_manifest = normalize_package_manifest(workspace_root, &package.path, target)?;
+        if current_manifest != package.manifest {
+            return Err(ComposeError::Verification(format!(
+                "source manifest `{}` changed while snapshotting",
+                source.join("Cargo.toml").display()
+            )));
+        }
         seal_source_snapshot_storage_projection(&destination)?;
         let tree = source_snapshot_tree(&destination)?;
         if tree != copied_tree {
@@ -2013,9 +2822,9 @@ fn snapshot_package(
             )));
         }
         Ok(SourcePackageRecord {
-            id: id.to_owned(),
-            package: package.to_owned(),
-            logical_path: logical_path.to_owned(),
+            id: package.id.clone(),
+            package: package.package.clone(),
+            logical_path: package.path.clone(),
             tree_digest: tree.digest().to_owned(),
             tree_entries: tree.entries().to_vec(),
         })
@@ -2026,7 +2835,41 @@ fn snapshot_package(
     result
 }
 
-fn plan_snapshot_package(source: &Path) -> Result<Vec<SnapshotPackagePlanEntry>, ComposeError> {
+#[cfg(test)]
+fn snapshot_package(
+    workspace_root: &Path,
+    source_root: &Path,
+    id: &str,
+    package: &str,
+    logical_path: &str,
+) -> Result<SourcePackageRecord, ComposeError> {
+    let facts = crate::target::canonical_builtin_facts(
+        crate::target::CoreTargetFacts::little_endian("x86_64", "gnu", "linux", "64", "unwind"),
+    )?;
+    let target = Target::from_facts(
+        "x86_64-unknown-linux-gnu",
+        crate::target::Environment::Server,
+        facts,
+    )?;
+    let manifest = normalize_package_manifest(workspace_root, logical_path, &target)?;
+    snapshot_planned_package(
+        workspace_root,
+        source_root,
+        &PackageInput {
+            id: id.into(),
+            package: package.into(),
+            path: logical_path.into(),
+            direct: true,
+            manifest,
+        },
+        &target,
+    )
+}
+
+fn plan_snapshot_package(
+    source: &Path,
+    normalized_manifest: &[u8],
+) -> Result<Vec<SnapshotPackagePlanEntry>, ComposeError> {
     let mut plan = Vec::new();
     let mut validation_entries = Vec::new();
     let mut total_file_bytes = 0_u64;
@@ -2079,7 +2922,7 @@ fn plan_snapshot_package(source: &Path) -> Result<Vec<SnapshotPackagePlanEntry>,
             ));
             SnapshotPackagePlanContent::Directory
         } else if relative == Path::new("Cargo.toml") {
-            let bytes = normalize_snapshot_manifest(entry.path())?;
+            let bytes = normalized_manifest.to_vec();
             account_snapshot_file_bytes(
                 &logical_entry_path,
                 bytes.len() as u64,
@@ -2187,13 +3030,6 @@ fn materialize_snapshot_package_plan(
                 ));
             }
             SnapshotPackagePlanContent::NormalizedManifest { bytes } => {
-                let current = normalize_snapshot_manifest(&entry.source)?;
-                if current != *bytes {
-                    return Err(ComposeError::Verification(format!(
-                        "source manifest `{}` changed while snapshotting",
-                        entry.source.display()
-                    )));
-                }
                 if let Some(parent) = target.parent() {
                     fs::create_dir_all(parent)?;
                 }
@@ -2296,60 +3132,6 @@ fn snapshot_path_is_transient(relative: &Path) -> bool {
         || relative
             .components()
             .any(|part| part.as_os_str() == "target" || part.as_os_str() == ".git")
-}
-
-fn normalize_snapshot_manifest(path: &Path) -> Result<Vec<u8>, ComposeError> {
-    let input = read_bounded_snapshot_source_file(path, MAX_SOURCE_MANIFEST_BYTES)?;
-    let input =
-        std::str::from_utf8(&input).map_err(|error| ComposeError::ManifestNormalization {
-            path: path.display().to_string(),
-            message: error.to_string(),
-        })?;
-    let mut value: toml::Value =
-        toml::from_str(input).map_err(|error| ComposeError::ManifestNormalization {
-            path: path.display().to_string(),
-            message: error.to_string(),
-        })?;
-    let table = value
-        .as_table_mut()
-        .ok_or_else(|| ComposeError::ManifestNormalization {
-            path: path.display().to_string(),
-            message: "manifest root is not a table".into(),
-        })?;
-    let package = table
-        .get_mut("package")
-        .and_then(toml::Value::as_table_mut)
-        .ok_or_else(|| ComposeError::ManifestNormalization {
-            path: path.display().to_string(),
-            message: "manifest has no package table".into(),
-        })?;
-    package.insert("version".into(), toml::Value::String("0.1.0".into()));
-    package.insert("edition".into(), toml::Value::String("2024".into()));
-    package.insert(
-        "rust-version".into(),
-        toml::Value::String(PINNED_RUST_VERSION.into()),
-    );
-    package.insert("license".into(), toml::Value::String("MIT".into()));
-    package.remove("repository");
-    table.remove("dev-dependencies");
-    table.remove("lints");
-    if let Some(targets) = table.get_mut("target").and_then(toml::Value::as_table_mut) {
-        for target in targets
-            .iter_mut()
-            .filter_map(|(_, value)| toml::Value::as_table_mut(value))
-        {
-            target.remove("dev-dependencies");
-        }
-    }
-    let mut output =
-        toml::to_string(&value).map_err(|error| ComposeError::ManifestNormalization {
-            path: path.display().to_string(),
-            message: error.to_string(),
-        })?;
-    if !output.ends_with('\n') {
-        output.push('\n');
-    }
-    Ok(output.into_bytes())
 }
 
 fn read_bounded_snapshot_source_file(path: &Path, maximum: u64) -> Result<Vec<u8>, ComposeError> {
@@ -2564,7 +3346,7 @@ fn generate_cargo_toml(
     }
     output.push_str("[features]\ndefault = []\n\n[dependencies]\n");
     let mut dependencies = BTreeMap::new();
-    for package in packages {
+    for package in packages.iter().filter(|package| package.direct) {
         dependencies.insert(
             package.package.clone(),
             (package.path.clone(), BTreeSet::new()),
@@ -3752,6 +4534,363 @@ mod tests {
         package
     }
 
+    fn test_target(
+        triple: &str,
+        arch: &str,
+        target_env: &str,
+        os: &str,
+        pointer_width: &str,
+        panic_strategy: &str,
+    ) -> Target {
+        let facts =
+            crate::target::canonical_builtin_facts(crate::target::CoreTargetFacts::little_endian(
+                arch,
+                target_env,
+                os,
+                pointer_width,
+                panic_strategy,
+            ))
+            .unwrap();
+        Target::from_facts(triple, crate::target::Environment::Server, facts).unwrap()
+    }
+
+    fn native_test_target() -> Target {
+        test_target(
+            "x86_64-unknown-linux-gnu",
+            "x86_64",
+            "gnu",
+            "linux",
+            "64",
+            "unwind",
+        )
+    }
+
+    fn wasm_test_target() -> Target {
+        test_target(
+            "wasm32-unknown-unknown",
+            "wasm32",
+            "",
+            "unknown",
+            "32",
+            "abort",
+        )
+    }
+
+    fn write_test_package(root: &Path, logical_path: &str, name: &str, manifest_tail: &str) {
+        let package = root.join(logical_path);
+        fs::create_dir_all(package.join("src")).unwrap();
+        fs::write(
+            package.join("Cargo.toml"),
+            format!(
+                "[package]\nname = {name:?}\nversion = \"0.1.0\"\nedition = \"2024\"\nrust-version = \"{PINNED_RUST_VERSION}\"\nlicense = \"MIT\"\n\n[features]\ndefault = []\n\n{manifest_tail}"
+            ),
+        )
+        .unwrap();
+        fs::write(
+            package.join("src/lib.rs"),
+            "pub const MARKER: &str = \"test\";\n",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn target_dependency_manifest_rewrite_is_fact_bound_and_deterministic() {
+        let temp = TempDir::new().unwrap();
+        write_test_package(temp.path(), "packages/native", "target-native", "");
+        write_test_package(temp.path(), "packages/wasm", "target-wasm", "");
+        write_test_package(temp.path(), "packages/exact", "target-exact", "");
+        let first_tail = r#"
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+target-wasm = { version = "0.1.0", path = "../wasm", default-features = false }
+
+[target.'x86_64-unknown-linux-gnu'.dependencies]
+target-exact = { version = "0.1.0", path = "../exact", default-features = false }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+target-native = { version = "0.1.0", path = "../native", default-features = false }
+"#;
+        write_test_package(temp.path(), "packages/root", "target-root", first_tail);
+
+        let native =
+            normalize_package_manifest(temp.path(), "packages/root", &native_test_target())
+                .unwrap();
+        let wasm =
+            normalize_package_manifest(temp.path(), "packages/root", &wasm_test_target()).unwrap();
+        let native_text = String::from_utf8(native.bytes.clone()).unwrap();
+        let wasm_text = String::from_utf8(wasm.bytes.clone()).unwrap();
+        assert!(!native_text.contains("[target."));
+        assert!(native_text.contains("target-native"));
+        assert!(native_text.contains("target-exact"));
+        assert!(!native_text.contains("target-wasm"));
+        assert!(!wasm_text.contains("[target."));
+        assert!(wasm_text.contains("target-wasm"));
+        assert!(!wasm_text.contains("target-native"));
+        assert!(!wasm_text.contains("target-exact"));
+        assert_eq!(
+            native
+                .path_dependencies
+                .iter()
+                .map(|dependency| dependency.logical_path.as_str())
+                .collect::<Vec<_>>(),
+            ["packages/exact", "packages/native"]
+        );
+        assert_eq!(
+            wasm.path_dependencies
+                .iter()
+                .map(|dependency| dependency.logical_path.as_str())
+                .collect::<Vec<_>>(),
+            ["packages/wasm"]
+        );
+
+        let reordered_tail = r#"
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+target-native = { default-features = false, path = "../native", version = "0.1.0" }
+
+[target.'x86_64-unknown-linux-gnu'.dependencies]
+target-exact = { default-features = false, path = "../exact", version = "0.1.0" }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+target-wasm = { default-features = false, path = "../wasm", version = "0.1.0" }
+"#;
+        write_test_package(temp.path(), "packages/root", "target-root", reordered_tail);
+        let reordered =
+            normalize_package_manifest(temp.path(), "packages/root", &native_test_target())
+                .unwrap();
+        assert_eq!(native, reordered);
+    }
+
+    #[test]
+    fn target_dependency_manifest_rejects_non_builtin_or_ambiguous_clauses_before_cargo() {
+        let cases = [
+            (
+                "environment",
+                r#"[target.'cfg(environment = "server")'.dependencies]
+helper = { path = "../helper" }
+"#,
+                "composition-only fact",
+            ),
+            (
+                "feature",
+                r#"[target.'cfg(feature = "leak")'.dependencies]
+helper = { path = "../helper" }
+"#,
+                "reserved predicate identifier `feature`",
+            ),
+            (
+                "build-host",
+                r#"[target.'cfg(true)'.build-dependencies]
+helper = { path = "../helper" }
+"#,
+                "committed BuildHost facts",
+            ),
+            (
+                "duplicate",
+                r#"[dependencies]
+helper = { path = "../helper" }
+
+[target.'cfg(true)'.dependencies]
+helper = { path = "../helper" }
+"#,
+                "selected by more than one",
+            ),
+            (
+                "unknown-dependency-key",
+                r#"[target.'cfg(true)'.dependencies]
+helper = { pth = "../helper" }
+"#,
+                "unsupported key `pth`",
+            ),
+            (
+                "optional-path",
+                r#"[target.'cfg(true)'.dependencies]
+helper = { path = "../helper", optional = true }
+"#,
+                "requires exact feature-unit planning",
+            ),
+        ];
+        for (name, tail, expected) in cases {
+            let temp = TempDir::new().unwrap();
+            write_test_package(temp.path(), "packages/helper", "helper", "");
+            write_test_package(temp.path(), "packages/root", "root", tail);
+            let result =
+                normalize_package_manifest(temp.path(), "packages/root", &native_test_target());
+            assert!(
+                matches!(
+                    result,
+                    Err(ComposeError::ManifestNormalization { ref message, .. })
+                        if message.contains(expected)
+                ),
+                "case `{name}` did not fail closed: {result:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn inactive_target_path_is_absent_and_escape_is_rejected_before_cargo() {
+        let temp = TempDir::new().unwrap();
+        write_test_package(
+            temp.path(),
+            "packages/root",
+            "root",
+            r#"[target.'cfg(target_arch = "wasm32")'.dependencies]
+missing-wasm = { path = "../missing-wasm" }
+"#,
+        );
+        let inactive =
+            normalize_package_manifest(temp.path(), "packages/root", &native_test_target())
+                .unwrap();
+        assert!(inactive.path_dependencies.is_empty());
+        assert!(
+            !String::from_utf8(inactive.bytes)
+                .unwrap()
+                .contains("missing-wasm")
+        );
+
+        write_test_package(
+            temp.path(),
+            "packages/root",
+            "root",
+            r#"[target.'cfg(true)'.dependencies]
+escape = { path = "../../../outside-workspace" }
+"#,
+        );
+        assert!(matches!(
+            normalize_package_manifest(temp.path(), "packages/root", &native_test_target()),
+            Err(ComposeError::InputOutsideWorkspace(_))
+        ));
+    }
+
+    #[test]
+    fn target_dependency_selector_count_is_bounded_before_cargo() {
+        let temp = TempDir::new().unwrap();
+        let mut tail = String::new();
+        for index in 0..MAX_MANIFEST_TARGET_SELECTORS {
+            tail.push_str(&format!(
+                "[target.'bounded-{index}-unknown-none'.dependencies]\n"
+            ));
+        }
+        write_test_package(temp.path(), "packages/root", "root", &tail);
+        normalize_package_manifest(temp.path(), "packages/root", &native_test_target()).unwrap();
+        tail.push_str("[target.'one-too-many-unknown-none'.dependencies]\n");
+        write_test_package(temp.path(), "packages/root", "root", &tail);
+        assert!(matches!(
+            normalize_package_manifest(
+                temp.path(),
+                "packages/root",
+                &native_test_target()
+            ),
+            Err(ComposeError::ManifestNormalization { message, .. })
+                if message.contains("selector count")
+        ));
+    }
+
+    #[test]
+    fn target_dependency_entry_count_is_bounded_before_cargo() {
+        let temp = TempDir::new().unwrap();
+        let mut tail = String::from("[target.'cfg(true)'.dependencies]\n");
+        for index in 0..MAX_MANIFEST_DEPENDENCIES {
+            tail.push_str(&format!("dependency-{index} = \"1\"\n"));
+        }
+        write_test_package(temp.path(), "packages/root", "root", &tail);
+        let at_limit =
+            normalize_package_manifest(temp.path(), "packages/root", &native_test_target())
+                .unwrap();
+        assert!(at_limit.requires_registry);
+
+        tail.push_str("one-too-many = \"1\"\n");
+        write_test_package(temp.path(), "packages/root", "root", &tail);
+        assert!(matches!(
+            normalize_package_manifest(
+                temp.path(),
+                "packages/root",
+                &native_test_target()
+            ),
+            Err(ComposeError::ManifestNormalization { message, .. })
+                if message.contains("maximum is")
+        ));
+    }
+
+    #[test]
+    fn path_dependency_package_closure_count_is_bounded_before_cargo() {
+        let temp = TempDir::new().unwrap();
+        for index in 0..MAX_SNAPSHOT_PACKAGES {
+            let tail = if index + 1 == MAX_SNAPSHOT_PACKAGES {
+                String::new()
+            } else {
+                format!(
+                    "[target.'cfg(true)'.dependencies]\npackage-{} = {{ path = \"../{}\" }}\n",
+                    index + 1,
+                    index + 1
+                )
+            };
+            write_test_package(
+                temp.path(),
+                &format!("packages/{index}"),
+                &format!("package-{index}"),
+                &tail,
+            );
+        }
+        let root = PackageSeed {
+            id: "root".into(),
+            package: "package-0".into(),
+            path: "packages/0".into(),
+            direct: true,
+        };
+        let at_limit =
+            package_closure(temp.path(), vec![root.clone()], &native_test_target()).unwrap();
+        assert_eq!(at_limit.len(), MAX_SNAPSHOT_PACKAGES);
+
+        write_test_package(
+            temp.path(),
+            &format!("packages/{MAX_SNAPSHOT_PACKAGES}"),
+            &format!("package-{MAX_SNAPSHOT_PACKAGES}"),
+            "",
+        );
+        write_test_package(
+            temp.path(),
+            &format!("packages/{}", MAX_SNAPSHOT_PACKAGES - 1),
+            &format!("package-{}", MAX_SNAPSHOT_PACKAGES - 1),
+            &format!(
+                "[target.'cfg(true)'.dependencies]\npackage-{MAX_SNAPSHOT_PACKAGES} = {{ path = \"../{MAX_SNAPSHOT_PACKAGES}\" }}\n"
+            ),
+        );
+        assert!(matches!(
+            package_closure(temp.path(), vec![root], &native_test_target()),
+            Err(ComposeError::ManifestNormalization { message, .. })
+                if message.contains("path dependency closure exceeds")
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn active_target_dependency_symlink_is_rejected_before_cargo() {
+        use std::os::unix::fs::symlink;
+
+        let temp = TempDir::new().unwrap();
+        write_test_package(temp.path(), "packages/helper", "helper", "");
+        symlink(
+            temp.path().join("packages/helper"),
+            temp.path().join("packages/link"),
+        )
+        .unwrap();
+        write_test_package(
+            temp.path(),
+            "packages/root",
+            "root",
+            r#"[target.'cfg(true)'.dependencies]
+helper = { path = "../link" }
+"#,
+        );
+        assert!(matches!(
+            normalize_package_manifest(
+                temp.path(),
+                "packages/root",
+                &native_test_target()
+            ),
+            Err(ComposeError::UnsupportedSourceEntry(path)) if path.ends_with("packages/link")
+        ));
+    }
+
     fn assert_no_composition_staging(output_root: &Path) {
         assert!(fs::read_dir(output_root).unwrap().all(|entry| {
             !entry
@@ -4932,6 +6071,58 @@ mod tests {
         make_staging_tree_owner_writable(&forged_path).unwrap();
     }
 
+    #[test]
+    fn verification_rejects_resealed_unrewritten_target_dependency_manifest() {
+        let temp = TempDir::new().unwrap();
+        let generated = compose(&options(&temp, "tests/fixtures/profiles/minimal.toml")).unwrap();
+        let mut manifest = generated.manifest.clone();
+        let source_index = manifest
+            .sources
+            .iter()
+            .position(|source| source.logical_path == "tests/fixtures/components/fixture-driver")
+            .unwrap();
+        let package_root = generated
+            .path
+            .join("sources")
+            .join(&manifest.sources[source_index].logical_path);
+        let cargo_manifest = package_root.join("Cargo.toml");
+        let mut bytes = fs::read(&cargo_manifest).unwrap();
+        bytes.extend_from_slice(
+            br#"
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+rust-agent-fixture-target-wasm = { version = "0.1.0", path = "../../helpers/fixture-target-wasm", default-features = false }
+"#,
+        );
+        let mut permissions = fs::metadata(&cargo_manifest).unwrap().permissions();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            permissions.set_mode(permissions.mode() | 0o200);
+        }
+        #[cfg(not(unix))]
+        permissions.set_readonly(false);
+        fs::set_permissions(&cargo_manifest, permissions).unwrap();
+        fs::write(&cargo_manifest, bytes).unwrap();
+        set_snapshot_epoch(&cargo_manifest).unwrap();
+        set_snapshot_permissions(&cargo_manifest, false).unwrap();
+        let tree = source_snapshot_tree(&package_root).unwrap();
+        manifest.sources[source_index].tree_digest = tree.digest().into();
+        manifest.sources[source_index].tree_entries = tree.entries().to_vec();
+        let forged_path = reseal_manifest(&generated.path, &mut manifest);
+
+        let result = verify_composition(&forged_path);
+        assert!(
+            matches!(
+                result,
+                Err(ComposeError::Verification(ref message))
+                    if message.contains("exact target-fact-derived normalized manifest")
+            ),
+            "unexpected verification result: {result:?}"
+        );
+        make_staging_tree_owner_writable(&forged_path).unwrap();
+    }
+
     #[cfg(any(
         target_os = "android",
         target_os = "ios",
@@ -5394,6 +6585,9 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let minimal = compose(&options(&temp, "tests/fixtures/profiles/minimal.toml")).unwrap();
         let with_fs = compose(&options(&temp, "tests/fixtures/profiles/with-fs.toml")).unwrap();
+        let mut wasm_options = options(&temp, "tests/fixtures/profiles/wasm-js.toml");
+        wasm_options.registry_cache_path = Some(registry_cache());
+        let wasm = compose(&wasm_options).unwrap();
         assert!(
             !minimal
                 .path
@@ -5418,18 +6612,90 @@ mod tests {
                 .selected_components
                 .contains(&"fixture-fs-read".into())
         );
+        assert!(
+            minimal
+                .path
+                .join("sources/tests/fixtures/helpers/fixture-target-native")
+                .exists()
+        );
+        assert!(
+            !minimal
+                .path
+                .join("sources/tests/fixtures/helpers/fixture-target-wasm")
+                .exists()
+        );
+        assert!(
+            wasm.path
+                .join("sources/tests/fixtures/helpers/fixture-target-wasm")
+                .exists()
+        );
+        assert!(
+            !wasm
+                .path
+                .join("sources/tests/fixtures/helpers/fixture-target-native")
+                .exists()
+        );
+        let minimal_driver_manifest = fs::read_to_string(
+            minimal
+                .path
+                .join("sources/tests/fixtures/components/fixture-driver/Cargo.toml"),
+        )
+        .unwrap();
+        let wasm_driver_manifest = fs::read_to_string(
+            wasm.path
+                .join("sources/tests/fixtures/components/fixture-driver/Cargo.toml"),
+        )
+        .unwrap();
+        assert!(!minimal_driver_manifest.contains("[target."));
+        assert!(minimal_driver_manifest.contains("rust-agent-fixture-target-native"));
+        assert!(!minimal_driver_manifest.contains("rust-agent-fixture-target-wasm"));
+        assert!(!wasm_driver_manifest.contains("[target."));
+        assert!(wasm_driver_manifest.contains("rust-agent-fixture-target-wasm"));
+        assert!(!wasm_driver_manifest.contains("rust-agent-fixture-target-native"));
+        let minimal_generated_manifest =
+            fs::read_to_string(minimal.path.join("Cargo.toml")).unwrap();
+        let wasm_generated_manifest = fs::read_to_string(wasm.path.join("Cargo.toml")).unwrap();
+        assert!(!minimal_generated_manifest.contains("rust-agent-fixture-target-native"));
+        assert!(!wasm_generated_manifest.contains("rust-agent-fixture-target-wasm"));
 
         let minimal_tree = cargo_tree(&minimal.path);
         let with_fs_tree = cargo_tree(&with_fs.path);
+        let wasm_tree = cargo_tree(&wasm.path);
+        let minimal_metadata = cargo_metadata_packages(&minimal.path);
+        let wasm_metadata = cargo_metadata_packages(&wasm.path);
+        let minimal_lock = fs::read_to_string(minimal.path.join("Cargo.lock")).unwrap();
+        let wasm_lock = fs::read_to_string(wasm.path.join("Cargo.lock")).unwrap();
         assert!(!minimal_tree.contains("rust-agent-fixture-fs-read"));
         assert!(with_fs_tree.contains("rust-agent-fixture-fs-read"));
         assert!(!minimal_tree.contains("rust-agent-fixture-model-fallback"));
+        assert!(minimal_tree.contains("rust-agent-fixture-target-native"));
+        assert!(!minimal_tree.contains("rust-agent-fixture-target-wasm"));
+        assert!(wasm_tree.contains("rust-agent-fixture-target-wasm"));
+        assert!(!wasm_tree.contains("rust-agent-fixture-target-native"));
+        assert!(minimal_metadata.contains("rust-agent-fixture-target-native"));
+        assert!(!minimal_metadata.contains("rust-agent-fixture-target-wasm"));
+        assert!(wasm_metadata.contains("rust-agent-fixture-target-wasm"));
+        assert!(!wasm_metadata.contains("rust-agent-fixture-target-native"));
+        assert!(minimal_lock.contains("rust-agent-fixture-target-native"));
+        assert!(!minimal_lock.contains("rust-agent-fixture-target-wasm"));
+        assert!(wasm_lock.contains("rust-agent-fixture-target-wasm"));
+        assert!(!wasm_lock.contains("rust-agent-fixture-target-native"));
     }
 
     fn cargo_tree(composition: &Path) -> String {
         let sandbox = TempDir::new().unwrap();
+        link_registry_cache(sandbox.path(), Some(&registry_cache())).unwrap();
+        let manifest = load_manifest(composition).unwrap();
         let output = Command::new(tool("cargo"))
-            .args(["tree", "--locked", "--offline", "--edges", "normal"])
+            .args([
+                "tree",
+                "--locked",
+                "--offline",
+                "--edges",
+                "normal",
+                "--target",
+                &manifest.cargo_resolution.cargo_target_input,
+            ])
             .arg("--manifest-path")
             .arg(composition.join("Cargo.toml"))
             .arg("--config")
@@ -5447,5 +6713,44 @@ mod tests {
             String::from_utf8_lossy(&output.stderr)
         );
         String::from_utf8(output.stdout).unwrap()
+    }
+
+    fn cargo_metadata_packages(composition: &Path) -> BTreeSet<String> {
+        let sandbox = TempDir::new().unwrap();
+        link_registry_cache(sandbox.path(), Some(&registry_cache())).unwrap();
+        let manifest = load_manifest(composition).unwrap();
+        let output = Command::new(tool("cargo"))
+            .args([
+                "metadata",
+                "--format-version",
+                "1",
+                "--locked",
+                "--offline",
+                "--filter-platform",
+                &manifest.cargo_resolution.cargo_target_input,
+            ])
+            .arg("--manifest-path")
+            .arg(composition.join("Cargo.toml"))
+            .arg("--config")
+            .arg(composition.join(".cargo/config.toml"))
+            .current_dir(composition)
+            .env_clear()
+            .env("CARGO_HOME", sandbox.path())
+            .env("RUSTC", tool("rustc"))
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let document: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        document["packages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|package| package["name"].as_str().unwrap().to_owned())
+            .collect()
     }
 }

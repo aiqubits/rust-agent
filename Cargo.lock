@@ -579,6 +579,8 @@ name = "rust-agent-fixture-driver"
 version = "0.1.0"
 dependencies = [
  "rust-agent-fixture-api",
+ "rust-agent-fixture-target-native",
+ "rust-agent-fixture-target-wasm",
  "rust-agent-runtime-api",
 ]
 
@@ -630,6 +632,14 @@ version = "0.1.0"
 dependencies = [
  "rust-agent-runtime-api",
 ]
+
+[[package]]
+name = "rust-agent-fixture-target-native"
+version = "0.1.0"
+
+[[package]]
+name = "rust-agent-fixture-target-wasm"
+version = "0.1.0"
 
 [[package]]
 name = "rust-agent-runtime-api"

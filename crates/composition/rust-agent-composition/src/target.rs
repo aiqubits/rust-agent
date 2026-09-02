@@ -449,6 +449,26 @@ impl Target {
         predicate.evaluate(self)
     }
 
+    /// Evaluates a Cargo target-table selector using only committed rustc built-in facts.
+    ///
+    /// Composition-only facts such as `environment` are deliberately rejected so a
+    /// generated manifest can never rely on a cfg that rustc/Cargo cannot reproduce.
+    pub(crate) fn matches_cargo_selector(&self, selector: &str) -> Result<bool, TargetError> {
+        if selector.starts_with("cfg(") {
+            let predicate = parse_validated_predicate(selector)?;
+            if predicate.uses_environment() {
+                return Err(TargetError::InvalidPredicate(
+                    "`environment` is a composition-only fact and cannot select Cargo dependencies"
+                        .into(),
+                ));
+            }
+            predicate.evaluate(self)
+        } else {
+            validate_target_triple(selector)?;
+            Ok(selector == self.triple)
+        }
+    }
+
     pub fn fact_value(&self, key: &str) -> Option<&str> {
         self.facts
             .get(key)?
@@ -1159,6 +1179,14 @@ enum Predicate {
 }
 
 impl Predicate {
+    fn uses_environment(&self) -> bool {
+        match self {
+            Self::All(items) | Self::Any(items) => items.iter().any(Self::uses_environment),
+            Self::Not(item) => item.uses_environment(),
+            Self::Equals(key, _) | Self::Present(key) => key == "environment",
+        }
+    }
+
     fn validate(&self) -> Result<(), TargetError> {
         match self {
             Self::All(items) | Self::Any(items) => {

@@ -34,5 +34,11 @@ default = []
 rust-agent-fixture-api = { version = "0.1.0", path = "../../api/fixture-api", default-features = false }
 rust-agent-runtime-api = { version = "0.1.0", path = "../../../../crates/api/rust-agent-runtime-api", default-features = false }
 
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+rust-agent-fixture-target-native = { version = "0.1.0", path = "../../helpers/fixture-target-native", default-features = false }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+rust-agent-fixture-target-wasm = { version = "0.1.0", path = "../../helpers/fixture-target-wasm", default-features = false }
+
 [lints]
 workspace = true
