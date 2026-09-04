@@ -367,7 +367,7 @@ impl Target {
             ));
         }
         let before = verify_custom_target_snapshot(record, snapshot_path)?;
-        let facts = query_rustc_facts(rustc, snapshot_path);
+        let facts = query_rustc_custom_target_facts(rustc, snapshot_path);
         let after = verify_custom_target_snapshot(record, snapshot_path)?;
         before.ensure_unchanged(&after, "rustc target-fact query")?;
         let facts = facts?;
@@ -489,13 +489,30 @@ fn query_rustc_facts(
     rustc: &Path,
     target_argument: &Path,
 ) -> Result<BTreeMap<String, BTreeSet<Option<String>>>, TargetError> {
-    query_rustc_facts_with_timeout(rustc, target_argument, RUSTC_QUERY_TIMEOUT)
+    query_rustc_facts_with_options(rustc, target_argument, RUSTC_QUERY_TIMEOUT, false)
 }
 
+fn query_rustc_custom_target_facts(
+    rustc: &Path,
+    target_argument: &Path,
+) -> Result<BTreeMap<String, BTreeSet<Option<String>>>, TargetError> {
+    query_rustc_facts_with_options(rustc, target_argument, RUSTC_QUERY_TIMEOUT, true)
+}
+
+#[cfg(test)]
 fn query_rustc_facts_with_timeout(
     rustc: &Path,
     target_argument: &Path,
     timeout: Duration,
+) -> Result<BTreeMap<String, BTreeSet<Option<String>>>, TargetError> {
+    query_rustc_facts_with_options(rustc, target_argument, timeout, false)
+}
+
+fn query_rustc_facts_with_options(
+    rustc: &Path,
+    target_argument: &Path,
+    timeout: Duration,
+    custom_target: bool,
 ) -> Result<BTreeMap<String, BTreeSet<Option<String>>>, TargetError> {
     let mut command = Command::new(rustc);
     command
@@ -505,6 +522,11 @@ fn query_rustc_facts_with_timeout(
         .env("PATH", rustc.parent().unwrap_or_else(|| Path::new("/")))
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    if custom_target {
+        command
+            .arg("-Zunstable-options")
+            .env("RUSTC_BOOTSTRAP", "1");
+    }
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt as _;
@@ -967,24 +989,42 @@ enum FactSchema {
     Flag,
     SingleClosed(&'static [&'static str]),
     MultiClosed(&'static [&'static str]),
+    FlagAndMultiClosed(&'static [&'static str]),
     SingleOpen,
     MultiOpen,
 }
 
 fn fact_schema(key: &str) -> Option<FactSchema> {
     match key {
-        "debug_assertions" | "unix" | "windows" => Some(FactSchema::Flag),
+        "debug_assertions"
+        | "emscripten_wasm_eh"
+        | "overflow_checks"
+        | "target_has_reliable_f128"
+        | "target_has_reliable_f16"
+        | "target_has_reliable_f16_math"
+        | "target_thread_local"
+        | "ub_checks"
+        | "unix"
+        | "windows" => Some(FactSchema::Flag),
         "panic" => Some(FactSchema::SingleClosed(&["abort", "unwind"])),
-        "target_abi" | "target_arch" | "target_env" | "target_os" | "target_vendor" => {
-            Some(FactSchema::SingleOpen)
-        }
+        "fmt_debug"
+        | "relocation_model"
+        | "target_abi"
+        | "target_arch"
+        | "target_env"
+        | "target_object_format"
+        | "target_os"
+        | "target_vendor" => Some(FactSchema::SingleOpen),
         "target_endian" => Some(FactSchema::SingleClosed(&["big", "little"])),
         "target_family" | "target_feature" => Some(FactSchema::MultiOpen),
-        "target_has_atomic" | "target_has_atomic_primitive_alignment" => {
-            Some(FactSchema::MultiClosed(&[
+        "target_has_atomic" | "target_has_atomic_load_store" => {
+            Some(FactSchema::FlagAndMultiClosed(&[
                 "8", "16", "32", "64", "128", "ptr",
             ]))
         }
+        "target_has_atomic_primitive_alignment" => Some(FactSchema::MultiClosed(&[
+            "8", "16", "32", "64", "128", "ptr",
+        ])),
         "target_pointer_width" => Some(FactSchema::SingleClosed(&["16", "32", "64"])),
         _ => None,
     }
@@ -1018,12 +1058,14 @@ fn validate_fact(key: &str, value: Option<&str>) -> Result<(), TargetError> {
         )));
     }
     let valid = match (schema, value) {
-        (FactSchema::Flag, None) | (FactSchema::SingleOpen | FactSchema::MultiOpen, Some(_)) => {
-            true
-        }
-        (FactSchema::SingleClosed(allowed) | FactSchema::MultiClosed(allowed), Some(value)) => {
-            allowed.contains(&value)
-        }
+        (FactSchema::Flag | FactSchema::FlagAndMultiClosed(_), None)
+        | (FactSchema::SingleOpen | FactSchema::MultiOpen, Some(_)) => true,
+        (
+            FactSchema::SingleClosed(allowed)
+            | FactSchema::MultiClosed(allowed)
+            | FactSchema::FlagAndMultiClosed(allowed),
+            Some(value),
+        ) => allowed.contains(&value),
         _ => false,
     };
     if valid {
@@ -1502,6 +1544,9 @@ fn validate_predicate_model_universe(
                 .iter()
                 .map(|value| Some((*value).to_owned()))
                 .collect(),
+            FactSchema::FlagAndMultiClosed(allowed) => std::iter::once(None)
+                .chain(allowed.iter().map(|value| Some((*value).to_owned())))
+                .collect(),
             FactSchema::SingleOpen => {
                 let other = fresh_open_fact_value(&mentioned);
                 let value = mentioned
@@ -1534,6 +1579,7 @@ fn validate_predicate_model_universe(
         let maximum_for_key = match schema {
             FactSchema::Flag | FactSchema::SingleClosed(_) | FactSchema::SingleOpen => 1,
             FactSchema::MultiClosed(allowed) => allowed.len(),
+            FactSchema::FlagAndMultiClosed(allowed) => allowed.len() + 1,
             FactSchema::MultiOpen => mentioned.len().max(1),
         };
         maximum_model_values = maximum_model_values.checked_add(maximum_for_key).ok_or(
@@ -3146,8 +3192,10 @@ mod tests {
             let marker = directory.path().join("argument");
             let (_rustc_dir, rustc) = fake_rustc(&format!(
                 concat!(
+                    "[ \"$RUSTC_BOOTSTRAP\" = 1 ] || exit 40\n",
                     "IFS= read -r observed < \"$4\"\n",
                     "[ \"$observed\" = '{{\"arch\":\"x86_64\"}}' ] || exit 41\n",
+                    "[ \"$5\" = -Zunstable-options ] || exit 42\n",
                     "printf '%s' \"$4\" > {}\n",
                     "printf 'debug_assertions\\npanic=\"unwind\"\\n",
                     "target_abi=\"\"\\ntarget_arch=\"x86_64\"\\n",

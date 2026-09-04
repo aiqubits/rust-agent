@@ -485,6 +485,127 @@ fn compose_build_inspect_emit_verify_end_to_end() {
 }
 
 #[test]
+fn pinned_toolchain_custom_target_compose_lock_build_end_to_end() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../..")
+        .canonicalize()
+        .unwrap();
+    let binary = PathBuf::from(env!("CARGO_BIN_EXE_rust-agent"));
+    let rustc = tool("rustc");
+    let cargo = tool("cargo");
+    let linker = tool("cc");
+    let registry = registry_cache();
+    let custom_target = root.join("tests/fixtures/targets/x86_64-unknown-linux-gnu.json");
+    for (tool, expected) in [(&rustc, "rustc 1.97.1 "), (&cargo, "cargo 1.97.1 ")] {
+        let output = run(tool, &["--version".into()]);
+        assert_success(&output);
+        assert!(
+            String::from_utf8(output.stdout)
+                .unwrap()
+                .starts_with(expected),
+            "custom-target gate must use the repository-pinned toolchain"
+        );
+    }
+    let target_spec = Command::new(&rustc)
+        .args([
+            "-Zunstable-options",
+            "--print",
+            "target-spec-json",
+            "--target",
+            "x86_64-unknown-linux-gnu",
+        ])
+        .env("RUSTC_BOOTSTRAP", "1")
+        .output()
+        .unwrap();
+    assert_success(&target_spec);
+    assert_eq!(
+        fs::read(&custom_target).unwrap(),
+        target_spec.stdout,
+        "checked-in custom target must be the exact pinned-rustc target spec"
+    );
+
+    let temp = TempDir::new().unwrap();
+    let compositions = temp.path().join("compositions");
+    assert_success(&run(
+        &binary,
+        &[
+            "compose".into(),
+            "--workspace".into(),
+            root.as_os_str().into(),
+            "--profile".into(),
+            root.join("tests/fixtures/profiles/minimal.toml")
+                .into_os_string(),
+            "--catalog-trust-policy".into(),
+            root.join("tests/fixtures/catalog-trust.toml")
+                .into_os_string(),
+            "--output".into(),
+            compositions.as_os_str().into(),
+            "--rustc".into(),
+            rustc.as_os_str().into(),
+            "--cargo".into(),
+            cargo.as_os_str().into(),
+            "--registry-cache".into(),
+            registry.as_os_str().into(),
+            "--custom-target-spec".into(),
+            custom_target.into_os_string(),
+        ],
+    ));
+
+    let composition = fs::read_dir(&compositions)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    assert!(composition.join("Cargo.lock").is_file());
+    assert!(
+        fs::read_to_string(composition.join(".cargo/config.toml"))
+            .unwrap()
+            .contains("target = \"targets/x86_64-unknown-linux-gnu.json\"")
+    );
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(composition.join("rust-agent-composition.json")).unwrap())
+            .unwrap();
+    assert_eq!(
+        manifest["custom-target-spec"]["snapshot-path"],
+        "targets/x86_64-unknown-linux-gnu.json"
+    );
+    assert_eq!(manifest["target"], "x86_64-unknown-linux-gnu");
+
+    let artifacts = temp.path().join("artifacts");
+    assert_success(&run(
+        &binary,
+        &[
+            "build".into(),
+            "--composition".into(),
+            composition.as_os_str().into(),
+            "--artifact-dir".into(),
+            artifacts.as_os_str().into(),
+            "--rustc".into(),
+            rustc.as_os_str().into(),
+            "--cargo".into(),
+            cargo.as_os_str().into(),
+            "--linker".into(),
+            linker.as_os_str().into(),
+            "--registry-cache".into(),
+            registry.as_os_str().into(),
+            "--development-build".into(),
+        ],
+    ));
+    assert!(
+        artifacts
+            .join("librust_agent_generated_composition.rlib")
+            .is_file()
+    );
+    let build: serde_json::Value =
+        serde_json::from_slice(&fs::read(artifacts.join("rust-agent-build.json")).unwrap())
+            .unwrap();
+    assert_eq!(build["target"], "x86_64-unknown-linux-gnu");
+    assert_eq!(build["mode"], "development");
+    assert_eq!(build["deployable"], false);
+}
+
+#[test]
 fn javascript_wasm_compose_build_and_inspect_end_to_end() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../..")

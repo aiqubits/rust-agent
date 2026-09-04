@@ -355,7 +355,11 @@ fn run_cargo(
         })
         .transpose()
         .map_err(|error| DevelopmentBuildError::CustomTargetPreflight(error.to_string()))?;
-    let output = Command::new(&options.cargo_path)
+    let mut command = Command::new(&options.cargo_path);
+    if composition.custom_target_spec.is_some() {
+        command.args(["-Zjson-target-spec", "-Zbuild-std"]);
+    }
+    command
         .args(args)
         .arg("--manifest-path")
         .arg(options.composition_path.join("Cargo.toml"))
@@ -367,8 +371,11 @@ fn run_cargo(
         .env("CARGO_TARGET_DIR", target_dir)
         .env("RUSTC", &options.rustc_path)
         .env("RUST_AGENT_BASELINE_LINKER", &options.linker_path)
-        .env("PATH", baseline_path(options)?)
-        .output();
+        .env("PATH", baseline_path(options)?);
+    if composition.custom_target_spec.is_some() {
+        command.env("RUSTC_BOOTSTRAP", "1");
+    }
+    let output = command.output();
     let custom_snapshot_after = composition
         .custom_target_spec
         .as_ref()

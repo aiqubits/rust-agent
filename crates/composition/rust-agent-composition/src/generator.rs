@@ -3631,7 +3631,8 @@ fn generate_cargo_config(
 ) -> String {
     let cargo_target_input =
         custom_target_spec.map_or(target.triple.as_str(), |spec| spec.snapshot_path.as_str());
-    format!("[build]\ntarget = {cargo_target_input:?}\n\n[net]\noffline = true\n")
+    let rustflags = custom_target_spec.map_or("", |_| "rustflags = [\"-Zunstable-options\"]\n");
+    format!("[build]\ntarget = {cargo_target_input:?}\n{rustflags}\n[net]\noffline = true\n")
 }
 
 fn generate_lib_rs(
@@ -3988,7 +3989,11 @@ fn generate_lockfile(
     ));
     fs::create_dir(&cargo_home)?;
     link_registry_cache(&cargo_home, options.registry_cache_path.as_deref())?;
-    let output = Command::new(&options.cargo_path)
+    let mut command = Command::new(&options.cargo_path);
+    if custom_target_spec.is_some() {
+        command.arg("-Zjson-target-spec");
+    }
+    command
         .args(["generate-lockfile", "--offline", "--manifest-path"])
         .arg(staging.join("Cargo.toml"))
         .arg("--config")
@@ -4003,8 +4008,11 @@ fn generate_lockfile(
                 .cargo_path
                 .parent()
                 .unwrap_or_else(|| Path::new("/")),
-        )
-        .output();
+        );
+    if custom_target_spec.is_some() {
+        command.env("RUSTC_BOOTSTRAP", "1");
+    }
+    let output = command.output();
     let custom_snapshot_after = custom_target_spec
         .map(|spec| verify_custom_target_snapshot(spec, &staging.join(&spec.snapshot_path)))
         .transpose();
@@ -4665,15 +4673,19 @@ mod tests {
             &format!(
                 concat!(
                     "#!/bin/sh\n",
-                    "if [ \"$1\" = metadata ]; then exec {:?} \"$@\"; fi\n",
-                    "manifest=\nconfig=\nnext=\n",
+                    "for arg in \"$@\"; do\n",
+                    "  if [ \"$arg\" = metadata ]; then exec {:?} \"$@\"; fi\n",
+                    "done\n",
+                    "manifest=\nconfig=\nnext=\njson_target=0\n",
                     "for arg in \"$@\"; do\n",
                     "  if [ \"$next\" = manifest ]; then manifest=\"$arg\"; next=; continue; fi\n",
                     "  if [ \"$next\" = config ]; then config=\"$arg\"; next=; continue; fi\n",
                     "  if [ \"$arg\" = \"--manifest-path\" ]; then next=manifest; fi\n",
                     "  if [ \"$arg\" = \"--config\" ]; then next=config; fi\n",
+                    "  if [ \"$arg\" = \"-Zjson-target-spec\" ]; then json_target=1; fi\n",
                     "done\n",
                     "[ -n \"$manifest\" ] && [ -n \"$config\" ] || exit 31\n",
+                    "[ \"$json_target\" = 1 ] || exit 35\n",
                     "found=0\n",
                     "while IFS= read -r line; do\n",
                     "  [ \"$line\" = 'target = \"targets/x86_64-unknown-linux-gnu.json\"' ] && found=1\n",
@@ -4761,12 +4773,13 @@ mod tests {
         assert_eq!(
             fs::read_to_string(compact_generated.path.join(".cargo/config.toml")).unwrap(),
             format!(
-                "[build]\ntarget = {:?}\n\n[net]\noffline = true\n",
+                "[build]\ntarget = {:?}\nrustflags = [\"-Zunstable-options\"]\n\n[net]\noffline = true\n",
                 compact_record.snapshot_path
             )
         );
         let invocation = fs::read_to_string(&rustc_log).unwrap();
         assert!(invocation.contains("rustc-args:--print cfg --target"));
+        assert!(invocation.contains("-Zunstable-options"));
         assert!(invocation.contains(".staging-"));
         assert!(invocation.contains("/targets/x86_64-unknown-linux-gnu.json"));
         assert!(invocation.contains(&format!("rustc-spec:{}", String::from_utf8_lossy(compact))));

@@ -16,7 +16,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.97.1
-          components: rustfmt,clippy
+          components: rustfmt,clippy,rust-src
           targets: wasm32-unknown-unknown,aarch64-linux-android,aarch64-apple-ios,x86_64-apple-darwin,x86_64-pc-windows-msvc
       - name: Verify pinned Rust and Cargo versions
         shell: bash
@@ -24,10 +24,18 @@ jobs:
           rustc --version | grep -E '^rustc 1\.97\.1 '
           cargo --version | grep -E '^cargo 1\.97\.1 '
       - uses: Swatinem/rust-cache@v2
+      - name: Prepare pinned custom-target sysroot cache
+        env:
+          RUSTC_BOOTSTRAP: "1"
+        run: cargo fetch --locked --manifest-path "$(rustc --print sysroot)/lib/rustlib/src/rust/library/Cargo.toml"
       - name: Install pinned wasm-bindgen CLI
         run: cargo install wasm-bindgen-cli --version 0.2.127 --locked
       - name: Verify pinned wasm-bindgen CLI version
         run: wasm-bindgen --version | grep -E '^wasm-bindgen 0\.2\.127$'
+      - name: Verify exact Phase 0/1A acceptance mappings
+        run: cargo test -p rust-agent-cli --test architecture phase_zero_and_one_a_acceptance_mappings_are_exact_complete_and_runnable -- --exact
+      - name: Build pinned-toolchain custom-target composition
+        run: cargo test -p rust-agent-cli --test e2e pinned_toolchain_custom_target_compose_lock_build_end_to_end -- --exact
       - run: cargo fmt --all --check
       - run: cargo check --workspace --all-targets
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings

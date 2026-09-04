@@ -170,6 +170,9 @@ fn run_cargo_metadata(invocation: CargoMetadataInvocation<'_>) -> Result<Vec<u8>
         timeout,
     } = invocation;
     let mut command = Command::new(cargo_path);
+    if cargo_target_input.is_absolute() {
+        command.arg("-Zjson-target-spec");
+    }
     command
         .args([
             "metadata",
@@ -200,6 +203,9 @@ fn run_cargo_metadata(invocation: CargoMetadataInvocation<'_>) -> Result<Vec<u8>
         .env("SOURCE_DATE_EPOCH", "0")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    if cargo_target_input.is_absolute() {
+        command.env("RUSTC_BOOTSTRAP", "1");
+    }
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt as _;

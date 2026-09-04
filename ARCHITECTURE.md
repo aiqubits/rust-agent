@@ -7293,18 +7293,18 @@ generated SessionEventCatalog compatibility tests
 验收：
 
 ```text
-no AINS dependency
-core/API dependency policy enforced
-session public API closure contains no rust-agent-agent type/dependency
-metadata/schema versions and canonical encodings frozen by golden tests
-unknown metadata, missing lifecycle/provide effects and invalid target facts fail closed
-App scope missing app-coexistence and shorter scope declaring it fail closed
-bin/library/wasm Host boundary cardinality, target, support and security accounting fail closed
-host-cli accepts only its declared desktop OS set; iOS/Android/other native targets fail before Cargo
-Host topology 由 process/module/ABI/target 决定；framework identity 作为 composition schema/resolver/generated-feature 输入 fail closed
-generated runtime API/infrastructure direct-effect lint and dependency gate fail closed
-runtime effects never contain build-only requirements; requirement/policy kind mismatch fails closed
-CI maps every implemented architecture invariant to a named test or lint
+[P0-AC-01] no AINS dependency
+[P0-AC-02] core/API dependency policy enforced
+[P0-AC-03] session public API closure contains no rust-agent-agent type/dependency
+[P0-AC-04] metadata/schema versions and canonical encodings frozen by golden tests
+[P0-AC-05] unknown metadata, missing lifecycle/provide effects and invalid target facts fail closed
+[P0-AC-06] App scope missing app-coexistence and shorter scope declaring it fail closed
+[P0-AC-07] bin/library/wasm Host boundary cardinality, target, support and security accounting fail closed
+[P0-AC-08] host-cli accepts only its declared desktop OS set; iOS/Android/other native targets fail before Cargo
+[P0-AC-09] Host topology 由 process/module/ABI/target 决定；framework identity 作为 composition schema/resolver/generated-feature 输入 fail closed
+[P0-AC-10] generated runtime API/infrastructure direct-effect lint and dependency gate fail closed
+[P0-AC-11] runtime effects never contain build-only requirements; requirement/policy kind mismatch fails closed
+[P0-AC-12] CI maps every implemented architecture invariant to a named test or lint
 ```
 
 ### Phase 1A — Composition Compiler / Generated Graph Proof
@@ -7339,7 +7339,18 @@ fixture-model + fixture-driver
 fixture-model + fixture-driver + fixture-fs-read
 ```
 
-验收关键不是“代码 cfg 掉”，而是 generated factory call通过 Rust类型检查，且 `cargo metadata/cargo tree`真实出现/消失 `fixture-fs-read` package。Library fixture必须由独立 Host Cargo graph经 emitted path dependency编译并通过类型身份 negative test；Host为 emitted first-party fixture的任一 unit增加 feature必须失败，为 synthetic external shared unit增加 feature则只有 exact unit-selector development HostFeatureUnionPolicy delta才通过。另用 synthetic Host entry/export fixtures固定 bin/library/wasm的 boundary cardinality、target rejection与 Component/Host/final runtime-effect union；四类 framework-neutral topology fixture固定 direct Rust、same-module WASM、JS export与 WebView IPC mock的 contract，且不依赖真实 UI framework。用 independent/shared-host/requires-stop App fixtures固定 aggregate handoff manifest，证明任一 unknown/exclusive resource都降为 `stop-old-app`。development artifact/receipt必须固定 `deployable=false`，不能被 production inspection接受。Phase 1A的 generated composition只依赖最小 core/runtime contract与 `tests/fixtures/` API，不引用尚未实现的产品 Component、Model、Agent或 Driver API。Fixture Component/Host boundary显式声明空 build requirements；另加一个只在 development/controlled policy下命中 synthetic executable/read-input logical id的 fixture，证明 requirement/policy resolution与 runtime `compiled_runtime_effects`完全独立。
+验收：
+
+- [P1A-AC-01] Generated factory call通过 Rust类型检查，且 `cargo metadata/cargo tree`真实出现/消失 `fixture-fs-read` package，不能以代码 cfg 掉代替。
+- [P1A-AC-02] Library fixture由独立 Host Cargo graph经 emitted path dependency编译，并通过 duplicate API类型身份 negative test。
+- [P1A-AC-03] Host为 emitted first-party fixture的任一 unit增加 feature必须失败；synthetic external shared unit只有 exact unit-selector development HostFeatureUnionPolicy delta可通过。
+- [P1A-AC-04] Synthetic Host entry/export fixtures固定 bin/library/wasm的 boundary cardinality、target rejection与 Component/Host/final runtime-effect union。
+- [P1A-AC-05] Direct Rust、same-module WASM、JS export与 WebView IPC mock四类 framework-neutral topology fixture固定 contract，且不依赖真实 UI framework。
+- [P1A-AC-06] Independent/shared-host/requires-stop App fixtures固定 aggregate handoff manifest，任一 unknown/exclusive resource都降为 `stop-old-app`。
+- [P1A-AC-07] Development artifact/receipt固定 `deployable=false`，不能被 production inspection接受。
+- [P1A-AC-08] Phase 1A generated composition只依赖最小 core/runtime contract与 `tests/fixtures/` API，不引用尚未实现的产品 Component、Model、Agent或 Driver API。
+- [P1A-AC-09] Fixture Component/Host boundary显式声明空 build requirements；controlled-policy fixture只在 development policy下命中 synthetic executable/read-input logical id，且 requirement/policy resolution与 runtime `compiled_runtime_effects`完全独立。
+- [P1A-AC-10] Checked-in custom-target spec必须以真实 pinned Rust/Cargo 1.97.1完成 compose、Cargo.lock生成与 locked offline development build；fake rustc/Cargo只能作为 failure-path补充证据。
 
 Phase 1A 没有通过前，不进入几十个 capability 的大规模实现。
 

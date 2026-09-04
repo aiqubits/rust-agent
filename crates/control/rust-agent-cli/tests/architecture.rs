@@ -1,4 +1,4 @@
-use std::{fs, path::PathBuf, process::Command};
+use std::{collections::BTreeSet, fs, path::PathBuf, process::Command};
 
 use toml::Value;
 use walkdir::WalkDir;
@@ -139,7 +139,7 @@ fn rust_toolchain_version_is_pinned_and_synchronized() {
         .iter()
         .map(|component| component.as_str().unwrap())
         .collect();
-    assert_eq!(components, ["clippy", "rustfmt"]);
+    assert_eq!(components, ["clippy", "rustfmt", "rust-src"]);
     let targets: Vec<_> = toolchain["toolchain"]["targets"]
         .as_array()
         .unwrap()
@@ -150,11 +150,21 @@ fn rust_toolchain_version_is_pinned_and_synchronized() {
 
     let ci = fs::read_to_string(root.join(".github/workflows/ci.yml")).unwrap();
     assert!(ci.contains("toolchain: 1.97.1"));
-    assert!(ci.contains("components: rustfmt,clippy"));
+    assert!(ci.contains("components: rustfmt,clippy,rust-src"));
     assert!(ci.contains(&format!("targets: {}", PINNED_TARGETS.join(","))));
     assert!(ci.contains("Verify pinned Rust and Cargo versions"));
     assert!(ci.contains("rustc --version | grep -E '^rustc 1\\.97\\.1 '"));
     assert!(ci.contains("cargo --version | grep -E '^cargo 1\\.97\\.1 '"));
+    assert!(ci.contains("Prepare pinned custom-target sysroot cache"));
+    assert!(ci.contains(
+        "cargo fetch --locked --manifest-path \"$(rustc --print sysroot)/lib/rustlib/src/rust/library/Cargo.toml\""
+    ));
+    assert!(ci.contains("Verify exact Phase 0/1A acceptance mappings"));
+    assert!(ci.contains(
+        "phase_zero_and_one_a_acceptance_mappings_are_exact_complete_and_runnable -- --exact"
+    ));
+    assert!(ci.contains("Build pinned-toolchain custom-target composition"));
+    assert!(ci.contains("pinned_toolchain_custom_target_compose_lock_build_end_to_end -- --exact"));
 
     let golden: Value =
         toml::from_str(&fs::read_to_string(root.join("tests/golden/minimal/Cargo.toml")).unwrap())
@@ -163,6 +173,175 @@ fn rust_toolchain_version_is_pinned_and_synchronized() {
         golden["package"]["rust-version"].as_str(),
         Some(PINNED_RUST_VERSION)
     );
+}
+
+#[test]
+fn phase_one_a_generated_graph_uses_only_minimal_api_and_fixtures() {
+    let root = workspace_root();
+    let dependency_names = |relative: &str| {
+        let manifest: Value =
+            toml::from_str(&fs::read_to_string(root.join(relative)).unwrap()).unwrap();
+        manifest["dependencies"]
+            .as_table()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>()
+    };
+    assert_eq!(
+        dependency_names("tests/golden/minimal/Cargo.toml"),
+        [
+            "rust-agent-core",
+            "rust-agent-fixture-api",
+            "rust-agent-fixture-driver",
+            "rust-agent-fixture-model",
+            "rust-agent-fixture-runtime",
+            "rust-agent-runtime-api",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect()
+    );
+    assert_eq!(
+        dependency_names("tests/golden/wasm-js/Cargo.toml"),
+        [
+            "rust-agent-core",
+            "rust-agent-fixture-api",
+            "rust-agent-fixture-driver",
+            "rust-agent-fixture-host-export",
+            "rust-agent-fixture-model",
+            "rust-agent-fixture-runtime",
+            "rust-agent-runtime-api",
+            "wasm-bindgen",
+            "wasm-bindgen-futures",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect()
+    );
+}
+
+#[test]
+fn phase_zero_and_one_a_acceptance_mappings_are_exact_complete_and_runnable() {
+    let root = workspace_root();
+    let architecture = fs::read_to_string(root.join("ARCHITECTURE.md")).unwrap();
+    let invariant_map = fs::read_to_string(root.join("docs/invariant-tests.md")).unwrap();
+    let architecture_phases = markdown_section(
+        &architecture,
+        "### Phase 0 — 独立仓库与 Architecture Contract",
+        "### Phase 1B — Linux Reference Production Build Track",
+    );
+    let mapped_phases = markdown_section(&invariant_map, "## Phase 0", "## Phase 1B (in progress)");
+    for prefix in ["P0-AC-", "P1A-AC-"] {
+        let declared = acceptance_ids(architecture_phases, prefix);
+        let mapped = acceptance_ids(mapped_phases, prefix);
+        assert!(!declared.is_empty(), "no {prefix} criteria are declared");
+        assert_eq!(
+            mapped, declared,
+            "{prefix} criteria and invariant mappings differ"
+        );
+        for criterion in declared {
+            assert_eq!(
+                architecture_phases.matches(&criterion).count(),
+                1,
+                "{criterion} must be declared exactly once"
+            );
+            assert_eq!(
+                mapped_phases.matches(&criterion).count(),
+                1,
+                "{criterion} must be mapped exactly once"
+            );
+        }
+    }
+
+    let rust_sources = WalkDir::new(&root)
+        .into_iter()
+        .filter_entry(|entry| {
+            !matches!(
+                entry.file_name().to_string_lossy().as_ref(),
+                ".git" | "target" | ".rust-agent"
+            )
+        })
+        .filter_map(Result::ok)
+        .filter(|entry| entry.path().extension().is_some_and(|value| value == "rs"))
+        .map(|entry| fs::read_to_string(entry.path()).unwrap())
+        .collect::<Vec<_>>();
+    let mut mapped_rows = 0_usize;
+    for line in mapped_phases.lines().filter(|line| line.starts_with('|')) {
+        let cells = line
+            .trim_matches('|')
+            .split('|')
+            .map(str::trim)
+            .collect::<Vec<_>>();
+        let Some(evidence) = cells.last() else {
+            continue;
+        };
+        if matches!(*evidence, "Automated evidence" | "---") {
+            continue;
+        }
+        let references = evidence
+            .split('`')
+            .enumerate()
+            .filter_map(|(index, value)| (index % 2 == 1).then_some(value))
+            .collect::<Vec<_>>();
+        assert!(
+            !references.is_empty(),
+            "mapping row has no evidence: {line}"
+        );
+        mapped_rows += 1;
+        for reference in references {
+            assert!(
+                !reference.contains('*'),
+                "wildcard evidence is forbidden: {reference}"
+            );
+            let (owner, test_name) = reference
+                .rsplit_once("::")
+                .unwrap_or_else(|| panic!("evidence is not an exact named gate: {reference}"));
+            if owner.starts_with(".github/") {
+                let workflow = owner.split("::").next().unwrap();
+                let contents = fs::read_to_string(root.join(workflow)).unwrap();
+                assert!(
+                    contents.contains(test_name),
+                    "workflow gate does not exist: {reference}"
+                );
+                continue;
+            }
+            let pattern = format!("fn {test_name}(");
+            assert!(
+                rust_sources
+                    .iter()
+                    .any(|source| source.match_indices(&pattern).any(|(index, _)| {
+                        source[index.saturating_sub(256)..index].contains("#[test]")
+                    })),
+                "mapped Rust test does not exist or is not runnable: {reference}"
+            );
+        }
+    }
+    assert!(
+        mapped_rows > 50,
+        "Phase 0/1A mapping table is unexpectedly empty"
+    );
+}
+
+fn markdown_section<'a>(input: &'a str, start: &str, end: &str) -> &'a str {
+    let start = input
+        .find(start)
+        .unwrap_or_else(|| panic!("missing {start}"));
+    let tail = &input[start..];
+    let end = tail.find(end).unwrap_or_else(|| panic!("missing {end}"));
+    &tail[..end]
+}
+
+fn acceptance_ids(input: &str, prefix: &str) -> BTreeSet<String> {
+    input
+        .split(|character: char| !(character.is_ascii_alphanumeric() || character == '-'))
+        .filter(|token| {
+            token.strip_prefix(prefix).is_some_and(|suffix| {
+                suffix.len() == 2 && suffix.bytes().all(|byte| byte.is_ascii_digit())
+            })
+        })
+        .map(str::to_owned)
+        .collect()
 }
 
 #[test]

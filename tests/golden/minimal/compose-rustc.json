@@ -8,11 +8,11 @@
     "verbose-version-sha256": "b2bdf493bcf6d1dc55181a0efc2774b6d9cf7bf5c8dcc5bed592c994b2ad38c4"
   },
   "sysroot": {
-    "tree-digest": "f7192e448c8ae5d3ef49758c60d629c61424f8deb25ec697dcf7e478e322c446",
-    "entries": 474,
-    "files": 442,
-    "directories": 32,
-    "file-bytes": 1292690160
+    "tree-digest": "7b1cd7583364f669873213ee1524f04542137e66f9e2d35ae87905f36d936b98",
+    "entries": 4947,
+    "files": 4003,
+    "directories": 944,
+    "file-bytes": 1364196547
   },
-  "identity-digest": "7caccecd721c4320ef2be5ccccafc3c626e1d786c952a48b0b563a9d5bc605cd"
+  "identity-digest": "62641537c84e0c94d2c06dda995962e94d67e2ff17ca7b0283fa294edec90947"
 }
