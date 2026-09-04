@@ -4539,7 +4539,7 @@ mod tests {
         }
     }
 
-    fn reseal_manifest(path: &Path, manifest: &mut CompositionManifest) -> PathBuf {
+    fn composition_hash_for_manifest(manifest: &CompositionManifest) -> String {
         let payload = CompositionIdentityPayload {
             schema: 1,
             profile: &manifest.normalized_profile,
@@ -4557,8 +4557,11 @@ mod tests {
             cargo_lock_digest: &manifest.cargo_lock_digest,
             cargo_resolution: &manifest.cargo_resolution,
         };
-        manifest.composition_hash =
-            hex::encode(canonical::domain_hash(b"rust-agent-composition-v1\0", &payload).unwrap());
+        hex::encode(canonical::domain_hash(b"rust-agent-composition-v1\0", &payload).unwrap())
+    }
+
+    fn reseal_manifest(path: &Path, manifest: &mut CompositionManifest) -> PathBuf {
+        manifest.composition_hash = composition_hash_for_manifest(manifest);
         write_text(
             &path.join("src/identity.rs"),
             &format!(
@@ -7217,6 +7220,183 @@ rust-agent-fixture-target-wasm = { version = "0.1.0", path = "../../helpers/fixt
         assert!(!staging.exists());
     }
 
+    fn exact_generated_file_record(
+        manifest: &CompositionManifest,
+        path: &str,
+    ) -> GeneratedFileRecord {
+        let records = manifest
+            .generated_files
+            .iter()
+            .filter(|record| record.path == path)
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(
+            records.len(),
+            1,
+            "manifest must contain exactly one generated-file record for {path}"
+        );
+        records.into_iter().next().unwrap()
+    }
+
+    fn rebind_manifest_toolchain(
+        manifest: &mut CompositionManifest,
+        reference: &CompositionManifest,
+    ) {
+        let reference_record = exact_generated_file_record(reference, "compose-rustc.json");
+        let matching = manifest
+            .generated_files
+            .iter()
+            .enumerate()
+            .filter_map(|(index, record)| (record.path == "compose-rustc.json").then_some(index))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            matching.len(),
+            1,
+            "manifest must contain exactly one generated-file record for compose-rustc.json"
+        );
+        manifest.compose_rustc = reference.compose_rustc.clone();
+        manifest.generated_files[matching[0]] = reference_record;
+        manifest.composition_hash = composition_hash_for_manifest(manifest);
+    }
+
+    fn assert_generated_file_record_matches(
+        manifest: &CompositionManifest,
+        path: &str,
+        bytes: &[u8],
+    ) {
+        let record = exact_generated_file_record(manifest, path);
+        assert_eq!(
+            record.bytes,
+            bytes.len() as u64,
+            "stale byte count for {path}"
+        );
+        assert_eq!(record.digest, sha256_hex(bytes), "stale digest for {path}");
+    }
+
+    fn assert_profile_golden_is_fresh(
+        generated: &GeneratedComposition,
+        golden_directory: &Path,
+        stable_files: &[(&str, &str)],
+    ) {
+        let update = std::env::var_os("RUST_AGENT_UPDATE_GOLDENS").as_deref()
+            == Some(std::ffi::OsStr::new("1"));
+        for (actual, golden) in stable_files {
+            if update {
+                fs::copy(generated.path.join(actual), golden_directory.join(golden)).unwrap();
+            }
+            assert_eq!(
+                fs::read(generated.path.join(actual)).unwrap(),
+                fs::read(golden_directory.join(golden)).unwrap(),
+                "stale golden {golden}"
+            );
+        }
+
+        let actual_rustc_bytes = fs::read(generated.path.join("compose-rustc.json")).unwrap();
+        let actual_rustc =
+            serde_json::from_slice::<crate::toolchain::ComposeRustcProvenance>(&actual_rustc_bytes)
+                .unwrap();
+        actual_rustc.validate().unwrap();
+        assert_eq!(actual_rustc, generated.manifest.compose_rustc);
+        assert_eq!(
+            actual_rustc_bytes,
+            deterministic_json_bytes(&actual_rustc).unwrap(),
+            "generated compose-rustc.json is not canonical"
+        );
+        assert_generated_file_record_matches(
+            &generated.manifest,
+            "compose-rustc.json",
+            &actual_rustc_bytes,
+        );
+
+        // The checked-in sidecar is a canonical schema/encoding anchor, not a claim that
+        // every rustup installation has identical bookkeeping bytes. Rebind only its exact
+        // toolchain input and the two fields derived from that input before comparing the
+        // otherwise frozen composition manifest.
+        let golden_rustc_bytes = fs::read(golden_directory.join("compose-rustc.json")).unwrap();
+        let golden_rustc =
+            serde_json::from_slice::<crate::toolchain::ComposeRustcProvenance>(&golden_rustc_bytes)
+                .unwrap();
+        golden_rustc.validate().unwrap();
+        assert_eq!(
+            golden_rustc_bytes,
+            deterministic_json_bytes(&golden_rustc).unwrap(),
+            "golden compose-rustc.json is not canonical"
+        );
+
+        let golden_manifest_path = golden_directory.join("rust-agent-composition.json");
+        let golden_manifest_bytes = fs::read(&golden_manifest_path).unwrap();
+        let mut golden_manifest =
+            serde_json::from_slice::<CompositionManifest>(&golden_manifest_bytes).unwrap();
+        assert_eq!(golden_manifest.compose_rustc, golden_rustc);
+        assert_generated_file_record_matches(
+            &golden_manifest,
+            "compose-rustc.json",
+            &golden_rustc_bytes,
+        );
+        assert_eq!(
+            golden_manifest_bytes,
+            deterministic_json_bytes(&golden_manifest).unwrap(),
+            "golden rust-agent-composition.json is not canonical"
+        );
+
+        if update {
+            let mut updated = generated.manifest.clone();
+            rebind_manifest_toolchain(&mut updated, &golden_manifest);
+            write_json(&golden_manifest_path, &updated).unwrap();
+            golden_manifest = updated;
+        }
+
+        let actual_manifest_bytes =
+            fs::read(generated.path.join("rust-agent-composition.json")).unwrap();
+        let actual_manifest =
+            serde_json::from_slice::<CompositionManifest>(&actual_manifest_bytes).unwrap();
+        assert_eq!(actual_manifest, generated.manifest);
+        assert_eq!(
+            actual_manifest_bytes,
+            deterministic_json_bytes(&actual_manifest).unwrap(),
+            "generated rust-agent-composition.json is not canonical"
+        );
+        assert_eq!(
+            composition_hash_for_manifest(&actual_manifest),
+            actual_manifest.composition_hash
+        );
+
+        rebind_manifest_toolchain(&mut golden_manifest, &actual_manifest);
+        assert_eq!(
+            actual_manifest, golden_manifest,
+            "stale golden rust-agent-composition.json"
+        );
+    }
+
+    #[test]
+    fn golden_rebinding_allows_only_exact_toolchain_input_drift() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../..")
+            .canonicalize()
+            .unwrap();
+        let bytes =
+            fs::read(root.join("tests/golden/minimal/rust-agent-composition.json")).unwrap();
+        let reference = serde_json::from_slice::<CompositionManifest>(&bytes).unwrap();
+        let mut stale = reference.clone();
+        stale.compose_rustc.sysroot.tree_digest = "0".repeat(64);
+        stale.compose_rustc.identity_digest = "1".repeat(64);
+        stale.composition_hash = "2".repeat(64);
+        let record = stale
+            .generated_files
+            .iter_mut()
+            .find(|record| record.path == "compose-rustc.json")
+            .unwrap();
+        record.digest = "3".repeat(64);
+        record.bytes += 1;
+
+        rebind_manifest_toolchain(&mut stale, &reference);
+        assert_eq!(stale, reference);
+
+        stale.profile.push_str("-unrelated-drift");
+        rebind_manifest_toolchain(&mut stale, &reference);
+        assert_ne!(stale, reference);
+    }
+
     #[test]
     fn minimal_golden_is_fresh() {
         let temp = TempDir::new().unwrap();
@@ -7225,29 +7405,16 @@ rust-agent-fixture-target-wasm = { version = "0.1.0", path = "../../helpers/fixt
             .join("../../..")
             .canonicalize()
             .unwrap();
-        for (actual, golden) in [
-            ("Cargo.toml", "Cargo.toml"),
-            ("compose-rustc.json", "compose-rustc.json"),
-            ("generator-inputs.json", "generator-inputs.json"),
-            ("src/lib.rs", "lib.rs"),
-            ("target-facts.json", "target-facts.json"),
-            ("rust-agent-composition.json", "rust-agent-composition.json"),
-        ] {
-            if std::env::var_os("RUST_AGENT_UPDATE_GOLDENS").as_deref()
-                == Some(std::ffi::OsStr::new("1"))
-            {
-                fs::copy(
-                    generated.path.join(actual),
-                    root.join("tests/golden/minimal").join(golden),
-                )
-                .unwrap();
-            }
-            assert_eq!(
-                fs::read(generated.path.join(actual)).unwrap(),
-                fs::read(root.join("tests/golden/minimal").join(golden)).unwrap(),
-                "stale golden {golden}"
-            );
-        }
+        assert_profile_golden_is_fresh(
+            &generated,
+            &root.join("tests/golden/minimal"),
+            &[
+                ("Cargo.toml", "Cargo.toml"),
+                ("generator-inputs.json", "generator-inputs.json"),
+                ("src/lib.rs", "lib.rs"),
+                ("target-facts.json", "target-facts.json"),
+            ],
+        );
     }
 
     #[test]
@@ -7260,30 +7427,17 @@ rust-agent-fixture-target-wasm = { version = "0.1.0", path = "../../helpers/fixt
             .join("../../..")
             .canonicalize()
             .unwrap();
-        for (actual, golden) in [
-            ("Cargo.toml", "Cargo.toml"),
-            ("compose-rustc.json", "compose-rustc.json"),
-            ("generator-inputs.json", "generator-inputs.json"),
-            ("src/lib.rs", "lib.rs"),
-            ("src/wasm.rs", "wasm.rs"),
-            ("target-facts.json", "target-facts.json"),
-            ("rust-agent-composition.json", "rust-agent-composition.json"),
-        ] {
-            if std::env::var_os("RUST_AGENT_UPDATE_GOLDENS").as_deref()
-                == Some(std::ffi::OsStr::new("1"))
-            {
-                fs::copy(
-                    generated.path.join(actual),
-                    root.join("tests/golden/wasm-js").join(golden),
-                )
-                .unwrap();
-            }
-            assert_eq!(
-                fs::read(generated.path.join(actual)).unwrap(),
-                fs::read(root.join("tests/golden/wasm-js").join(golden)).unwrap(),
-                "stale golden {golden}"
-            );
-        }
+        assert_profile_golden_is_fresh(
+            &generated,
+            &root.join("tests/golden/wasm-js"),
+            &[
+                ("Cargo.toml", "Cargo.toml"),
+                ("generator-inputs.json", "generator-inputs.json"),
+                ("src/lib.rs", "lib.rs"),
+                ("src/wasm.rs", "wasm.rs"),
+                ("target-facts.json", "target-facts.json"),
+            ],
+        );
     }
 
     #[test]

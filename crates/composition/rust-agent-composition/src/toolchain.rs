@@ -1199,17 +1199,18 @@ mod tests {
             b"fixture-core-v1",
         )
         .unwrap();
-        let quoted_sysroot = format!("{:?}", sysroot.display().to_string());
         write_executable(
             &rustc,
             &format!(
                 concat!(
                     "#!/bin/sh\n",
+                    "rustc_dir=${{0%/*}}\n",
+                    "sysroot=${{rustc_dir%/*}}\n",
                     "if [ \"$1\" = \"-vV\" ]; then printf '%b' {:?}; exit 0; fi\n",
-                    "if [ \"$1 $2\" = \"--print sysroot\" ]; then printf '%s\\n' {}; exit 0; fi\n",
+                    "if [ \"$1 $2\" = \"--print sysroot\" ]; then printf '%s\\n' \"$sysroot\"; exit 0; fi\n",
                     "exit 93\n"
                 ),
-                PINNED_VERBOSE_VERSION, quoted_sysroot,
+                PINNED_VERBOSE_VERSION,
             ),
         );
         (temp, sysroot, rustc)
@@ -1246,6 +1247,18 @@ mod tests {
         assert!(provenance.sysroot.entries >= 5);
         assert!(provenance.sysroot.files >= 2);
         assert!(provenance.sysroot.directories >= 3);
+        assert_eq!(
+            provenance.rustc.sha256,
+            "6e90462605efd5d03afa2fb0b462d09b4302a69d315de68d81e0073440691a5e"
+        );
+        assert_eq!(
+            provenance.sysroot.tree_digest,
+            "2079a74249db578a6249082476371f2e86d632ea0c179f420e639e2c73124273"
+        );
+        assert_eq!(
+            provenance.identity_digest,
+            "f002815399248cf3d16f235d85a1a8ab64e2e8bbed6b7ef19798b85b552aeb50"
+        );
         let encoded = serde_json::to_string(provenance).unwrap();
         assert!(!encoded.contains(sysroot.to_str().unwrap()));
         assert!(!encoded.contains(rustc.to_str().unwrap()));

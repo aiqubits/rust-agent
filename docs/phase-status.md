@@ -51,7 +51,9 @@ Named tests cover:
   and a bounded path-free digest of every regular file/directory in its reported sysroot; the
   provenance is separate from the target-fact digest but identity-bound to the composition, and
   rustc/sysroot drift after target query, metadata discovery or lockfile generation fails before
-  later Cargo side effects;
+  later Cargo side effects. A path-independent fixture fixes the hash vectors, while generated
+  goldens rebind only validated exact-toolchain provenance and its derived record/hash so rustup
+  installation bookkeeping cannot make otherwise identical schema/source snapshots stale;
 - resolver required closure, explicit disable, security denial, conflicts, bounded backtracking,
   decision exhaustion, provenance, property cases and a brute-force small-graph oracle;
 - generated source/Cargo/manifest goldens, direct-serde-bounded manifest/diagnostic/Cargo-source
