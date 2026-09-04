@@ -1,5 +1,6 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
+    fmt,
     fs::{self, File, FileTimes},
     io::{self, BufReader, BufWriter, Read, Write},
     path::{Path, PathBuf},
@@ -8,7 +9,10 @@ use std::{
     time::SystemTime,
 };
 
-use serde::Serialize;
+use serde::{
+    Deserialize, Deserializer, Serialize,
+    de::{self, SeqAccess, Visitor},
+};
 use sha2::{Digest as _, Sha256};
 use thiserror::Error;
 use walkdir::WalkDir;
@@ -40,7 +44,9 @@ use crate::{
     generator_input::{GeneratorInputCommitment, GeneratorInputError},
     manifest::{
         CargoResolutionRecord, CompositionIdentityPayload, CompositionManifest,
-        GeneratedFileRecord, SecurityManifest, SourcePackageRecord,
+        GeneratedFileRecord, MAX_CARGO_SOURCE_IDENTITIES, MAX_COMPOSITION_SOURCE_ENTRIES,
+        MAX_COMPOSITION_SOURCE_FILE_BYTES, MAX_COMPOSITION_SOURCE_PACKAGES, SecurityManifest,
+        SourcePackageRecord,
     },
     metadata::{
         AppCoexistence, BuildRequirements, CatalogTrustPolicy, ConfigSource, HostBoundaryKind,
@@ -62,9 +68,9 @@ const PINNED_RUST_VERSION: &str = env!("CARGO_PKG_RUST_VERSION");
 const MAX_SOURCE_MANIFEST_BYTES: u64 = MAX_CANONICAL_SNAPSHOT_JSON_BYTES as u64;
 const MAX_COMPOSITION_CONTROL_FILE_BYTES: u64 = MAX_CANONICAL_SNAPSHOT_JSON_BYTES as u64;
 const SNAPSHOT_COPY_BUFFER_BYTES: usize = 64 * 1024;
-const MAX_SNAPSHOT_PACKAGES: usize = 1_024;
 const MAX_MANIFEST_TARGET_SELECTORS: usize = 256;
 const MAX_MANIFEST_DEPENDENCIES: usize = 4_096;
+const MAX_CARGO_LOCK_PACKAGES: usize = 16 * 1_024;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum CompositionTreeEntryKind {
@@ -335,15 +341,18 @@ fn compose_in_staging(
     )?;
     write_json(&staging.join("generator-inputs.json"), generator_inputs)?;
 
+    let snapshot_plans =
+        plan_composition_source_packages(&options.workspace_root, package_inputs, target)?;
     let source_root = staging.join("sources");
     fs::create_dir_all(&source_root)?;
     let mut sources = Vec::new();
-    for package in package_inputs {
+    for (package, plan) in package_inputs.iter().zip(&snapshot_plans) {
         sources.push(snapshot_planned_package(
             &options.workspace_root,
             &source_root,
             package,
             target,
+            plan,
         )?);
     }
     sources.sort_by(|left, right| left.id.cmp(&right.id));
@@ -930,6 +939,7 @@ fn verify_composition_with_location_policy(
             "source package records are not in strict canonical id order".into(),
         ));
     }
+    preflight_composition_source_snapshots(path, &manifest.sources)?;
     if !manifest
         .generated_files
         .windows(2)
@@ -1616,6 +1626,29 @@ struct SourceSnapshotVerificationEntry {
 }
 
 fn source_snapshot_tree(root: &Path) -> Result<CanonicalSnapshotTree, ComposeError> {
+    let (plan, _) = plan_source_snapshot_verification(root)?;
+    let mut entries = Vec::with_capacity(plan.len());
+    for entry in plan {
+        let directory = entry.bytes.is_none();
+        verify_source_snapshot_storage_projection(&entry.path, directory)?;
+        if let Some(expected_bytes) = entry.bytes {
+            let (digest, bytes) = hash_snapshot_file(&entry.path, expected_bytes)?;
+            entries.push(CanonicalSnapshotEntry::regular_file(
+                entry.relative,
+                digest,
+                bytes,
+            ));
+        } else {
+            entries.push(CanonicalSnapshotEntry::directory(entry.relative));
+        }
+    }
+    verify_source_snapshot_storage_projection(root, true)?;
+    Ok(CanonicalSnapshotTree::from_entries(entries)?)
+}
+
+fn plan_source_snapshot_verification(
+    root: &Path,
+) -> Result<(Vec<SourceSnapshotVerificationEntry>, u64), ComposeError> {
     let root_metadata = fs::symlink_metadata(root)?;
     if root_metadata.file_type().is_symlink() || !root_metadata.is_dir() {
         return Err(ComposeError::Verification(format!(
@@ -1668,24 +1701,60 @@ fn source_snapshot_tree(root: &Path) -> Result<CanonicalSnapshotTree, ComposeErr
             bytes,
         });
     }
+    Ok((plan, total_file_bytes))
+}
 
-    let mut entries = Vec::with_capacity(plan.len());
-    for entry in plan {
-        let directory = entry.bytes.is_none();
-        verify_source_snapshot_storage_projection(&entry.path, directory)?;
-        if let Some(expected_bytes) = entry.bytes {
-            let (digest, bytes) = hash_snapshot_file(&entry.path, expected_bytes)?;
-            entries.push(CanonicalSnapshotEntry::regular_file(
-                entry.relative,
-                digest,
-                bytes,
-            ));
-        } else {
-            entries.push(CanonicalSnapshotEntry::directory(entry.relative));
-        }
+fn preflight_composition_source_snapshots(
+    composition: &Path,
+    sources: &[SourcePackageRecord],
+) -> Result<(), ComposeError> {
+    let mut usage = CompositionSourceUsage::default();
+    for source in sources {
+        validate_composition_relative_path(&source.logical_path)?;
+        let root = composition.join("sources").join(&source.logical_path);
+        let (plan, package_bytes) = plan_source_snapshot_verification(&root)?;
+        usage.account(plan.len(), package_bytes)?;
     }
-    verify_source_snapshot_storage_projection(root, true)?;
-    Ok(CanonicalSnapshotTree::from_entries(entries)?)
+    Ok(())
+}
+
+#[derive(Debug, Default)]
+struct CompositionSourceUsage {
+    entries: usize,
+    file_bytes: u64,
+}
+
+impl CompositionSourceUsage {
+    fn account(&mut self, entries: usize, file_bytes: u64) -> Result<(), ComposeError> {
+        self.entries =
+            self.entries
+                .checked_add(entries)
+                .ok_or(CanonicalSnapshotError::TooManyEntries {
+                    actual: usize::MAX,
+                    maximum: MAX_COMPOSITION_SOURCE_ENTRIES,
+                })?;
+        if self.entries > MAX_COMPOSITION_SOURCE_ENTRIES {
+            return Err(CanonicalSnapshotError::TooManyEntries {
+                actual: self.entries,
+                maximum: MAX_COMPOSITION_SOURCE_ENTRIES,
+            }
+            .into());
+        }
+        self.file_bytes = self.file_bytes.checked_add(file_bytes).ok_or(
+            CanonicalSnapshotError::TotalBytesTooLarge {
+                actual: u64::MAX,
+                maximum: MAX_COMPOSITION_SOURCE_FILE_BYTES,
+            },
+        )?;
+        if self.file_bytes > MAX_COMPOSITION_SOURCE_FILE_BYTES {
+            return Err(CanonicalSnapshotError::TotalBytesTooLarge {
+                actual: self.file_bytes,
+                maximum: MAX_COMPOSITION_SOURCE_FILE_BYTES,
+            }
+            .into());
+        }
+        Ok(())
+    }
 }
 
 fn hash_snapshot_file(path: &Path, expected_bytes: u64) -> Result<(String, u64), ComposeError> {
@@ -2158,12 +2227,14 @@ fn package_closure(
             },
         );
         for dependency in dependencies {
-            if packages.len() + pending.len() >= MAX_SNAPSHOT_PACKAGES
+            if packages.len() + pending.len() >= MAX_COMPOSITION_SOURCE_PACKAGES
                 && !seeds.contains_key(&dependency.logical_path)
             {
                 return manifest_error(
                     workspace_root.join(&path).join("Cargo.toml"),
-                    format!("path dependency closure exceeds {MAX_SNAPSHOT_PACKAGES} packages"),
+                    format!(
+                        "path dependency closure exceeds {MAX_COMPOSITION_SOURCE_PACKAGES} packages"
+                    ),
                 );
             }
             if let Some(existing) = seeds.get(&dependency.logical_path) {
@@ -2195,10 +2266,10 @@ fn package_closure(
         }
     }
 
-    if packages.len() > MAX_SNAPSHOT_PACKAGES {
+    if packages.len() > MAX_COMPOSITION_SOURCE_PACKAGES {
         return manifest_error(
             workspace_root.join("Cargo.toml"),
-            format!("path dependency closure exceeds {MAX_SNAPSHOT_PACKAGES} packages"),
+            format!("path dependency closure exceeds {MAX_COMPOSITION_SOURCE_PACKAGES} packages"),
         );
     }
     let mut source_ids = BTreeMap::new();
@@ -2884,20 +2955,52 @@ struct SnapshotPackagePlanEntry {
 }
 
 #[derive(Debug)]
+struct SnapshotPackagePlan {
+    entries: Vec<SnapshotPackagePlanEntry>,
+    file_bytes: u64,
+}
+
+#[derive(Debug)]
 enum SnapshotPackagePlanContent {
     Directory,
     RegularFile { bytes: u64 },
     NormalizedManifest { bytes: Vec<u8> },
 }
 
-fn snapshot_planned_package(
+fn plan_composition_source_packages(
     workspace_root: &Path,
-    source_root: &Path,
+    packages: &[PackageInput],
+    target: &Target,
+) -> Result<Vec<SnapshotPackagePlan>, ComposeError> {
+    let mut plans = Vec::with_capacity(packages.len());
+    let mut usage = CompositionSourceUsage::default();
+    for package in packages {
+        let plan = plan_selected_package_snapshot(workspace_root, package, target)?;
+        usage.account(plan.entries.len(), plan.file_bytes)?;
+        plans.push(plan);
+    }
+    Ok(plans)
+}
+
+fn plan_selected_package_snapshot(
+    workspace_root: &Path,
     package: &PackageInput,
     target: &Target,
-) -> Result<SourcePackageRecord, ComposeError> {
+) -> Result<SnapshotPackagePlan, ComposeError> {
     let source = workspace_root.join(&package.path);
-    let source_metadata = fs::symlink_metadata(&source).map_err(|error| {
+    validate_snapshot_package_root(&source)?;
+    let current_manifest = normalize_package_manifest(workspace_root, &package.path, target)?;
+    if current_manifest != package.manifest {
+        return Err(ComposeError::Verification(format!(
+            "source manifest `{}` changed after dependency closure planning",
+            source.join("Cargo.toml").display()
+        )));
+    }
+    plan_snapshot_package(&source, &package.manifest.bytes)
+}
+
+fn validate_snapshot_package_root(source: &Path) -> Result<(), ComposeError> {
+    let source_metadata = fs::symlink_metadata(source).map_err(|error| {
         if error.kind() == io::ErrorKind::NotFound {
             ComposeError::MissingSourcePackage(source.display().to_string())
         } else {
@@ -2909,6 +3012,18 @@ fn snapshot_planned_package(
             source.display().to_string(),
         ));
     }
+    Ok(())
+}
+
+fn snapshot_planned_package(
+    workspace_root: &Path,
+    source_root: &Path,
+    package: &PackageInput,
+    target: &Target,
+    plan: &SnapshotPackagePlan,
+) -> Result<SourcePackageRecord, ComposeError> {
+    let source = workspace_root.join(&package.path);
+    validate_snapshot_package_root(&source)?;
     let current_manifest = normalize_package_manifest(workspace_root, &package.path, target)?;
     if current_manifest != package.manifest {
         return Err(ComposeError::Verification(format!(
@@ -2916,7 +3031,6 @@ fn snapshot_planned_package(
             source.join("Cargo.toml").display()
         )));
     }
-    let plan = plan_snapshot_package(&source, &package.manifest.bytes)?;
     let destination = source_root.join(&package.path);
     if fs::symlink_metadata(&destination).is_ok() {
         return Err(ComposeError::Verification(format!(
@@ -2933,7 +3047,7 @@ fn snapshot_planned_package(
                 source.join("Cargo.toml").display()
             )));
         }
-        let copied_tree = materialize_snapshot_package_plan(&source, &destination, &plan)?;
+        let copied_tree = materialize_snapshot_package_plan(&source, &destination, &plan.entries)?;
         let current_manifest = normalize_package_manifest(workspace_root, &package.path, target)?;
         if current_manifest != package.manifest {
             return Err(ComposeError::Verification(format!(
@@ -2980,24 +3094,21 @@ fn snapshot_package(
         facts,
     )?;
     let manifest = normalize_package_manifest(workspace_root, logical_path, &target)?;
-    snapshot_planned_package(
-        workspace_root,
-        source_root,
-        &PackageInput {
-            id: id.into(),
-            package: package.into(),
-            path: logical_path.into(),
-            direct: true,
-            manifest,
-        },
-        &target,
-    )
+    let package = PackageInput {
+        id: id.into(),
+        package: package.into(),
+        path: logical_path.into(),
+        direct: true,
+        manifest,
+    };
+    let plan = plan_selected_package_snapshot(workspace_root, &package, &target)?;
+    snapshot_planned_package(workspace_root, source_root, &package, &target, &plan)
 }
 
 fn plan_snapshot_package(
     source: &Path,
     normalized_manifest: &[u8],
-) -> Result<Vec<SnapshotPackagePlanEntry>, ComposeError> {
+) -> Result<SnapshotPackagePlan, ComposeError> {
     let mut plan = Vec::new();
     let mut validation_entries = Vec::new();
     let mut total_file_bytes = 0_u64;
@@ -3085,7 +3196,10 @@ fn plan_snapshot_package(
         });
     }
     CanonicalSnapshotTree::from_entries(validation_entries)?;
-    Ok(plan)
+    Ok(SnapshotPackagePlan {
+        entries: plan,
+        file_bytes: total_file_bytes,
+    })
 }
 
 fn account_snapshot_file_bytes(
@@ -3928,37 +4042,33 @@ fn locked_cargo_sources_from_bytes(
             path: lockfile.display().to_string(),
             message: error.to_string(),
         })?;
-    let document: toml::Value =
+    let document: CargoLockDocument =
         toml::from_str(input).map_err(|error| ComposeError::ManifestNormalization {
             path: lockfile.display().to_string(),
             message: error.to_string(),
         })?;
     let mut registries = BTreeMap::new();
     let mut git_sources = BTreeSet::new();
-    for package in document
-        .get("package")
-        .and_then(toml::Value::as_array)
-        .into_iter()
-        .flatten()
-    {
-        let Some(source) = package.get("source").and_then(toml::Value::as_str) else {
-            continue;
-        };
+    for source in document.source_projection.sources {
         if source.starts_with("registry+") {
             let id = if source == "registry+https://github.com/rust-lang/crates.io-index" {
                 "crates-io".to_owned()
             } else {
                 format!("registry-{}", &sha256_hex(source.as_bytes())[..16])
             };
-            if let Some(previous) = registries.insert(id.clone(), source.to_owned())
-                && previous != source
-            {
-                return Err(ComposeError::CargoLock(format!(
-                    "registry source id `{id}` is ambiguous"
-                )));
+            match registries.get(&id) {
+                Some(previous) if previous != &source => {
+                    return Err(ComposeError::CargoLock(format!(
+                        "registry source id `{id}` is ambiguous"
+                    )));
+                }
+                Some(_) => {}
+                None => {
+                    registries.insert(id, source);
+                }
             }
         } else if source.starts_with("git+") {
-            git_sources.insert(source.to_owned());
+            git_sources.insert(source);
         } else {
             return Err(ComposeError::CargoLock(format!(
                 "unsupported locked package source `{source}`"
@@ -3966,6 +4076,90 @@ fn locked_cargo_sources_from_bytes(
         }
     }
     Ok((registries, git_sources))
+}
+
+#[derive(Deserialize)]
+struct CargoLockDocument {
+    #[serde(
+        default,
+        rename = "package",
+        deserialize_with = "deserialize_cargo_lock_packages"
+    )]
+    source_projection: CargoLockSourceProjection,
+}
+
+#[derive(Default)]
+struct CargoLockSourceProjection {
+    sources: BTreeSet<String>,
+}
+
+#[derive(Deserialize)]
+struct CargoLockPackage {
+    #[serde(default)]
+    source: Option<String>,
+}
+
+fn deserialize_cargo_lock_packages<'de, D>(
+    deserializer: D,
+) -> Result<CargoLockSourceProjection, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    struct CargoLockPackagesVisitor;
+
+    impl<'de> Visitor<'de> for CargoLockPackagesVisitor {
+        type Value = CargoLockSourceProjection;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(
+                formatter,
+                "at most {MAX_CARGO_LOCK_PACKAGES} Cargo.lock packages and {MAX_CARGO_SOURCE_IDENTITIES} distinct source identities"
+            )
+        }
+
+        fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+        where
+            A: SeqAccess<'de>,
+        {
+            if sequence
+                .size_hint()
+                .is_some_and(|hint| hint > MAX_CARGO_LOCK_PACKAGES)
+            {
+                return Err(de::Error::custom(format!(
+                    "Cargo.lock packages has more than {MAX_CARGO_LOCK_PACKAGES} entries"
+                )));
+            }
+            let mut package_count = 0_usize;
+            let mut sources = BTreeSet::new();
+            loop {
+                if package_count == MAX_CARGO_LOCK_PACKAGES {
+                    return match sequence.next_element::<de::IgnoredAny>()? {
+                        Some(_) => Err(de::Error::custom(format!(
+                            "Cargo.lock packages has more than {MAX_CARGO_LOCK_PACKAGES} entries"
+                        ))),
+                        None => Ok(CargoLockSourceProjection { sources }),
+                    };
+                }
+                let Some(package) = sequence.next_element::<CargoLockPackage>()? else {
+                    return Ok(CargoLockSourceProjection { sources });
+                };
+                package_count += 1;
+                let Some(source) = package.source else {
+                    continue;
+                };
+                if !sources.contains(&source) {
+                    if sources.len() == MAX_CARGO_SOURCE_IDENTITIES {
+                        return Err(de::Error::custom(format!(
+                            "Cargo.lock source identities has more than {MAX_CARGO_SOURCE_IDENTITIES} entries"
+                        )));
+                    }
+                    sources.insert(source);
+                }
+            }
+        }
+    }
+
+    deserializer.deserialize_seq(CargoLockPackagesVisitor)
 }
 
 fn generated_file_records(
@@ -4897,6 +5091,37 @@ mod tests {
         )
     }
 
+    #[test]
+    fn cargo_lock_package_collection_is_bounded_during_deserialization() {
+        let mut lock = String::from("version = 4\n");
+        for _ in 0..=MAX_CARGO_LOCK_PACKAGES {
+            lock.push_str("[[package]]\n");
+        }
+
+        assert!(matches!(
+            locked_cargo_sources_from_bytes(Path::new("Cargo.lock"), lock.as_bytes()),
+            Err(ComposeError::ManifestNormalization { message, .. })
+                if message.contains("Cargo.lock packages has more than")
+        ));
+    }
+
+    #[test]
+    fn cargo_lock_source_identity_collection_is_bounded() {
+        let mut lock = String::from("version = 4\n");
+        for index in 0..=MAX_CARGO_SOURCE_IDENTITIES {
+            lock.push_str(&format!(
+                "[[package]]\nsource = \"git+https://example.invalid/repository-{index}#{}\"\n",
+                "0".repeat(40)
+            ));
+        }
+
+        assert!(matches!(
+            locked_cargo_sources_from_bytes(Path::new("Cargo.lock"), lock.as_bytes()),
+            Err(ComposeError::ManifestNormalization { message, .. })
+                if message.contains("Cargo.lock source identities has more than")
+        ));
+    }
+
     fn write_test_package(root: &Path, logical_path: &str, name: &str, manifest_tail: &str) {
         let package = root.join(logical_path);
         fs::create_dir_all(package.join("src")).unwrap();
@@ -5134,8 +5359,8 @@ escape = { path = "../../../outside-workspace" }
     #[test]
     fn path_dependency_package_closure_count_is_bounded_before_cargo() {
         let temp = TempDir::new().unwrap();
-        for index in 0..MAX_SNAPSHOT_PACKAGES {
-            let tail = if index + 1 == MAX_SNAPSHOT_PACKAGES {
+        for index in 0..MAX_COMPOSITION_SOURCE_PACKAGES {
+            let tail = if index + 1 == MAX_COMPOSITION_SOURCE_PACKAGES {
                 String::new()
             } else {
                 format!(
@@ -5159,20 +5384,20 @@ escape = { path = "../../../outside-workspace" }
         };
         let at_limit =
             package_closure(temp.path(), vec![root.clone()], &native_test_target()).unwrap();
-        assert_eq!(at_limit.len(), MAX_SNAPSHOT_PACKAGES);
+        assert_eq!(at_limit.len(), MAX_COMPOSITION_SOURCE_PACKAGES);
 
         write_test_package(
             temp.path(),
-            &format!("packages/{MAX_SNAPSHOT_PACKAGES}"),
-            &format!("package-{MAX_SNAPSHOT_PACKAGES}"),
+            &format!("packages/{MAX_COMPOSITION_SOURCE_PACKAGES}"),
+            &format!("package-{MAX_COMPOSITION_SOURCE_PACKAGES}"),
             "",
         );
         write_test_package(
             temp.path(),
-            &format!("packages/{}", MAX_SNAPSHOT_PACKAGES - 1),
-            &format!("package-{}", MAX_SNAPSHOT_PACKAGES - 1),
+            &format!("packages/{}", MAX_COMPOSITION_SOURCE_PACKAGES - 1),
+            &format!("package-{}", MAX_COMPOSITION_SOURCE_PACKAGES - 1),
             &format!(
-                "[target.'cfg(true)'.dependencies]\npackage-{MAX_SNAPSHOT_PACKAGES} = {{ path = \"../{MAX_SNAPSHOT_PACKAGES}\" }}\n"
+                "[target.'cfg(true)'.dependencies]\npackage-{MAX_COMPOSITION_SOURCE_PACKAGES} = {{ path = \"../{MAX_COMPOSITION_SOURCE_PACKAGES}\" }}\n"
             ),
         );
         assert!(matches!(
@@ -5833,16 +6058,28 @@ helper = { path = "../link" }
             .join("sources")
             .join(&record.package_path)
             .join(&record.source);
-        make_staging_tree_owner_writable(&generated.path).unwrap();
         let mut bytes = fs::read(&evidence_path).unwrap();
         bytes[0] ^= 1;
+        let mut permissions = fs::metadata(&evidence_path).unwrap().permissions();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            permissions.set_mode(permissions.mode() | 0o200);
+        }
+        #[cfg(not(unix))]
+        permissions.set_readonly(false);
+        fs::set_permissions(&evidence_path, permissions).unwrap();
         fs::write(&evidence_path, bytes).unwrap();
+        set_snapshot_epoch(&evidence_path).unwrap();
+        set_snapshot_permissions(&evidence_path, false).unwrap();
 
         assert!(matches!(
             verify_composition(&generated.path),
             Err(ComposeError::Verification(message))
                 if message.contains("selected coexistence evidence differs")
         ));
+        make_staging_tree_owner_writable(&generated.path).unwrap();
     }
 
     #[test]
@@ -6200,7 +6437,7 @@ helper = { path = "../link" }
         assert!(matches!(
             verify_composition(&generated.path),
             Err(ComposeError::Verification(message))
-                if message.contains("exact deterministic derived encoding")
+                if message.contains("duplicate entry")
         ));
 
         fs::write(&security_path, original).unwrap();
@@ -6251,7 +6488,7 @@ helper = { path = "../link" }
         assert!(matches!(
             verify_composition(&duplicate_path),
             Err(ComposeError::Verification(message))
-                if message.contains("exact deterministic encoding")
+                if message.contains("duplicate entry")
         ));
         make_staging_tree_owner_writable(&duplicate_path).unwrap();
     }
@@ -6609,6 +6846,63 @@ rust-agent-fixture-target-wasm = { version = "0.1.0", path = "../../helpers/fixt
     }
 
     #[test]
+    fn composition_source_preflight_rejects_cross_package_overflow_before_copying() {
+        let temp = TempDir::new().unwrap();
+        let target = native_test_target();
+        let mut packages = Vec::new();
+        for name in ["first", "second"] {
+            let package_root = write_snapshot_fixture(temp.path(), name);
+            for file in ["a.bin", "b.bin"] {
+                File::create(package_root.join(file))
+                    .unwrap()
+                    .set_len(MAX_CANONICAL_SNAPSHOT_FILE_BYTES)
+                    .unwrap();
+            }
+            packages.push(PackageInput {
+                id: name.into(),
+                package: name.into(),
+                path: name.into(),
+                direct: true,
+                manifest: normalize_package_manifest(temp.path(), name, &target).unwrap(),
+            });
+        }
+        let snapshot_root = temp.path().join("snapshots");
+
+        assert!(matches!(
+            plan_composition_source_packages(temp.path(), &packages, &target),
+            Err(ComposeError::Snapshot(
+                CanonicalSnapshotError::TotalBytesTooLarge { maximum, .. }
+            )) if maximum == MAX_COMPOSITION_SOURCE_FILE_BYTES
+        ));
+        assert!(!snapshot_root.exists());
+    }
+
+    #[test]
+    fn composition_source_usage_closes_cross_package_entry_and_byte_boundaries() {
+        let mut entries = CompositionSourceUsage::default();
+        entries
+            .account(MAX_COMPOSITION_SOURCE_ENTRIES - 1, 0)
+            .unwrap();
+        assert!(matches!(
+            entries.account(2, 0),
+            Err(ComposeError::Snapshot(
+                CanonicalSnapshotError::TooManyEntries { maximum, .. }
+            )) if maximum == MAX_COMPOSITION_SOURCE_ENTRIES
+        ));
+
+        let mut bytes = CompositionSourceUsage::default();
+        bytes
+            .account(0, MAX_COMPOSITION_SOURCE_FILE_BYTES - 1)
+            .unwrap();
+        assert!(matches!(
+            bytes.account(0, 2),
+            Err(ComposeError::Snapshot(
+                CanonicalSnapshotError::TotalBytesTooLarge { maximum, .. }
+            )) if maximum == MAX_COMPOSITION_SOURCE_FILE_BYTES
+        ));
+    }
+
+    #[test]
     fn snapshot_verification_rejects_aggregate_overflow_before_hashing_sparse_files() {
         let temp = TempDir::new().unwrap();
         let package = write_snapshot_fixture(temp.path(), "fixture");
@@ -6627,6 +6921,40 @@ rust-agent-fixture-target-wasm = { version = "0.1.0", path = "../../helpers/fixt
             )) if maximum == MAX_CANONICAL_SNAPSHOT_TOTAL_FILE_BYTES
         ));
         make_staging_tree_owner_writable(&package).unwrap();
+    }
+
+    #[test]
+    fn composition_source_verification_rejects_cross_package_overflow_before_hashing() {
+        let temp = TempDir::new().unwrap();
+        let composition = temp.path().join("composition");
+        let sources_root = composition.join("sources");
+        fs::create_dir_all(&sources_root).unwrap();
+        let mut sources = Vec::new();
+        for name in ["first", "second"] {
+            let package_root = write_snapshot_fixture(&sources_root, name);
+            for file in ["a.bin", "b.bin"] {
+                File::create(package_root.join(file))
+                    .unwrap()
+                    .set_len(MAX_CANONICAL_SNAPSHOT_FILE_BYTES)
+                    .unwrap();
+            }
+            seal_source_snapshot_storage_projection(&package_root).unwrap();
+            sources.push(SourcePackageRecord {
+                id: name.into(),
+                package: name.into(),
+                logical_path: name.into(),
+                tree_digest: String::new(),
+                tree_entries: Vec::new(),
+            });
+        }
+
+        assert!(matches!(
+            preflight_composition_source_snapshots(&composition, &sources),
+            Err(ComposeError::Snapshot(
+                CanonicalSnapshotError::TotalBytesTooLarge { maximum, .. }
+            )) if maximum == MAX_COMPOSITION_SOURCE_FILE_BYTES
+        ));
+        make_staging_tree_owner_writable(&sources_root).unwrap();
     }
 
     #[test]

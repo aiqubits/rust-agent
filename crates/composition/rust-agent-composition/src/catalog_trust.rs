@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use sha2::{Digest as _, Sha256};
 use thiserror::Error;
 
@@ -9,15 +9,16 @@ use crate::{
     catalog::NormalizedCatalog,
     metadata::{
         AppCoexistence, CatalogReviewerPolicy, CatalogTrustPolicy, EvidenceRef, MAX_CATALOG_OWNERS,
-        ScopeKind,
+        MAX_CATALOG_REVIEWER_RULE_SETS, ScopeKind,
     },
+    serde_bounds::{deserialize_bounded_vec, deserialize_unique_bounded_set},
 };
 
 pub const CATALOG_TRUST_INPUT_SCHEMA: u32 = 1;
 pub const MAX_COEXISTENCE_EVIDENCE_BYTES: usize = 64 * 1024;
 pub const MAX_TOTAL_COEXISTENCE_EVIDENCE_BYTES: usize = 1024 * 1024;
 
-const MAX_RULE_SETS_PER_POLICY: usize = 16;
+const MAX_EVIDENCE_CLAIMS: usize = 5;
 const MAX_EVIDENCE_TEST_REFERENCES: usize = 64;
 const MAX_EVIDENCE_TEST_REFERENCE_BYTES: usize = 256;
 const POLICY_IDENTITY_DOMAIN: &[u8] = b"rust-agent-catalog-trust-policy-v1\0";
@@ -51,7 +52,9 @@ pub struct CoexistenceEvidenceDocument {
     pub mode: CoexistenceEvidenceMode,
     #[serde(rename = "rule-set")]
     pub rule_set: String,
+    #[serde(deserialize_with = "deserialize_evidence_claims")]
     pub claims: BTreeSet<String>,
+    #[serde(deserialize_with = "deserialize_evidence_tests")]
     pub tests: Vec<String>,
 }
 
@@ -91,6 +94,7 @@ pub struct CatalogTrustInputCommitment {
     pub normalized_policy: CatalogTrustPolicy,
     #[serde(rename = "normalized-policy-digest")]
     pub normalized_policy_digest: String,
+    #[serde(deserialize_with = "deserialize_evidence_records")]
     pub evidence: Vec<CatalogEvidenceRecord>,
     #[serde(rename = "identity-digest")]
     pub identity_digest: String,
@@ -327,9 +331,9 @@ fn validate_reviewer_policy(
             reviewer.evidence_schema
         )));
     }
-    if reviewer.rule_sets.is_empty() || reviewer.rule_sets.len() > MAX_RULE_SETS_PER_POLICY {
+    if reviewer.rule_sets.is_empty() || reviewer.rule_sets.len() > MAX_CATALOG_REVIEWER_RULE_SETS {
         return Err(CatalogTrustError::InvalidPolicy(format!(
-            "reviewer policy `{id}` must allow 1..={MAX_RULE_SETS_PER_POLICY} rule sets"
+            "reviewer policy `{id}` must allow 1..={MAX_CATALOG_REVIEWER_RULE_SETS} rule sets"
         )));
     }
     if let Some(rule_set) = reviewer.rule_sets.iter().find(|rule_set| !is_id(rule_set)) {
@@ -545,6 +549,33 @@ fn required_claims(mode: CoexistenceEvidenceMode) -> BTreeSet<String> {
     claims.iter().map(|claim| (*claim).to_owned()).collect()
 }
 
+fn deserialize_evidence_claims<'de, D>(deserializer: D) -> Result<BTreeSet<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    deserialize_unique_bounded_set(deserializer, MAX_EVIDENCE_CLAIMS, "evidence claims")
+}
+
+fn deserialize_evidence_tests<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    deserialize_bounded_vec(
+        deserializer,
+        MAX_EVIDENCE_TEST_REFERENCES,
+        "evidence test references",
+    )
+}
+
+fn deserialize_evidence_records<'de, D>(
+    deserializer: D,
+) -> Result<Vec<CatalogEvidenceRecord>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    deserialize_bounded_vec(deserializer, MAX_CATALOG_OWNERS, "catalog evidence records")
+}
+
 fn owner_label(owner: &CatalogEvidenceOwner) -> String {
     format!("{}:{}", owner_kind_label(owner.kind), owner.id)
 }
@@ -610,6 +641,46 @@ mod tests {
                 (request.owner, bytes)
             })
             .collect()
+    }
+
+    #[test]
+    fn trust_manifest_collections_are_bounded_during_deserialization() {
+        let excessive_tests = serde_json::json!({
+            "schema": 1,
+            "owner": "fixture-model",
+            "mode": "concurrent-independent",
+            "rule-set": "rule-v1",
+            "claims": ["boundary-config"],
+            "tests": (0..=MAX_EVIDENCE_TEST_REFERENCES)
+                .map(|index| format!("test-{index}"))
+                .collect::<Vec<_>>(),
+        });
+        let error =
+            serde_json::from_value::<CoexistenceEvidenceDocument>(excessive_tests).unwrap_err();
+        assert!(error.to_string().contains("evidence test references"));
+
+        let duplicate_claims = r#"{
+            "schema": 1,
+            "owner": "fixture-model",
+            "mode": "concurrent-independent",
+            "rule-set": "rule-v1",
+            "claims": ["boundary-config", "boundary-config"],
+            "tests": ["test"]
+        }"#;
+        let error =
+            serde_json::from_str::<CoexistenceEvidenceDocument>(duplicate_claims).unwrap_err();
+        assert!(error.to_string().contains("duplicate entry"));
+
+        let excessive_records = serde_json::json!({
+            "schema": 1,
+            "normalized-policy": {"schema": 1, "reviewer-policies": {}},
+            "normalized-policy-digest": "",
+            "evidence": vec![serde_json::Value::Null; MAX_CATALOG_OWNERS + 1],
+            "identity-digest": "",
+        });
+        let error =
+            serde_json::from_value::<CatalogTrustInputCommitment>(excessive_records).unwrap_err();
+        assert!(error.to_string().contains("catalog evidence records"));
     }
 
     #[test]

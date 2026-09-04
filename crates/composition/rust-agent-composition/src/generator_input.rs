@@ -10,6 +10,7 @@ use crate::{
     metadata::{
         BuildRequirements, CatalogDocument, CatalogResourceBoundsError, MAX_CATALOG_OWNERS,
     },
+    serde_bounds::deserialize_unique_bounded_map,
 };
 
 pub const GENERATOR_INPUT_SCHEMA: u32 = 2;
@@ -45,9 +46,23 @@ struct UncheckedGeneratorInputCommitment {
     #[serde(rename = "catalog-trust-input")]
     catalog_trust_input: CatalogTrustInputCommitment,
     #[serde(rename = "root-build-requirements")]
+    #[serde(deserialize_with = "deserialize_root_build_requirements")]
     root_build_requirements: BTreeMap<String, BuildRequirements>,
     #[serde(rename = "identity-digest")]
     identity_digest: String,
+}
+
+fn deserialize_root_build_requirements<'de, D>(
+    deserializer: D,
+) -> Result<BTreeMap<String, BuildRequirements>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    deserialize_unique_bounded_map(
+        deserializer,
+        MAX_GENERATOR_ROOT_BUILD_REQUIREMENTS,
+        "generator root build requirements",
+    )
 }
 
 #[derive(Serialize)]

@@ -3,17 +3,21 @@ use std::{
     fmt,
 };
 
-use serde::{
-    Deserialize, Deserializer, Serialize,
-    de::{self, SeqAccess, Visitor},
-};
+use serde::{Deserialize, Deserializer, Serialize, de};
 
-use crate::target::MAX_TARGET_PREDICATE_PARTITIONS;
+use crate::{
+    serde_bounds::{
+        deserialize_bounded_vec, deserialize_unique_bounded_map, deserialize_unique_bounded_set,
+    },
+    target::MAX_TARGET_PREDICATE_PARTITIONS,
+};
 
 pub const MAX_CATALOG_DOCUMENT_BYTES: usize = 1024 * 1024;
 pub const MAX_CATALOG_OWNERS: usize = 256;
 pub const MAX_CATALOG_TRUST_POLICY_BYTES: usize = 64 * 1024;
 pub const MAX_SHARED_HOST_CONFIG_FIELDS: usize = 64;
+pub const MAX_CATALOG_REVIEWER_RULE_SETS: usize = 16;
+pub const MAX_BUILD_REQUIREMENT_ENTRIES_PER_KIND: usize = 16 * 1_024;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum CatalogResourceBoundsError {
@@ -52,13 +56,21 @@ pub struct CatalogDocument {
 #[serde(deny_unknown_fields)]
 struct UncheckedCatalogDocument {
     schema: u32,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_catalog_capabilities")]
     capabilities: Vec<CapabilitySpec>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_catalog_components")]
     components: Vec<ComponentSpec>,
-    #[serde(default, rename = "runtime-adapters")]
+    #[serde(
+        default,
+        rename = "runtime-adapters",
+        deserialize_with = "deserialize_catalog_runtime_adapters"
+    )]
     runtime_adapters: Vec<RuntimeAdapterSpec>,
-    #[serde(default, rename = "host-boundaries")]
+    #[serde(
+        default,
+        rename = "host-boundaries",
+        deserialize_with = "deserialize_catalog_host_boundaries"
+    )]
     host_boundaries: Vec<HostBoundarySpec>,
 }
 
@@ -287,7 +299,10 @@ pub enum AppCoexistence {
     },
     ConcurrentSharedHostHandle {
         evidence: EvidenceRef,
-        #[serde(rename = "host-config-fields")]
+        #[serde(
+            rename = "host-config-fields",
+            deserialize_with = "deserialize_shared_host_config_fields"
+        )]
         host_config_fields: Vec<String>,
     },
     RequiresStop,
@@ -303,13 +318,41 @@ pub struct EvidenceRef {
     pub reviewer_policy: String,
 }
 
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct BuildRequirements {
     pub executables: BTreeSet<String>,
     #[serde(rename = "read-inputs")]
     pub read_inputs: BTreeSet<String>,
     pub environment: BTreeSet<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UncheckedBuildRequirements {
+    #[serde(deserialize_with = "deserialize_build_requirement_set")]
+    executables: BTreeSet<String>,
+    #[serde(
+        rename = "read-inputs",
+        deserialize_with = "deserialize_build_requirement_set"
+    )]
+    read_inputs: BTreeSet<String>,
+    #[serde(deserialize_with = "deserialize_build_requirement_set")]
+    environment: BTreeSet<String>,
+}
+
+impl<'de> Deserialize<'de> for BuildRequirements {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let unchecked = UncheckedBuildRequirements::deserialize(deserializer)?;
+        Ok(Self {
+            executables: unchecked.executables,
+            read_inputs: unchecked.read_inputs,
+            environment: unchecked.environment,
+        })
+    }
 }
 
 impl BuildRequirements {
@@ -390,7 +433,11 @@ pub enum HostBoundaryKind {
 #[serde(deny_unknown_fields)]
 pub struct CatalogTrustPolicy {
     pub schema: u32,
-    #[serde(default, rename = "reviewer-policies")]
+    #[serde(
+        default,
+        rename = "reviewer-policies",
+        deserialize_with = "deserialize_catalog_reviewer_policies"
+    )]
     pub reviewer_policies: BTreeMap<String, CatalogReviewerPolicy>,
 }
 
@@ -411,7 +458,10 @@ impl CatalogTrustPolicy {
 pub struct CatalogReviewerPolicy {
     #[serde(rename = "evidence-schema")]
     pub evidence_schema: u32,
-    #[serde(rename = "rule-sets")]
+    #[serde(
+        rename = "rule-sets",
+        deserialize_with = "deserialize_catalog_reviewer_rule_sets"
+    )]
     pub rule_sets: BTreeSet<String>,
 }
 
@@ -421,36 +471,94 @@ fn deserialize_target_support_entries<'de, D>(
 where
     D: Deserializer<'de>,
 {
-    struct TargetSupportEntriesVisitor;
+    deserialize_bounded_vec(
+        deserializer,
+        MAX_TARGET_PREDICATE_PARTITIONS,
+        "target-support entries",
+    )
+    .map(Some)
+}
 
-    impl<'de> Visitor<'de> for TargetSupportEntriesVisitor {
-        type Value = Option<Vec<TargetSupport>>;
+fn deserialize_catalog_capabilities<'de, D>(
+    deserializer: D,
+) -> Result<Vec<CapabilitySpec>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    deserialize_bounded_vec(deserializer, MAX_CATALOG_OWNERS, "catalog capabilities")
+}
 
-        fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-            write!(
-                formatter,
-                "at most {MAX_TARGET_PREDICATE_PARTITIONS} target-support entries"
-            )
-        }
+fn deserialize_catalog_components<'de, D>(deserializer: D) -> Result<Vec<ComponentSpec>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    deserialize_bounded_vec(deserializer, MAX_CATALOG_OWNERS, "catalog components")
+}
 
-        fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
-        where
-            A: SeqAccess<'de>,
-        {
-            let mut entries = Vec::new();
-            while let Some(entry) = sequence.next_element::<TargetSupport>()? {
-                if entries.len() == MAX_TARGET_PREDICATE_PARTITIONS {
-                    return Err(de::Error::custom(format!(
-                        "target-support entry count exceeds {MAX_TARGET_PREDICATE_PARTITIONS}"
-                    )));
-                }
-                entries.push(entry);
-            }
-            Ok(Some(entries))
-        }
-    }
+fn deserialize_catalog_runtime_adapters<'de, D>(
+    deserializer: D,
+) -> Result<Vec<RuntimeAdapterSpec>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    deserialize_bounded_vec(deserializer, MAX_CATALOG_OWNERS, "catalog runtime adapters")
+}
 
-    deserializer.deserialize_seq(TargetSupportEntriesVisitor)
+fn deserialize_catalog_host_boundaries<'de, D>(
+    deserializer: D,
+) -> Result<Vec<HostBoundarySpec>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    deserialize_bounded_vec(deserializer, MAX_CATALOG_OWNERS, "catalog host boundaries")
+}
+
+fn deserialize_build_requirement_set<'de, D>(deserializer: D) -> Result<BTreeSet<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    deserialize_unique_bounded_set(
+        deserializer,
+        MAX_BUILD_REQUIREMENT_ENTRIES_PER_KIND,
+        "build requirements",
+    )
+}
+
+fn deserialize_shared_host_config_fields<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    deserialize_bounded_vec(
+        deserializer,
+        MAX_SHARED_HOST_CONFIG_FIELDS,
+        "shared-host config fields",
+    )
+}
+
+fn deserialize_catalog_reviewer_policies<'de, D>(
+    deserializer: D,
+) -> Result<BTreeMap<String, CatalogReviewerPolicy>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    deserialize_unique_bounded_map(
+        deserializer,
+        MAX_CATALOG_OWNERS,
+        "catalog reviewer policies",
+    )
+}
+
+fn deserialize_catalog_reviewer_rule_sets<'de, D>(
+    deserializer: D,
+) -> Result<BTreeSet<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    deserialize_unique_bounded_set(
+        deserializer,
+        MAX_CATALOG_REVIEWER_RULE_SETS,
+        "catalog reviewer rule sets",
+    )
 }
 
 #[cfg(test)]
@@ -512,5 +620,75 @@ scope = "app"
         );
         CatalogTrustPolicy::from_toml(&exact).unwrap();
         assert!(CatalogTrustPolicy::from_toml(&format!("{exact} ")).is_err());
+    }
+
+    #[test]
+    fn schema_counted_metadata_collections_are_bounded_during_deserialization() {
+        let reviewer_policies = (0..=MAX_CATALOG_OWNERS)
+            .map(|index| {
+                (
+                    format!("reviewer-{index}"),
+                    serde_json::json!({
+                        "evidence-schema": 1,
+                        "rule-sets": ["rule-v1"],
+                    }),
+                )
+            })
+            .collect::<serde_json::Map<_, _>>();
+        let excessive_policy = serde_json::json!({
+            "schema": 1,
+            "reviewer-policies": reviewer_policies,
+        });
+        let error = serde_json::from_value::<CatalogTrustPolicy>(excessive_policy).unwrap_err();
+        assert!(error.to_string().contains("catalog reviewer policies"));
+
+        let duplicate_rule_set = r#"{
+            "schema": 1,
+            "reviewer-policies": {
+                "reviewer": {"evidence-schema": 1, "rule-sets": ["rule-v1", "rule-v1"]}
+            }
+        }"#;
+        let error = serde_json::from_str::<CatalogTrustPolicy>(duplicate_rule_set).unwrap_err();
+        assert!(error.to_string().contains("duplicate entry"));
+
+        let excessive_host_fields = serde_json::json!({
+            "mode": "concurrent-shared-host-handle",
+            "evidence": {
+                "source": "evidence.toml",
+                "algorithm": "sha256",
+                "digest": "00",
+                "reviewer-policy": "reviewer",
+            },
+            "host-config-fields": (0..=MAX_SHARED_HOST_CONFIG_FIELDS)
+                .map(|index| format!("field-{index}"))
+                .collect::<Vec<_>>(),
+        });
+        let error = serde_json::from_value::<AppCoexistence>(excessive_host_fields).unwrap_err();
+        assert!(error.to_string().contains("shared-host config fields"));
+    }
+
+    #[test]
+    fn build_requirement_collections_close_the_direct_serde_boundary() {
+        let requirements = (0..MAX_BUILD_REQUIREMENT_ENTRIES_PER_KIND)
+            .map(|index| format!("requirement-{index:05}"))
+            .collect::<Vec<_>>();
+        let exact = serde_json::json!({
+            "executables": requirements,
+            "read-inputs": [],
+            "environment": [],
+        });
+        serde_json::from_value::<BuildRequirements>(exact.clone()).unwrap();
+
+        let mut excessive = exact;
+        excessive["executables"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::Value::String("one-too-many".into()));
+        let error = serde_json::from_value::<BuildRequirements>(excessive).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("build requirements has more than")
+        );
     }
 }

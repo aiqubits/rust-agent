@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::canonical;
+use crate::{canonical, serde_bounds::deserialize_bounded_vec};
 
 const SNAPSHOT_TREE_DOMAIN: &[u8] = b"rust-agent-snapshot-tree-v1\0";
 
@@ -137,9 +137,23 @@ pub struct CanonicalSnapshotTree {
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 struct CanonicalSnapshotTreeDocument {
     schema: u32,
+    #[serde(deserialize_with = "deserialize_snapshot_entries")]
     entries: Vec<CanonicalSnapshotEntry>,
     #[serde(rename = "snapshot-tree-digest")]
     digest: String,
+}
+
+fn deserialize_snapshot_entries<'de, D>(
+    deserializer: D,
+) -> Result<Vec<CanonicalSnapshotEntry>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    deserialize_bounded_vec(
+        deserializer,
+        MAX_CANONICAL_SNAPSHOT_ENTRIES,
+        "canonical snapshot entries",
+    )
 }
 
 #[derive(Debug, Error)]
@@ -513,6 +527,15 @@ mod tests {
             CanonicalSnapshotTree::from_entries(exact_total),
             Err(CanonicalSnapshotError::TotalBytesTooLarge { .. })
         ));
+    }
+
+    #[test]
+    fn snapshot_entry_collection_is_bounded_during_direct_deserialization() {
+        let deserializer = serde::de::value::SeqDeserializer::<_, serde::de::value::Error>::new(
+            std::iter::repeat_n(0_u8, MAX_CANONICAL_SNAPSHOT_ENTRIES + 1),
+        );
+        let error = deserialize_snapshot_entries(deserializer).unwrap_err();
+        assert!(error.to_string().contains("canonical snapshot entries"));
     }
 
     #[test]

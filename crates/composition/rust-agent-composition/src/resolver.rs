@@ -1,8 +1,6 @@
 use std::{
     cmp::Ordering,
     collections::{BTreeMap, BTreeSet},
-    fmt,
-    marker::PhantomData,
 };
 
 use serde::{Deserialize, Deserializer, Serialize, de};
@@ -10,13 +8,14 @@ use thiserror::Error;
 
 use crate::{
     catalog::NormalizedCatalog,
-    diagnostics::Diagnostic,
+    diagnostics::{Diagnostic, MAX_DIAGNOSTIC_REASONS},
     metadata::{
         AppCoexistence, BindingKind, BuildRequirements, ComponentSpec, HostBoundaryKind,
-        MAX_CATALOG_DOCUMENT_BYTES, MAX_CATALOG_OWNERS, RequirementMode, ScopeKind, SupportTier,
-        TargetSupport,
+        MAX_BUILD_REQUIREMENT_ENTRIES_PER_KIND, MAX_CATALOG_DOCUMENT_BYTES, MAX_CATALOG_OWNERS,
+        RequirementMode, ScopeKind, SupportTier, TargetSupport,
     },
     profile::{BuildKind, ComponentChoice, CompositionProfile, ProfileResourceBoundsError},
+    serde_bounds::{deserialize_bounded_vec, deserialize_unique_bounded_set},
     target::{
         MAX_TARGET_PREDICATE_PARTITIONS, MAX_TARGET_TRIPLE_BYTES, PredicateAnalysisBudget, Target,
         TargetError, validate_predicate_partition_with_budget,
@@ -27,12 +26,12 @@ pub const MAX_RESOLUTION_SELECTED_COMPONENTS: usize = MAX_CATALOG_OWNERS;
 pub const MAX_RESOLUTION_BINDINGS: usize = 16 * 1_024;
 pub const MAX_RESOLUTION_RESOURCE_NAMESPACE_BINDINGS: usize = 16 * 1_024;
 pub const MAX_RESOLUTION_DIAGNOSTICS: usize = MAX_CATALOG_OWNERS;
-pub const MAX_RESOLUTION_DIAGNOSTIC_REASONS_PER_COMPONENT: usize = MAX_CATALOG_OWNERS;
+pub const MAX_RESOLUTION_DIAGNOSTIC_REASONS_PER_COMPONENT: usize = MAX_DIAGNOSTIC_REASONS;
 pub const MAX_RESOLUTION_TARGET_SUPPORT_OWNERS: usize = MAX_CATALOG_OWNERS + 2;
 pub const MAX_RESOLUTION_TARGET_SUPPORT_ENTRIES: usize =
     MAX_RESOLUTION_TARGET_SUPPORT_OWNERS * MAX_TARGET_PREDICATE_PARTITIONS;
 pub const MAX_RESOLUTION_EFFECT_ENTRIES: usize = 64 * 1_024;
-pub const MAX_RESOLUTION_BUILD_REQUIREMENT_ENTRIES: usize = 16 * 1_024;
+pub const MAX_RESOLUTION_BUILD_REQUIREMENT_ENTRIES: usize = MAX_BUILD_REQUIREMENT_ENTRIES_PER_KIND;
 pub const MAX_RESOLUTION_INDIVIDUAL_STRING_BYTES: usize = MAX_CATALOG_DOCUMENT_BYTES;
 pub const MAX_RESOLUTION_TOTAL_STRING_BYTES: usize = 16 * 1_024 * 1_024;
 
@@ -306,134 +305,6 @@ where
         executables: unchecked.executables,
         read_inputs: unchecked.read_inputs,
         environment: unchecked.environment,
-    })
-}
-
-fn deserialize_bounded_vec<'de, D, T>(
-    deserializer: D,
-    maximum: usize,
-    field: &'static str,
-) -> Result<Vec<T>, D::Error>
-where
-    D: Deserializer<'de>,
-    T: Deserialize<'de>,
-{
-    struct BoundedVecVisitor<T> {
-        maximum: usize,
-        field: &'static str,
-        marker: PhantomData<T>,
-    }
-
-    impl<'de, T> de::Visitor<'de> for BoundedVecVisitor<T>
-    where
-        T: Deserialize<'de>,
-    {
-        type Value = Vec<T>;
-
-        fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-            write!(
-                formatter,
-                "at most {} entries in {}",
-                self.maximum, self.field
-            )
-        }
-
-        fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
-        where
-            A: de::SeqAccess<'de>,
-        {
-            if sequence.size_hint().is_some_and(|hint| hint > self.maximum) {
-                return Err(de::Error::custom(format!(
-                    "{} has more than {} entries",
-                    self.field, self.maximum
-                )));
-            }
-            let mut values =
-                Vec::with_capacity(sequence.size_hint().unwrap_or(0).min(self.maximum));
-            while let Some(value) = sequence.next_element()? {
-                if values.len() == self.maximum {
-                    return Err(de::Error::custom(format!(
-                        "{} has more than {} entries",
-                        self.field, self.maximum
-                    )));
-                }
-                values.push(value);
-            }
-            Ok(values)
-        }
-    }
-
-    deserializer.deserialize_seq(BoundedVecVisitor {
-        maximum,
-        field,
-        marker: PhantomData,
-    })
-}
-
-fn deserialize_unique_bounded_set<'de, D, T>(
-    deserializer: D,
-    maximum: usize,
-    field: &'static str,
-) -> Result<BTreeSet<T>, D::Error>
-where
-    D: Deserializer<'de>,
-    T: Deserialize<'de> + Ord,
-{
-    struct UniqueBoundedSetVisitor<T> {
-        maximum: usize,
-        field: &'static str,
-        marker: PhantomData<T>,
-    }
-
-    impl<'de, T> de::Visitor<'de> for UniqueBoundedSetVisitor<T>
-    where
-        T: Deserialize<'de> + Ord,
-    {
-        type Value = BTreeSet<T>;
-
-        fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-            write!(
-                formatter,
-                "at most {} unique entries in {}",
-                self.maximum, self.field
-            )
-        }
-
-        fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
-        where
-            A: de::SeqAccess<'de>,
-        {
-            if sequence.size_hint().is_some_and(|hint| hint > self.maximum) {
-                return Err(de::Error::custom(format!(
-                    "{} has more than {} entries",
-                    self.field, self.maximum
-                )));
-            }
-            let mut values = BTreeSet::new();
-            let mut entry_count = 0_usize;
-            while let Some(value) = sequence.next_element()? {
-                if entry_count == self.maximum {
-                    return Err(de::Error::custom(format!(
-                        "{} has more than {} entries",
-                        self.field, self.maximum
-                    )));
-                }
-                entry_count += 1;
-                if !values.insert(value) {
-                    return Err(de::Error::custom(format!(
-                        "{} contains a duplicate entry",
-                        self.field
-                    )));
-                }
-            }
-            Ok(values)
-        }
-    }
-
-    deserializer.deserialize_seq(UniqueBoundedSetVisitor {
-        maximum,
-        field,
-        marker: PhantomData,
     })
 }
 

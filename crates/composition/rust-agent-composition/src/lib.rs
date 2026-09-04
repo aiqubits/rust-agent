@@ -13,6 +13,7 @@ pub mod manifest;
 pub mod metadata;
 pub mod profile;
 pub mod resolver;
+mod serde_bounds;
 pub mod snapshot;
 pub mod target;
 pub mod toolchain;

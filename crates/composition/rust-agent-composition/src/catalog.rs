@@ -1345,10 +1345,7 @@ provides = [{ capability = "cap:model", priority = 1, effects = [] }]
             .collect::<Vec<_>>()
             .join(", ");
         let invalid = shared.replace("\"model.shared\"", &too_many);
-        assert!(matches!(
-            NormalizedCatalog::normalize(CatalogDocument::from_toml(&invalid).unwrap()),
-            Err(CatalogError::InvalidAppCoexistence(_, _))
-        ));
+        assert!(CatalogDocument::from_toml(&invalid).is_err());
 
         let reordered = shared.replace("[\"model.shared\"]", "[\"model.second\", \"model.first\"]");
         let normalized =

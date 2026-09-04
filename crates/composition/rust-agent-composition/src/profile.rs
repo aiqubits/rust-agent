@@ -5,7 +5,11 @@ use std::{
 
 use serde::{Deserialize, Deserializer, Serialize, de};
 
-use crate::{metadata::SupportTier, target::Environment};
+use crate::{
+    metadata::SupportTier,
+    serde_bounds::{deserialize_unique_bounded_map, deserialize_unique_bounded_set},
+    target::Environment,
+};
 
 pub const MAX_PROFILE_DOCUMENT_BYTES: usize = 256 * 1024;
 pub const MAX_PROFILE_SELECTION_ENTRIES: usize = 256;
@@ -73,18 +77,68 @@ struct UncheckedCompositionProfile {
     runtime_adapter: String,
     #[serde(default, rename = "host-boundary")]
     host_boundary: Option<String>,
+    #[serde(deserialize_with = "deserialize_profile_components")]
     components: BTreeMap<String, ComponentChoice>,
-    #[serde(default, rename = "bindings")]
+    #[serde(
+        default,
+        rename = "bindings",
+        deserialize_with = "deserialize_profile_string_map"
+    )]
     bindings: BTreeMap<String, String>,
-    #[serde(default, rename = "preferred-providers")]
+    #[serde(
+        default,
+        rename = "preferred-providers",
+        deserialize_with = "deserialize_profile_string_map"
+    )]
     preferred_providers: BTreeMap<String, String>,
-    #[serde(default, rename = "denied-effects")]
+    #[serde(
+        default,
+        rename = "denied-effects",
+        deserialize_with = "deserialize_profile_denied_effects"
+    )]
     denied_effects: BTreeSet<String>,
     #[serde(
         default = "default_decision_budget",
         rename = "resolver-decision-budget"
     )]
     resolver_decision_budget: u32,
+}
+
+fn deserialize_profile_components<'de, D>(
+    deserializer: D,
+) -> Result<BTreeMap<String, ComponentChoice>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    deserialize_unique_bounded_map(
+        deserializer,
+        MAX_PROFILE_SELECTION_ENTRIES,
+        "profile components",
+    )
+}
+
+fn deserialize_profile_string_map<'de, D>(
+    deserializer: D,
+) -> Result<BTreeMap<String, String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    deserialize_unique_bounded_map(
+        deserializer,
+        MAX_PROFILE_SELECTION_ENTRIES,
+        "profile selections",
+    )
+}
+
+fn deserialize_profile_denied_effects<'de, D>(deserializer: D) -> Result<BTreeSet<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    deserialize_unique_bounded_set(
+        deserializer,
+        MAX_PROFILE_SELECTION_ENTRIES,
+        "profile denied effects",
+    )
 }
 
 impl<'de> Deserialize<'de> for CompositionProfile {
