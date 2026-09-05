@@ -336,6 +336,8 @@ fn phase_one_b_linux_reference_runner_executes_every_real_backend_gate() {
         "timeout-minutes: 120",
         "sudo apt-get install --yes bubblewrap iproute2 openssl python3",
         "cargo install wasm-bindgen-cli --version 0.2.127 --locked",
+        "Prefetch locked Phase 1B fixture sources",
+        "cargo fetch --locked",
         "cargo build -p rust-agent-cli",
         "cargo test -p rust-agent-build-executor --test linux_sandbox_launcher writable_root_allows_internal_atomic_rename_but_not_escape -- --ignored --exact --test-threads=1",
         "cargo test -p rust-agent-build-executor --test linux_namespace_backend -- --ignored --test-threads=1",
@@ -347,6 +349,9 @@ fn phase_one_b_linux_reference_runner_executes_every_real_backend_gate() {
             "missing Phase 1B CI gate: {required}"
         );
     }
+    assert!(
+        phase_job.find("cargo fetch --locked") < phase_job.find("cargo build -p rust-agent-cli")
+    );
     assert!(
         phase_job.find("cargo build -p rust-agent-cli")
             < phase_job.find("--test production_cargo_fetch")

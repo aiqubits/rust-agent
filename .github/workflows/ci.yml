@@ -73,6 +73,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Install pinned wasm-bindgen CLI
         run: cargo install wasm-bindgen-cli --version 0.2.127 --locked
+      - name: Prefetch locked Phase 1B fixture sources
+        run: cargo fetch --locked
       - name: Build production CLI for process-level inspection
         run: cargo build -p rust-agent-cli
       - name: Verify real Landlock ABI 2 rename enforcement

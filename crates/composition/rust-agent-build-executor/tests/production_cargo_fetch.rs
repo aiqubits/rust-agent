@@ -981,7 +981,8 @@ fn main() {
     ];
     runtime_executables.extend(credential_helper.as_deref());
     runtime_executables.extend(wasm_bindgen.as_deref());
-    let (runtime_symlinks, interpreters) = copy_dynamic_runtime(&runtime_executables, &runtime);
+    let (runtime_symlinks, interpreters) =
+        copy_dynamic_runtime(&runtime_executables, &runtime, &sysroot);
     let backend_path = Path::new("/usr/bin/bwrap");
     let launcher = Path::new(env!("CARGO_BIN_EXE_rust-agent-linux-sandbox-launcher"));
     let runtime_tree = canonical_tree(&runtime);
@@ -1004,7 +1005,10 @@ fn main() {
             },
             logical_path: "/rust-agent/runtime".into(),
             interpreter_paths: interpreters,
-            library_paths: vec!["/rust-agent/runtime/lib/x86_64-linux-gnu".into()],
+            // Keep the toolchain's own `$ORIGIN/../lib` lookup authoritative.
+            // Injecting the system runtime directory through LD_LIBRARY_PATH can
+            // shadow rustc's digest-bound driver library on hosted runners.
+            library_paths: vec![],
             null_input_path: "/rust-agent/runtime/empty-stdin".into(),
             symlinks: runtime_symlinks,
         },
@@ -2752,6 +2756,7 @@ fn fixture_composition_manifest(
 fn copy_dynamic_runtime(
     executables: &[&Path],
     output: &Path,
+    toolchain_sysroot: &Path,
 ) -> (Vec<LinuxSandboxRuntimeSymlink>, Vec<String>) {
     fs::write(output.join("empty-stdin"), []).unwrap();
     let mut sources = Vec::new();
@@ -2767,6 +2772,17 @@ fn copy_dynamic_runtime(
                 .map(|pair| pair[1])
                 .or_else(|| fields.first().copied().filter(|path| path.starts_with('/')));
             if let Some(source) = source {
+                let source_path = Path::new(source);
+                if source_path
+                    .canonicalize()
+                    .is_ok_and(|path| path.starts_with(toolchain_sysroot))
+                {
+                    // rustc and Cargo retain their normal layout under the
+                    // separately verified sysroot mount. Duplicating these
+                    // libraries into the system runtime creates a second,
+                    // potentially shadowing copy of the compiler ABI.
+                    continue;
+                }
                 if !line.contains("=>") {
                     loaders.push(source.to_owned());
                 }
@@ -2796,13 +2812,6 @@ fn copy_dynamic_runtime(
         let destination = output.join(source.strip_prefix('/').unwrap());
         fs::create_dir_all(destination.parent().unwrap()).unwrap();
         fs::copy(&source, destination).unwrap();
-        if source.starts_with("/root/") {
-            let default_library = output
-                .join("lib/x86_64-linux-gnu")
-                .join(Path::new(&source).file_name().unwrap());
-            fs::create_dir_all(default_library.parent().unwrap()).unwrap();
-            fs::copy(&source, default_library).unwrap();
-        }
     }
     let mut symlinks = ["lib", "lib64", "root", "usr"]
         .into_iter()
