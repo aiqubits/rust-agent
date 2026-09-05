@@ -981,8 +981,11 @@ fn main() {
     ];
     runtime_executables.extend(credential_helper.as_deref());
     runtime_executables.extend(wasm_bindgen.as_deref());
-    let (runtime_symlinks, interpreters) =
-        copy_dynamic_runtime(&runtime_executables, &runtime, &sysroot);
+    let (runtime_symlinks, interpreters) = copy_dynamic_runtime(
+        &runtime_executables,
+        &[cargo.as_path(), rustc.as_path()],
+        &runtime,
+    );
     let backend_path = Path::new("/usr/bin/bwrap");
     let launcher = Path::new(env!("CARGO_BIN_EXE_rust-agent-linux-sandbox-launcher"));
     let runtime_tree = canonical_tree(&runtime);
@@ -1006,10 +1009,10 @@ fn main() {
             logical_path: "/rust-agent/runtime".into(),
             interpreter_paths: interpreters,
             // Descriptor-supervised descendant execution cannot rely on the
-            // executable pathname for `$ORIGIN`. Point the loader at the exact
-            // digest-bound sysroot library root and never at the copied system
-            // runtime, which could shadow rustc's driver ABI.
-            library_paths: vec!["/rust-agent/toolchain/lib".into()],
+            // executable pathname for `$ORIGIN`. Use only the separately
+            // copied, digest-bound dynamic closure observed for the exact
+            // Cargo and rustc files.
+            library_paths: vec!["/rust-agent/runtime/toolchain-lib".into()],
             null_input_path: "/rust-agent/runtime/empty-stdin".into(),
             symlinks: runtime_symlinks,
         },
@@ -2756,13 +2759,15 @@ fn fixture_composition_manifest(
 
 fn copy_dynamic_runtime(
     executables: &[&Path],
+    toolchain_executables: &[&Path],
     output: &Path,
-    toolchain_sysroot: &Path,
 ) -> (Vec<LinuxSandboxRuntimeSymlink>, Vec<String>) {
     fs::write(output.join("empty-stdin"), []).unwrap();
     let mut sources = Vec::new();
+    let mut toolchain_sources = BTreeMap::<String, String>::new();
     let mut loaders = Vec::new();
     for executable in executables {
+        let toolchain_executable = toolchain_executables.contains(executable);
         let result = Command::new("ldd").arg(executable).output().unwrap();
         assert!(result.status.success());
         for line in String::from_utf8(result.stdout).unwrap().lines() {
@@ -2773,16 +2778,19 @@ fn copy_dynamic_runtime(
                 .map(|pair| pair[1])
                 .or_else(|| fields.first().copied().filter(|path| path.starts_with('/')));
             if let Some(source) = source {
-                let source_path = Path::new(source);
-                if source_path
-                    .canonicalize()
-                    .is_ok_and(|path| path.starts_with(toolchain_sysroot))
-                {
-                    // rustc and Cargo retain their normal layout under the
-                    // separately verified sysroot mount. Duplicating these
-                    // libraries into the system runtime creates a second,
-                    // potentially shadowing copy of the compiler ABI.
-                    continue;
+                if toolchain_executable && line.contains("=>") {
+                    let basename = Path::new(source)
+                        .file_name()
+                        .unwrap()
+                        .to_string_lossy()
+                        .into_owned();
+                    if let Some(previous) = toolchain_sources.insert(basename, source.into()) {
+                        assert_eq!(
+                            sha256_file(Path::new(&previous)),
+                            sha256_file(Path::new(source)),
+                            "the exact Cargo/rustc dynamic closures contain a basename collision"
+                        );
+                    }
                 }
                 if !line.contains("=>") {
                     loaders.push(source.to_owned());
@@ -2813,6 +2821,11 @@ fn copy_dynamic_runtime(
         let destination = output.join(source.strip_prefix('/').unwrap());
         fs::create_dir_all(destination.parent().unwrap()).unwrap();
         fs::copy(&source, destination).unwrap();
+    }
+    let toolchain_library_root = output.join("toolchain-lib");
+    fs::create_dir(&toolchain_library_root).unwrap();
+    for (basename, source) in toolchain_sources {
+        fs::copy(source, toolchain_library_root.join(basename)).unwrap();
     }
     let mut symlinks = ["lib", "lib64", "root", "usr"]
         .into_iter()
