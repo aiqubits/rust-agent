@@ -278,7 +278,7 @@ fn normalization_is_order_independent_and_schema_digest_is_frozen() {
         normalized
             .enforcement_identity_digest(&requirements(), &context())
             .unwrap(),
-        "3f4d98e70d06b4bce6f70d53ea61ea10c1d17e22e71d75af4f53d97137a07efd"
+        "b5e39569c2c3a4f11e4ffd1f88979ca4873ca1b680fca788f2fc0d938e693661"
     );
 }
 
@@ -333,9 +333,10 @@ fn host_linker_bundle_is_closed_selected_and_path_free() {
         .enforcement_identity(&requirements, &context())
         .unwrap();
     let host_linker = identity.host_linker.unwrap();
+    assert_eq!(identity.backend_semantic_version, 4);
     assert_eq!(
         host_linker.cargo_config,
-        "target.x86_64-unknown-linux-gnu.linker=\"/rust-agent/tools/target-linker\""
+        "host.x86_64-unknown-linux-gnu.linker=\"/rust-agent/tools/target-linker\""
     );
     assert_eq!(host_linker.compiler_path, "/rust-agent/tools");
     assert!(

@@ -223,7 +223,7 @@ impl CargoPlannerRequest {
         policy: &NormalizedProductionBuildPolicy,
         closure: &NormalizedHostBuildInputClosure,
     ) -> Result<NormalizedCargoPlannerRequest, CargoPlannerError> {
-        if self.schema != 3 {
+        if self.schema != 4 {
             return Err(CargoPlannerError::UnsupportedRequestSchema(self.schema));
         }
         if closure.build_execution_policy_digest() != policy.full_digest() {
@@ -282,10 +282,21 @@ impl CargoPlannerRequest {
         if let Some(host_linker) = selected_host_linker {
             arguments.extend([
                 "--config".into(),
+                "target-applies-to-host=false".into(),
+                "--config".into(),
                 format!(
-                    "target.{}.linker=\"/rust-agent/tools/{}\"",
+                    "host.{}.linker=\"/rust-agent/tools/{}\"",
                     context.build_triple, host_linker.executable
                 ),
+                "--config".into(),
+                format!(
+                    "host.{}.rustflags=[\"-Clinker-features=-lld\"]",
+                    context.build_triple
+                ),
+                "-Z".into(),
+                "target-applies-to-host".into(),
+                "-Z".into(),
+                "host-config".into(),
             ]);
         }
         arguments.extend([
@@ -317,7 +328,7 @@ impl CargoPlannerRequest {
             working_directory,
         };
         let projection = PlannerRequestProjection {
-            schema: 3,
+            schema: 4,
             root: self.root,
             planner: &planner,
             build_execution_policy_digest: policy.full_digest(),
@@ -333,7 +344,7 @@ impl CargoPlannerRequest {
             working_directory: &invocation.working_directory,
         };
         let digest = hex::encode(canonical::domain_hash(
-            b"rust-agent-cargo-unit-graph-planner-request-v3\0",
+            b"rust-agent-cargo-unit-graph-planner-request-v4\0",
             &projection,
         )?);
         Ok(NormalizedCargoPlannerRequest {
@@ -405,7 +416,7 @@ impl NormalizedCargoPlannerRequest {
 
     pub fn verify(&self) -> Result<(), CargoPlannerError> {
         let projection = PlannerRequestProjection {
-            schema: 3,
+            schema: 4,
             root: self.root,
             planner: &self.planner,
             build_execution_policy_digest: &self.build_execution_policy_digest,
@@ -421,7 +432,7 @@ impl NormalizedCargoPlannerRequest {
             working_directory: &self.invocation.working_directory,
         };
         let digest = hex::encode(canonical::domain_hash(
-            b"rust-agent-cargo-unit-graph-planner-request-v3\0",
+            b"rust-agent-cargo-unit-graph-planner-request-v4\0",
             &projection,
         )?);
         if digest != self.digest
@@ -1351,8 +1362,9 @@ mod tests {
     }
 
     #[test]
-    fn schema_three_binds_the_exact_host_linker_configuration() {
+    fn schema_four_binds_host_only_linker_configuration() {
         let policy = policy();
+        let unselected_closure = closure(&policy);
         let closure = closure_with_artifact_and_requirements(
             &policy,
             context().artifact_selector.target,
@@ -1362,7 +1374,7 @@ mod tests {
             },
         );
         let final_request = CargoPlannerRequest {
-            schema: 3,
+            schema: 4,
             root: CargoPlannerGraphRoot::FinalHost,
         }
         .normalize(&policy, &closure)
@@ -1408,7 +1420,15 @@ mod tests {
                 "--bin",
                 "host-app",
                 "--config",
-                "target.x86_64-unknown-linux-gnu.linker=\"/rust-agent/tools/host-linker\"",
+                "target-applies-to-host=false",
+                "--config",
+                "host.x86_64-unknown-linux-gnu.linker=\"/rust-agent/tools/host-linker\"",
+                "--config",
+                "host.x86_64-unknown-linux-gnu.rustflags=[\"-Clinker-features=-lld\"]",
+                "-Z",
+                "target-applies-to-host",
+                "-Z",
+                "host-config",
                 "--unit-graph",
                 "-Z",
                 "unstable-options",
@@ -1432,11 +1452,11 @@ mod tests {
         );
         assert_eq!(
             final_request.digest(),
-            "492f921a223544f0517ca6a2cf5e15b05511938c9718f557f8076a04d8da5f0d"
+            "66a8329397fbb4e7699a4b2d58137f8e2a216ebfd7d9e1eb234fbfb143a49cc3"
         );
 
         let standalone = CargoPlannerRequest {
-            schema: 3,
+            schema: 4,
             root: CargoPlannerGraphRoot::EmittedStandalone,
         }
         .normalize(&policy, &closure)
@@ -1453,32 +1473,59 @@ mod tests {
             }
         );
         assert_ne!(standalone.digest(), final_request.digest());
+
+        let unselected = CargoPlannerRequest {
+            schema: 4,
+            root: CargoPlannerGraphRoot::FinalHost,
+        }
+        .normalize(&policy, &unselected_closure)
+        .unwrap();
+        assert!(
+            unselected
+                .invocation()
+                .arguments
+                .iter()
+                .all(|argument| !argument.starts_with("target-applies-to-host")
+                    && !argument.starts_with("host."))
+        );
+        assert!(
+            !unselected
+                .invocation()
+                .arguments
+                .contains(&"host-config".into())
+        );
+        assert!(
+            !unselected
+                .invocation()
+                .environment
+                .contains_key("COMPILER_PATH")
+        );
     }
 
     #[test]
-    fn schema_two_is_rejected_after_host_linker_binding_was_added() {
+    fn schema_three_is_rejected_after_host_config_scoping() {
         let policy = policy();
         let request = CargoPlannerRequest {
-            schema: 2,
+            schema: 3,
             root: CargoPlannerGraphRoot::FinalHost,
         };
 
         assert!(matches!(
             request.normalize(&policy, &closure(&policy)),
-            Err(CargoPlannerError::UnsupportedRequestSchema(2))
+            Err(CargoPlannerError::UnsupportedRequestSchema(3))
         ));
     }
 
     #[test]
     fn schema_two_binds_the_exact_pinned_channel_override() {
-        schema_three_binds_the_exact_host_linker_configuration();
+        schema_four_binds_host_only_linker_configuration();
     }
 
     #[test]
     fn unit_graph_v1_envelope_is_closed_context_checked_and_mutation_detecting() {
         let policy = policy();
         let request = CargoPlannerRequest {
-            schema: 3,
+            schema: 4,
             root: CargoPlannerGraphRoot::FinalHost,
         }
         .normalize(&policy, &closure(&policy))
@@ -1492,7 +1539,7 @@ mod tests {
         assert_eq!(verified.root_count(), 1);
         assert_eq!(
             verified.digest(),
-            "9c0f9479d302f5be16abfc7e7ddc835481e66954aa17b4c1f2874da3e34fbb7f"
+            "6d4c4eb79b2523ab93e257dd2c79fc77c962aeb10729dc0bd93e6bd1c79f6b8f"
         );
 
         assert!(matches!(
@@ -1508,7 +1555,7 @@ mod tests {
         let rotated = rotated.normalize().unwrap();
         assert!(matches!(
             CargoPlannerRequest {
-                schema: 3,
+                schema: 4,
                 root: CargoPlannerGraphRoot::FinalHost,
             }
             .normalize(&rotated, &closure(&policy)),
@@ -1609,7 +1656,7 @@ mod tests {
         let policy = policy();
         let host_closure = closure(&policy);
         let request = CargoPlannerRequest {
-            schema: 3,
+            schema: 4,
             root: CargoPlannerGraphRoot::FinalHost,
         }
         .normalize(&policy, &host_closure)
@@ -1717,7 +1764,7 @@ mod tests {
         ] {
             let selected_closure = closure_with_artifact(&policy, target);
             let selected_request = CargoPlannerRequest {
-                schema: 3,
+                schema: 4,
                 root: CargoPlannerGraphRoot::FinalHost,
             }
             .normalize(&policy, &selected_closure)
@@ -1754,7 +1801,7 @@ mod tests {
         let policy = policy();
         let host_closure = closure(&policy);
         let request = CargoPlannerRequest {
-            schema: 3,
+            schema: 4,
             root: CargoPlannerGraphRoot::FinalHost,
         }
         .normalize(&policy, &host_closure)
@@ -1813,7 +1860,7 @@ mod tests {
         let policy = policy();
         let host_closure = closure(&policy);
         let request = CargoPlannerRequest {
-            schema: 3,
+            schema: 4,
             root: CargoPlannerGraphRoot::FinalHost,
         }
         .normalize(&policy, &host_closure)
@@ -1826,7 +1873,7 @@ mod tests {
         let sources = locked_sources();
 
         let standalone = CargoPlannerRequest {
-            schema: 3,
+            schema: 4,
             root: CargoPlannerGraphRoot::EmittedStandalone,
         }
         .normalize(&policy, &closure(&policy))
@@ -2084,7 +2131,7 @@ mod tests {
         assert!(output.stderr.is_empty());
         let policy = policy();
         let request = CargoPlannerRequest {
-            schema: 3,
+            schema: 4,
             root: CargoPlannerGraphRoot::FinalHost,
         }
         .normalize(&policy, &closure(&policy))
@@ -2106,7 +2153,7 @@ mod tests {
     fn channel_override_digest_argv_and_output_drift_fail_closed() {
         let policy = policy();
         let mut request = CargoPlannerRequest {
-            schema: 3,
+            schema: 4,
             root: CargoPlannerGraphRoot::FinalHost,
         }
         .normalize(&policy, &closure(&policy))
@@ -2123,7 +2170,7 @@ mod tests {
         ));
 
         let mut request = CargoPlannerRequest {
-            schema: 3,
+            schema: 4,
             root: CargoPlannerGraphRoot::FinalHost,
         }
         .normalize(&policy, &closure(&policy))
@@ -2135,7 +2182,7 @@ mod tests {
         ));
 
         let request = CargoPlannerRequest {
-            schema: 3,
+            schema: 4,
             root: CargoPlannerGraphRoot::FinalHost,
         }
         .normalize(&policy, &closure(&policy))
@@ -2178,7 +2225,7 @@ mod tests {
 
         let policy = policy();
         let request = CargoPlannerRequest {
-            schema: 3,
+            schema: 4,
             root: CargoPlannerGraphRoot::FinalHost,
         }
         .normalize(&policy, &closure(&policy))

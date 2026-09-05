@@ -897,7 +897,12 @@ fn main() {
     );
     let original_attestation = fs::read(&attestation_path).unwrap();
     let mut tampered = attestation.attestation().clone();
-    tampered.signature.replace_range(0..2, "00");
+    let replacement = if tampered.signature.starts_with("00") {
+        "01"
+    } else {
+        "00"
+    };
+    tampered.signature.replace_range(0..2, replacement);
     fs::set_permissions(&attestation_path, fs::Permissions::from_mode(0o644)).unwrap();
     fs::write(&attestation_path, serde_json::to_vec(&tampered).unwrap()).unwrap();
     assert!(

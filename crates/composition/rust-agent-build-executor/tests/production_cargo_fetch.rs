@@ -1221,7 +1221,7 @@ fn main() {
         let composition = fixture_composition_manifest(&policy, &normalized_closure, build_kind);
         let build_inputs = preflight_production_build_inputs(&policy, &normalized_closure).unwrap();
         let planner_request = CargoPlannerRequest {
-            schema: 3,
+            schema: 4,
             root: CargoPlannerGraphRoot::EmittedStandalone,
         }
         .normalize(&policy, &normalized_closure)
@@ -1352,13 +1352,13 @@ fn main() {
         );
         let build_inputs = preflight_production_build_inputs(&policy, &normalized_closure).unwrap();
         let standalone_request = CargoPlannerRequest {
-            schema: 3,
+            schema: 4,
             root: CargoPlannerGraphRoot::EmittedStandalone,
         }
         .normalize(&policy, &normalized_closure)
         .unwrap();
         let final_request = CargoPlannerRequest {
-            schema: 3,
+            schema: 4,
             root: CargoPlannerGraphRoot::FinalHost,
         }
         .normalize(&policy, &normalized_closure)
@@ -1560,7 +1560,7 @@ fn main() {
         );
         if cross_compile {
             let standalone_request = CargoPlannerRequest {
-                schema: 3,
+                schema: 4,
                 root: CargoPlannerGraphRoot::EmittedStandalone,
             }
             .normalize(&policy, &normalized_closure)
@@ -1593,7 +1593,7 @@ fn main() {
             );
         }
         let planner_request = CargoPlannerRequest {
-            schema: 3,
+            schema: 4,
             root: CargoPlannerGraphRoot::FinalHost,
         }
         .normalize(&policy, &normalized_closure)
@@ -2341,7 +2341,7 @@ fn derive_fixture_cargo_graph(
     locked: &rust_agent_build_executor::NormalizedLockedSourceClosure,
 ) -> HostCargoUnitGraph {
     let request = CargoPlannerRequest {
-        schema: 3,
+        schema: 4,
         root: CargoPlannerGraphRoot::EmittedStandalone,
     }
     .normalize(policy, bootstrap_closure)

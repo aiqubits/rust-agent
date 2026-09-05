@@ -96,7 +96,7 @@ fn production_manifest_recomputes_identity_and_accounts_for_the_closed_artifact_
     let enforcement = BuildEnforcementIdentity {
         schema: 2,
         backend: ProductionSandboxBackend::LinuxLandlockSeccomp,
-        backend_semantic_version: 3,
+        backend_semantic_version: 4,
         context,
         toolchain: BuildEnforcementToolchain {
             cargo: executable("cargo", 3),

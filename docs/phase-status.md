@@ -7,7 +7,7 @@ represented in `docs/invariant-tests.md` and all applicable gates pass.
 |---|---|---|
 | 0 — repository and contract | Complete | Rust/Cargo 1.97.1 synchronization, workspace/deny/ADR gates, effect-free core/runtime contracts, checked lifecycle identities, closed target-fact/custom-target records, globally bounded catalog owners and symbolic per-target support analysis, resource-namespace bootstrap contracts, Host/runtime metadata, canonical Host Cargo unit-graph schemas and privacy fixtures are implemented. Production composition discovers schema-owned Capability/Component/runtime/Host and direct-root build-requirement metadata from workspace package manifests through bounded, timed, offline, isolated `cargo metadata`; package/path ownership is derived from the exact workspace-member result, unknown/mixed/spoofed metadata and default-feature drift fail closed, and a real discovery round-trip is checked against the test-only catalog fixture. All 12 Phase 0 acceptance criteria have exact non-wildcard mappings, and the mapping/CI gate passes. |
 | 1A — generated graph proof | Complete | The development-only generator/resolver/build path, path-free compose rustc executable/version/full-sysroot provenance, canonical target-fact and custom-spec snapshots with rustc/Cargo before/after drift checks, schema-owned Cargo package-metadata discovery, bounded/shared target-support analysis, direct-serde-bounded metadata/profile/trust/diagnostic/composition/security/Cargo-source collections, an identity-bound normalized catalog/trust-policy/evidence-byte/root-requirement generator-input commitment with resolver/attribution/generated-source/source-closure rederivation, selected-evidence snapshot verification, conservative aggregate App handoff, generated namespaced host APIs and required-field HostBindings builders, shared-host Config-field type/identity sealing with a real two-App same-identity/no-reopen external Host fixture, committed-built-in-fact Cargo target-dependency rewriting with transitive active path-package snapshots, composition-wide source entry/byte preflight before copy or hash, checked canonical resolution/manifests, exact Cargo.lock source projection, Cargo-config ancestor rejection, source snapshots, real graph presence/absence, integration verification, topology fixtures, target matrix and WASM packaging are implemented. A checked-in custom target now completes compose, lockfile generation and locked offline development build with the real pinned Rust/Cargo 1.97.1 toolchain. All 10 Phase 1A acceptance criteria have exact non-wildcard mappings, and every applicable local gate passes. Phase 1A artifacts remain `deployable=false`; immutable production mounted-view enforcement remains a Phase 1B gate. |
-| 1B — Linux production build | In progress; runner gate failing | All 12 acceptance criteria remain implemented and mapped, but the Ubuntu 24.04 production runner exposed an unclosed Host-linker execution path: Rust 1.97.1 injects a self-contained LLD prefix that is outside the schema-3 selected helper bundle. Accepted ADRs 0009 and 0010 require schema-4 Cargo Host configuration to bind `-Clinker-features=-lld` only to Host units, preserve the Target-only sysroot flag, observe both scopes exactly and advance the enforcement backend semantic version before the real runner gate is retried. The descriptor-retaining Linux namespace/Landlock/seccomp backend, isolated fetch, unit planning/observation, signed standalone/WASM/Host pipelines and CLI wiring remain present; no deployability completion claim is made while this implementation and runner evidence are pending. |
+| 1B — Linux production build | Implementation complete; runner revalidation pending | All 12 acceptance criteria are implemented and mapped. ADRs 0009 and 0010 are implemented through schema-4 Cargo Host configuration, Host/Target-exact rustc observation and enforcement backend semantic version 4, closing rustc's implicit self-contained LLD path while preserving Target-only sysroot flags. The descriptor-retaining Linux namespace/Landlock/seccomp backend, isolated fetch, unit planning/observation, signed standalone/WASM/Host pipelines and CLI wiring remain present. A fresh successful Ubuntu 24.04 production gate is still required before the phase or any artifact is called deployable. |
 | 2 — minimal runtime spine | Not started | The Phase 1A gate has passed; implementation must provide real minimal runtime behavior and must not be represented by empty product crates. |
 | 3 — tool execution plane | Not started | The Phase 1A contract is stable; no Phase 3 implementation has started. |
 | 4 — local execution providers | Not started | Real-target security regressions required. |
@@ -119,9 +119,9 @@ No test result above is evidence for Phase 1B deployability or for a Phase 2+ ru
   all or none. The schema-2 path-free enforcement identity binds the exact logical build-triple
   linker configuration and `COMPILER_PATH`; accepted ADRs 0009 and 0010 additionally require
   schema-4 Host-only Cargo linker/rustflag configuration, Target-only explicit sysroot flags,
-  backend semantic version 4 and execution of only the selected helpers. Their implementation and
-  observation regressions are the current open work; old schemas, missing/duplicate helpers and
-  partial selection fail closed before Cargo;
+  backend semantic version 4 and execution of only the selected helpers. The implementation and
+  observation regressions pass locally; old schemas, missing/duplicate helpers, alternate or
+  cross-kind flags and partial selection fail closed before Cargo;
 - concrete Host path, fetch mirror, policy id and signer/reviewer/helper rotation change the full
   policy digest but not build-output enforcement identity, while selected tool/input/environment
   content or enforcement semantics change the latter.
@@ -196,11 +196,12 @@ No test result above is evidence for Phase 1B deployability or for a Phase 2+ ru
 - final Host artifact selection is a closed package plus `lib`/named `bin`/`example`/`test`/`bench`
   value, has its own domain digest and is a required HostBuildInputClosure canonical-record item;
   invalid names, missing records and selector drift fail before planning;
-- schema-3 standalone and final planning requests derive their exact manifest, explicit Cargo
+- schema-4 standalone and final planning requests derive their exact manifest, explicit Cargo
   config, Host closure aggregate, target, profile, selector, panic strategy, Rust/Cargo 1.97.1
   identity, isolated logical environment and fixed `--locked --offline --unit-graph -Z
   unstable-options` argv from the normalized closure. A selected Host-linker bundle adds only its
-  exact logical build-triple linker configuration and `COMPILER_PATH`; schema 2 is rejected. The
+  exact Host-only linker/rustflags configuration, required Cargo opt-ins and `COMPILER_PATH`;
+  schema 3 is rejected. The
   unit-graph-v1 envelope is closed, bounded, context checked, request-bound, acyclic and mutation
   detecting;
   stable Cargo's unavailable interface is an explicit unsupported result and never falls back to
@@ -296,6 +297,7 @@ append-only attestation is durably published before an opaque permit can atomica
 failed all four trusted build pipelines because rustc's implicit self-contained LLD prefix bypassed
 the schema-selected helper search before linking. ADR 0009 records the required fail-closed fix and
 ADR 0010 corrects its delivery to Cargo's Host-only configuration after a pinned cross-target probe
-proved global encoded rustflags affect Target rather than Host units. Their implementation, local
-baseline and a fresh successful Ubuntu 24.04 Phase 1B run are the remaining evidence gates. The
-local host's Landlock ABI 1 still cannot supply the required `Refer` enforcement.
+proved global encoded rustflags affect Target rather than Host units. The implementation and exact
+scope regressions now pass locally; a full local baseline and fresh successful Ubuntu 24.04 Phase 1B
+run are the remaining evidence gates. The local host's Landlock ABI 1 still cannot supply the
+required `Refer` enforcement.

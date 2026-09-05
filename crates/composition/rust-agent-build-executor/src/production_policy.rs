@@ -561,7 +561,7 @@ impl NormalizedProductionBuildPolicy {
                     })
                     .collect(),
                 cargo_config: format!(
-                    "target.{}.linker=\"/rust-agent/tools/{}\"",
+                    "host.{}.linker=\"/rust-agent/tools/{}\"",
                     context.build_triple, bundle.executable
                 ),
                 compiler_path: "/rust-agent/tools".into(),
@@ -592,7 +592,7 @@ impl NormalizedProductionBuildPolicy {
         Ok(BuildEnforcementIdentity {
             schema: 2,
             backend: self.policy.backend,
-            backend_semantic_version: 3,
+            backend_semantic_version: 4,
             context: context.clone(),
             toolchain: BuildEnforcementToolchain {
                 cargo: tool_enforcement_identity("cargo", &self.policy.toolchain.cargo),

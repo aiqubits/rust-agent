@@ -69,8 +69,10 @@ Cargo's Host-only configuration and a schema-4 planner request.
 
 ## Acceptance tests
 
-- `production_build::tests::host_linker_rustflags_disable_implicit_lld_exactly`
-- `production_build::tests::rustc_observation_binds_host_linker_feature_override`
+- `cargo_planner::tests::schema_four_binds_host_only_linker_configuration`
+- `cargo_planner::tests::schema_three_is_rejected_after_host_config_scoping`
+- `production_build::tests::host_and_target_rustc_flags_are_scope_exact`
+- `production_build::tests::rustc_observation_rejects_cross_kind_linker_flags`
 - `production_policy::host_linker_bundle_is_closed_selected_and_path_free`
 - `production_cargo_fetch::trusted_build_observer_covers_cross_compiled_build_and_proc_macro_units`
 - `production_cargo_fetch::production_standalone_pipeline_is_signed_and_reverified`

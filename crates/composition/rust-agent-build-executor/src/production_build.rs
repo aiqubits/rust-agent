@@ -25,6 +25,7 @@ const LOGICAL_TARGET: &str = "/rust-agent/target";
 const LOGICAL_TEMP: &str = "/rust-agent/tmp";
 const CHANNEL_OVERRIDE: &str = "__CARGO_TEST_CHANNEL_OVERRIDE_DO_NOT_USE_THIS";
 const BUILD_SYSROOT_FLAG: &str = "--sysroot=/rust-agent/toolchain";
+const HOST_LINKER_FEATURE_FLAG: &str = "-Clinker-features=-lld";
 const BUILD_TIMEOUT_MILLISECONDS: u64 = 20 * 60 * 1000;
 
 #[derive(Debug)]
@@ -224,17 +225,21 @@ pub fn execute_trusted_cargo_build(
         });
     }
     let cargo_messages = verify_cargo_messages(execution.stdout(), planned_graph)?;
+    let unit_observation_policy = BuildUnitObservationPolicy {
+        executable_digests: enforcement
+            .executables
+            .iter()
+            .map(|item| (item.logical_mount.as_str(), item.sha256.as_str()))
+            .collect(),
+        host_linker_selected: enforcement.host_linker.is_some(),
+    };
     observe_units(
         request,
         production_inputs,
         planned_graph,
         execution.observation(),
         &arguments,
-        &enforcement
-            .executables
-            .iter()
-            .map(|item| (item.logical_mount.as_str(), item.sha256.as_str()))
-            .collect::<BTreeMap<_, _>>(),
+        &unit_observation_policy,
         &cargo_messages,
     )?;
     verify_inputs(
@@ -320,6 +325,11 @@ fn verify_empty_root(path: &Path) -> Result<(), TrustedCargoBuildError> {
 struct CargoMessageObservation {
     artifact_files: BTreeMap<String, crate::CargoUnitSelector>,
     build_script_executables: BTreeMap<crate::CargoUnitSelector, String>,
+}
+
+struct BuildUnitObservationPolicy<'a> {
+    executable_digests: BTreeMap<&'a str, &'a str>,
+    host_linker_selected: bool,
 }
 
 fn verify_cargo_messages(
@@ -786,7 +796,7 @@ fn observe_units(
     planned: &NormalizedHostCargoUnitGraph,
     observation: &LinuxSandboxExecutionObservation,
     root_arguments: &[String],
-    build_executables: &BTreeMap<&str, &str>,
+    build_policy: &BuildUnitObservationPolicy<'_>,
     cargo_messages: &CargoMessageObservation,
 ) -> Result<(), TrustedCargoBuildError> {
     let cargo_digest = input_digest(inputs, ProductionInputFileRole::Cargo)?;
@@ -813,10 +823,10 @@ fn observe_units(
                 .arguments
                 .strip_prefix(&[LOGICAL_RUSTC.into()])
                 .ok_or(TrustedCargoBuildError::UnitObservationMismatch)?;
-            if build_rustc_query_allowed(request, arguments) {
+            if build_rustc_query_allowed(request, arguments, build_policy.host_linker_selected) {
                 continue;
             }
-            let rustc = RustcInvocation::parse(arguments)?;
+            let rustc = RustcInvocation::parse(arguments, build_policy.host_linker_selected)?;
             let matches = planned
                 .nodes()
                 .iter()
@@ -851,7 +861,8 @@ fn observe_units(
             if !observed_build_scripts.insert(selector.clone()) {
                 return Err(TrustedCargoBuildError::UnitObservationMismatch);
             }
-        } else if build_executables
+        } else if build_policy
+            .executable_digests
             .get(execution.executable.as_str())
             .is_none_or(|digest| **digest != execution.executable_sha256)
         {
@@ -888,18 +899,10 @@ struct RustcInvocation {
 }
 
 impl RustcInvocation {
-    fn parse(arguments: &[String]) -> Result<Self, TrustedCargoBuildError> {
-        if arguments
-            .iter()
-            .filter(|argument| argument.as_str() == BUILD_SYSROOT_FLAG)
-            .count()
-            != 1
-            || arguments.iter().any(|argument| {
-                argument.starts_with("--sysroot") && argument.as_str() != BUILD_SYSROOT_FLAG
-            })
-        {
-            return Err(TrustedCargoBuildError::UnitObservationMismatch);
-        }
+    fn parse(
+        arguments: &[String],
+        host_linker_selected: bool,
+    ) -> Result<Self, TrustedCargoBuildError> {
         let crate_name = option_value(arguments, "--crate-name")
             .ok_or(TrustedCargoBuildError::UnitObservationMismatch)?;
         let crate_types = option_values(arguments, "--crate-type");
@@ -907,6 +910,10 @@ impl RustcInvocation {
             return Err(TrustedCargoBuildError::UnitObservationMismatch);
         }
         let target = option_value(arguments, "--target");
+        if target.is_some() && option_count(arguments, "--target") != 1 {
+            return Err(TrustedCargoBuildError::UnitObservationMismatch);
+        }
+        validate_rustc_build_flags(arguments, target.is_some(), host_linker_selected)?;
         let features = option_values(arguments, "--cfg")
             .into_iter()
             .filter_map(|cfg| {
@@ -955,21 +962,75 @@ impl RustcInvocation {
 fn build_rustc_query_allowed(
     request: &NormalizedCargoPlannerRequest,
     arguments: &[String],
+    host_linker_selected: bool,
 ) -> bool {
     if request.allows_rustc_query(arguments) {
         return true;
     }
-    let mut without_sysroot = arguments.to_vec();
-    let matching = without_sysroot
-        .iter()
-        .enumerate()
-        .filter_map(|(index, argument)| (argument == BUILD_SYSROOT_FLAG).then_some(index))
-        .collect::<Vec<_>>();
-    let [index] = matching.as_slice() else {
+    let is_target = option_value(arguments, "--target").is_some();
+    if validate_rustc_build_flags(arguments, is_target, host_linker_selected).is_err() {
         return false;
+    }
+    let expected_flag = if is_target {
+        Some(BUILD_SYSROOT_FLAG)
+    } else if host_linker_selected {
+        Some(HOST_LINKER_FEATURE_FLAG)
+    } else {
+        None
     };
-    without_sysroot.remove(*index);
-    request.allows_rustc_query(&without_sysroot)
+    let mut without_build_flag = arguments.to_vec();
+    if let Some(expected_flag) = expected_flag {
+        let Some(index) = without_build_flag
+            .iter()
+            .position(|argument| argument == expected_flag)
+        else {
+            return false;
+        };
+        without_build_flag.remove(index);
+    }
+    request.allows_rustc_query(&without_build_flag)
+}
+
+fn validate_rustc_build_flags(
+    arguments: &[String],
+    is_target: bool,
+    host_linker_selected: bool,
+) -> Result<(), TrustedCargoBuildError> {
+    let sysroot_count = arguments
+        .iter()
+        .filter(|argument| argument.as_str() == BUILD_SYSROOT_FLAG)
+        .count();
+    let host_linker_feature_count = arguments
+        .iter()
+        .filter(|argument| argument.as_str() == HOST_LINKER_FEATURE_FLAG)
+        .count();
+    let alternate_sysroot = arguments.iter().any(|argument| {
+        argument.starts_with("--sysroot") && argument.as_str() != BUILD_SYSROOT_FLAG
+    });
+    let alternate_linker_feature = arguments.iter().any(|argument| {
+        argument.starts_with("-Clinker-features") && argument.as_str() != HOST_LINKER_FEATURE_FLAG
+    }) || arguments
+        .windows(2)
+        .any(|pair| pair[0] == "-C" && pair[1].starts_with("linker-features"));
+    let expected_sysroot_count = usize::from(is_target);
+    let expected_linker_feature_count = usize::from(!is_target && host_linker_selected);
+    if sysroot_count != expected_sysroot_count
+        || host_linker_feature_count != expected_linker_feature_count
+        || alternate_sysroot
+        || alternate_linker_feature
+    {
+        Err(TrustedCargoBuildError::UnitObservationMismatch)
+    } else {
+        Ok(())
+    }
+}
+
+fn option_count(arguments: &[String], name: &str) -> usize {
+    let prefix = format!("{name}=");
+    arguments
+        .iter()
+        .filter(|argument| argument.as_str() == name || argument.starts_with(&prefix))
+        .count()
 }
 
 fn crate_type_matches(kind: CargoCrateKind, crate_types: &BTreeSet<String>) -> bool {
@@ -1065,6 +1126,58 @@ mod tests {
         CargoUnit, CargoUnitEdge, CargoUnitGraphPlannerIdentity, CargoUnitSelector,
         HostCargoUnitGraph,
     };
+
+    #[test]
+    fn host_and_target_rustc_flags_are_scope_exact() {
+        let host = rustc_arguments(&[HOST_LINKER_FEATURE_FLAG]);
+        let parsed_host = RustcInvocation::parse(&host, true).unwrap();
+        assert_eq!(parsed_host.target, None);
+
+        let target = rustc_arguments(&["--target", "wasm32-unknown-unknown", BUILD_SYSROOT_FLAG]);
+        let parsed_target = RustcInvocation::parse(&target, true).unwrap();
+        assert_eq!(
+            parsed_target.target.as_deref(),
+            Some("wasm32-unknown-unknown")
+        );
+
+        RustcInvocation::parse(&rustc_arguments(&[]), false).unwrap();
+    }
+
+    #[test]
+    fn rustc_observation_rejects_cross_kind_linker_flags() {
+        for arguments in [
+            rustc_arguments(&[BUILD_SYSROOT_FLAG, HOST_LINKER_FEATURE_FLAG]),
+            rustc_arguments(&[]),
+            rustc_arguments(&[
+                "--target",
+                "wasm32-unknown-unknown",
+                BUILD_SYSROOT_FLAG,
+                HOST_LINKER_FEATURE_FLAG,
+            ]),
+            rustc_arguments(&["--target", "wasm32-unknown-unknown"]),
+            rustc_arguments(&[HOST_LINKER_FEATURE_FLAG, HOST_LINKER_FEATURE_FLAG]),
+            rustc_arguments(&["-Clinker-features=+lld"]),
+            rustc_arguments(&[
+                "--target",
+                "wasm32-unknown-unknown",
+                "-C",
+                "linker-features=-lld",
+            ]),
+        ] {
+            assert!(matches!(
+                RustcInvocation::parse(&arguments, true),
+                Err(TrustedCargoBuildError::UnitObservationMismatch)
+            ));
+        }
+    }
+
+    fn rustc_arguments(extra: &[&str]) -> Vec<String> {
+        ["--crate-name", "fixture", "--crate-type", "lib"]
+            .into_iter()
+            .chain(extra.iter().copied())
+            .map(str::to_owned)
+            .collect()
+    }
 
     #[test]
     fn cargo_message_stream_is_closed_complete_and_non_fresh() {
