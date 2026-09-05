@@ -11,3 +11,4 @@ acceptance tests in the same change.
 - [ADR 0003: Admit the pinned Cargo unit-graph channel override](0003-pinned-cargo-unit-graph-channel.md)
 - [ADR 0004: Admit one anonymous fetch-runner wakeup socket class](0004-anonymous-fetch-wakeup-socketpair.md)
 - [ADR 0005: Admit an inert files-only NSS daemon probe](0005-files-only-nss-probe.md)
+- [ADR 0006: Admit the pinned Cargo build spawn-error socketpair](0006-cargo-build-spawn-error-socketpair.md)
