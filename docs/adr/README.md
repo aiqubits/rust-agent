@@ -6,4 +6,4 @@ acceptance tests in the same change.
 
 ## Decisions
 
-- No amendments have been accepted yet.
+- [ADR 0001: Admit Cargo 1.97.1's exact fetch-time target-information query](0001-cargo-fetch-target-information-query.md)

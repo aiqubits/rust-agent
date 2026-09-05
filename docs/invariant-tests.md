@@ -158,3 +158,9 @@ pre/mount/post wiring and actual-view recomputation, real rustc target-fact/cust
 reproduction, canonical Cargo-config enforcement, toolchain/SDK/executable digest and version
 probes, sandboxed WASM post-link attestation, and production manifest/SBOM/artifact-output identity
 remain unmapped because their implementations and matching real-runner evidence do not yet exist.
+
+## Accepted ADR amendments
+
+| Contract | Automated evidence |
+|---|---|
+| ADR 0001 advances Cargo fetch request/observation to schema 2 and admits only exact pinned `rustc -vV` plus Cargo 1.97.1's fixed Host/target information queries. The optional target pair must match the normalized request, every descendant is audited, and codegen/wrapper/response-file/argument/schema drift fails closed. Cargo's null stdin is a zero-length regular file in the content-addressed runtime identity mapped only to `/dev/null`; no Host device tree is mounted | `host_input_closure::cargo_fetch_schema_two_binds_exact_host_and_target_queries`, `host_input_closure::cargo_fetch_rejects_query_argument_target_and_schema_drift`, `production_cargo_fetch::preprovisioned_fetch_runs_cargo_offline_and_publishes_a_verified_read_only_cache`, `linux_namespace_backend::runtime_null_input_is_identity_bound_and_host_devices_remain_hidden` |
