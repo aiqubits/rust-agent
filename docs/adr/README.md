@@ -14,3 +14,4 @@ acceptance tests in the same change.
 - [ADR 0006: Admit the pinned Cargo build spawn-error socketpair](0006-cargo-build-spawn-error-socketpair.md)
 - [ADR 0007: Preserve Cargo target context for build-host units](0007-cargo-unit-target-context.md)
 - [ADR 0008: Bind the Linux host toolchain closure](0008-linux-host-toolchain-closure.md)
+- [ADR 0009: Disable implicit Host LLD substitution](0009-disable-implicit-host-lld.md)
