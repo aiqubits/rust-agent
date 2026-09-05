@@ -15,3 +15,4 @@ acceptance tests in the same change.
 - [ADR 0007: Preserve Cargo target context for build-host units](0007-cargo-unit-target-context.md)
 - [ADR 0008: Bind the Linux host toolchain closure](0008-linux-host-toolchain-closure.md)
 - [ADR 0009: Disable implicit Host LLD substitution](0009-disable-implicit-host-lld.md)
+- [ADR 0010: Scope linker configuration to Host Cargo units](0010-scope-host-linker-configuration.md)

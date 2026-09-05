@@ -2,6 +2,7 @@
 
 - Status: accepted
 - Date: 2026-09-06
+- Superseded in part by: ADR 0010 (Host/Target flag delivery mechanism)
 - Contract sections/invariants: Sections 46, 47, 52 (I38 and I66), and 53; Phase 1B Linux production build
 
 ## Context
@@ -31,10 +32,12 @@ fixed `COMPILER_PATH=/rust-agent/tools`.
 
 The encoded argument is schema-owned and cannot be supplied, removed or
 overridden by a Component or ambient environment. The trusted observer requires
-it exactly once on every rustc query and compilation spawned by a selected
-Host-linker build, requires it zero times otherwise, and strips only that exact
-argument when matching Cargo's pre-authorized rustc query shapes. Any alternate
-`linker-features` argument or count fails closed.
+it exactly once on every build-flag-bearing rustc query and compilation spawned
+by a selected Host-linker build, and requires it zero times otherwise. Cargo's
+separately pre-authorized bare identity/target-discovery query shapes remain
+exact and flag-free. The observer strips only the exact build-owned arguments
+when matching the flagged query shape. Any alternate `linker-features` argument
+or count fails closed.
 
 The exact `CARGO_ENCODED_RUSTFLAGS` value is recorded in
 `ProductionCargoInvocationIdentity` and the supervised rustc argv is recorded in
@@ -44,6 +47,12 @@ implicit-linker semantics cannot share a build-output identity with this
 decision. No policy or planner schema change is required because the existing
 schema already selects the complete linker bundle and binds the exact Cargo
 invocation and execution evidence.
+
+ADR 0010 supersedes the global encoded-flag delivery mechanism above after
+cross-target validation showed that Cargo applies those flags to Target units,
+not Host build scripts and proc macros. The security decision to disable the
+implicit Host LLD substitution remains in force, but it is delivered through
+Cargo's Host-only configuration and a schema-4 planner request.
 
 ## Consequences
 
