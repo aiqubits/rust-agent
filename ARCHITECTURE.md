@@ -841,7 +841,7 @@ content-addressed composition
 
 Path dependency 内部的 Cargo.lock 不控制最终 Host resolution。Production `verify-integration --phase pre` 必须使用 BuildExecutionPolicy 的 fetch runner 按 Host Cargo.lock 物化并验证独立 cache；`cargo metadata` 只用于核对 locked package/source/file identity，不能作为实际编译图或 feature set 的证明。随后 runner 在无凭据、无网络环境中，用 policy 固定的 exact Cargo/rustc、Host build triple/facts、composition target/custom spec、profile、artifact selector 与 feature flags分别规划 verified emitted root 和最终 Host root，产生规范化 `HostCargoUnitGraph`。Reference runner 使用该 pinned Cargo 版本的 unit-graph planning interface，且 planning 不执行 build script/proc macro；该 Cargo 不支持受信 unit graph、输出 schema未知或无法规范化时，production integration verification 固定为 unsupported，不能退回 `--filter-platform <composition-target>` 猜测。
 
-`HostCargoUnitGraph` 的 node identity 至少固定 package source/version/checksum/git precise revision、Cargo target name/kind、compile mode/profile、`CompilationKind::Host { build_triple } | Target { composition_target }`、该 unit 的 exact sorted feature set 与 build-script/proc-macro标志；edge 固定 dependency kind、target predicate evaluation domain 与 dependent unit identity。Build dependency、build script与 proc macro及其 transitive依赖在 Host domain求值，普通 target dependency在 Target domain求值；同一 package/source可以同时出现多个 feature不同的 host/target unit，禁止把它们压回一个 package-global feature set。Pre 以同一 planner/build-host/target/profile从 verified emitted snapshot重算 standalone baseline unit graph，再从 final graph 中解析由 exact emitted alias可达的 unit projection。比较先要求每个 baseline first-party unit/edge/source identity及其 feature set原样存在，再逐 `(package identity, Cargo target, compilation kind, compile mode, profile)` 计算 external shared-unit feature/edge delta。全图所有 Host/Target unit都进入 input closure、SBOM与 build-requirement审计。Host unit自身执行时的filesystem/network/executable effect由BuildExecutionPolicy/build requirements记账；但它通过`cargo:rustc-cfg`、link directives、generated files、native artifacts或proc-macro token expansion注入最终Target artifact的行为属于**下游runtime contribution**，必须归入相应Target owner/product root的runtime ceiling与最终`compiled_runtime_effects`，不能因生产者是Host unit而消失。
+`HostCargoUnitGraph` schema 2 的 node identity 至少固定 package source/version/checksum/git precise revision、Cargo target name/kind、compile mode/profile、`CompilationKind::Host { build_triple } | Target { composition_target }`、必填的 `cargo-target-context = build-host | composition-target`、该 unit 的 exact sorted feature set 与 build-script/proc-macro标志；edge 固定 dependency kind、target predicate evaluation domain 与完整 dependent/dependency unit identity。`compilation-kind`表示该 unit 在哪里编译，`cargo-target-context`表示 Cargo 为哪个 target context实例化它：Target unit只能是`composition-target`；Host library/proc-macro/custom-build compile unit只能是`build-host`；`run-custom-build`虽在Host执行但可分别属于Host或composition target context，两者不得折叠。Raw platform缺失映射为`build-host`，只允许与 exact composition target相同的平台映射为`composition-target`，其它值fail closed；schema 1不得通过默认值迁移。Build dependency、build script与 proc macro及其 transitive依赖在 Host compilation domain求值，普通 target dependency在 Target domain求值；带`links`的普通依赖由Cargo注入指向其build-script output的边仍保留metadata的normal dependency kind，但dependency unit保持Host compilation domain。同一 package/source可以同时出现多个 feature或target-context不同的host/target unit，禁止把它们压回一个 package-global feature set。Pre 以同一 planner/build-host/target/profile从 verified emitted snapshot重算 standalone baseline unit graph，再从 final graph 中解析由 exact emitted alias可达的 unit projection。比较先要求每个 baseline first-party unit/edge/source identity及其 feature set原样存在，再逐 `(package identity, Cargo target, compilation kind, cargo target context, compile mode, profile)` 计算 external shared-unit feature/edge delta。全图所有 Host/Target unit都进入 input closure、SBOM与 build-requirement审计。Host unit自身执行时的filesystem/network/executable effect由BuildExecutionPolicy/build requirements记账；但它通过`cargo:rustc-cfg`、link directives、generated files、native artifacts或proc-macro token expansion注入最终Target artifact的行为属于**下游runtime contribution**，必须归入相应Target owner/product root的runtime ceiling与最终`compiled_runtime_effects`，不能因生产者是Host unit而消失。
 
 Host feature unification 只按以下两类处理：
 
@@ -7375,6 +7375,23 @@ Phase 1B 在 Phase 1A 接口稳定后开始，可以与 Phase 2/3 runtime spine 
 
 验收必须证明 Linux build-host交叉编译另一个 target时，build script/proc macro及其 host-only transitive dependency与 target artifact unit分别进入正确 graph，同 package的 host/target feature set不会被 package级合并；planned/observed unit任一漂移都失败。还必须证明 build script的未声明文件读取、network、executable、socket和 environment access被拒绝，声明的 SDK/linker input可用，descendant process不能逃逸，未由新有效 attestation解释的 enforcement payload/evidence、input、unit graph或 artifact digest漂移都会失败；合法重签或 evidence/trust rotation在 semantic projection未变时只触发完整 policy/envelope重新验证，不改变 build-output identity。没有外部 trusted supervisor/completion handle的本地环境只能运行 Phase 1A development path。
 
+验收：
+
+```text
+[P1B-AC-01] normalized production policy is closed, pinned and separates full concrete identity from path-free build enforcement and attestation projections
+[P1B-AC-02] trusted Cargo planning and observation preserve exact Host/Target units, build-host/composition-target contexts, build scripts, proc macros, dependency edges and planned/observed equality
+[P1B-AC-03] Host feature union is exact per unit and verifies additive source semantics, reviewer policy, build requirements and runtime-effect accounting
+[P1B-AC-04] fetch is isolated, locked and checksum/revision complete; rejected input or endpoint resolution has no source-cache publication side effect
+[P1B-AC-05] the Linux reference backend proves namespace, immutable descriptor mount, Landlock, seccomp, no-new-privileges and canonical metadata enforcement on a real runner
+[P1B-AC-06] build scripts and every descendant deny undeclared filesystem, network, executable, socket and environment access while exact declared SDK/linker inputs remain usable
+[P1B-AC-07] toolchain, SDK, read-input, executable, target-fact/custom-spec and canonical Cargo-config identities are reproduced inside the trusted backend before Cargo side effects
+[P1B-AC-08] the pinned wasm-bindgen executable runs in the sandbox and every raw/transformed WASM, JavaScript, declaration and snippet output is closed and attested
+[P1B-AC-09] signed path-free executor attestation binds the normalized build/feature policy, backend, inputs, graphs, evidence and artifacts through a one-use trusted completion handle
+[P1B-AC-10] production manifest, CycloneDX SBOM and output identity account for the complete artifact tree while path/trust/envelope rotation cannot change semantic build-output identity
+[P1B-AC-11] production build and inspect CLI wiring fails closed and cannot publish deployable output without a verified trusted completion and append-only attestation
+[P1B-AC-12] build-host and production integration pre/post rematerialize the live Host closure, verify the unique emitted dependency/config, replan both graphs and bind the final Host artifact
+```
+
 macOS/Windows production executor 不阻塞第一版 Linux runtime；只有各自 deny-by-default backend 或隔离 VM executor、签名 attestation 和 escape suite 均通过后才把对应 Host support 从 `Experimental`/development-only 提升为 `Production`。交叉编译 target 不等于该 Host build backend 已获 production 支持。
 
 ### Phase 2 — Minimal Runtime Spine
@@ -7981,7 +7998,9 @@ I56  cap:agent-factory is the only schema-v1 authority-mediated deferred factory
      no ordinary Component, second capability or fallback route can defer this check.
 
 I57  final Host Cargo feature unification keeps every emitted first-party and every shared
-     Host compilation unit exact. Schema v1 only permits audited Target-library deltas whose
+     Host compilation unit exact, including schema-2 Cargo target context so distinct Host-side
+     and composition-target build-script executions cannot collapse. Schema v1 feature policy
+     only permits audited Target-library deltas whose
      closure cannot add or alter build-script/proc-macro/generated/link output; all uncertain
      runtime effects are charged to the composition path. A Host unit's execution effects are
      build requirements, but every downstream cfg/code/token/native/link contribution is
@@ -8166,7 +8185,7 @@ I81  native TLS belongs to NetworkConnector. A one-use handshake grant authorize
 - bin/library/wasm 分别满足 exactly-one Host entry/no Host boundary/exactly-one Host export，并都选择 exactly-one target-compatible、empty-security runtime adapter；adapter constructor/primitive/source/build requirements 与 Host boundary compatibility 均进入 manifest/gate。
 - `host-cli` 只匹配 Linux/macOS/Windows desktop target，第一版仅 Linux tier为 Production；iOS/Android/其它 native target的 bin composition在 Cargo前返回 Host boundary `UnsupportedTarget`，移动端只能使用经过产品验证的 library Host集成。
 - library composition 通过 emitted source、唯一 Host alias、pre/post integration receipt 和 product executor attestation 进入独立 Host Cargo graph；不同的现有 emitted tree 只允许 offline `--replace`，online rollout 使用新 versioned directory，不宣称跨平台原子替换非空目录。
-- library Host pre/build/post分别固定 standalone/final/observed `HostCargoUnitGraph`；cross-compile的 build-host build-script/proc-macro unit和 composition-target artifact unit按各自 target facts与 exact feature set审计，package级 `cargo metadata --filter-platform`不能替代 unit证据。
+- library Host pre/build/post分别固定 standalone/final/observed schema-2 `HostCargoUnitGraph`；cross-compile的 build-host build-script/proc-macro unit、Host编译但分别服务于build-host/composition-target context的build-script execution和 composition-target artifact unit按各自 target facts与 exact feature set审计，package级 `cargo metadata --filter-platform`不能替代 unit证据。
 - production build 的完整 policy、sandbox backend、concrete input/executable/environment-role runner mapping 与 attestation 可复验，path-free `BuildEnforcementIdentity` 与 canonical `build-manifest-digest` 可独立重算并进入 build-output identity；attestation 同时绑定 composition/output/manifest digest，development artifact 不可发布。
 - Phase 1A development runner 与 Phase 1B Linux production runner 的 artifact/attestation 明确分轨；没有通过 escape suite 的 Host 不能生成 `deployable=true`。
 - same normalized input（含 target facts/custom spec与 Cargo resolution record）→ same composition hash；相同 triple但不同 target facts/spec不能共享 identity，production rustc必须复现 exact digest。
