@@ -29,6 +29,7 @@ pub const MAX_CARGO_METADATA_PACKAGES: usize = 1_024;
 const CARGO_METADATA_TIMEOUT: Duration = Duration::from_secs(30);
 const CARGO_METADATA_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const CARGO_METADATA_TERMINATION_GRACE: Duration = Duration::from_secs(1);
+const CARGO_METADATA_SPAWN_BUSY_RETRIES: usize = 10;
 
 #[derive(Clone, Copy)]
 struct CargoMetadataInvocation<'a> {
@@ -212,7 +213,7 @@ fn run_cargo_metadata(invocation: CargoMetadataInvocation<'_>) -> Result<Vec<u8>
 
         command.process_group(0);
     }
-    let mut child = command.spawn()?;
+    let mut child = spawn_cargo_metadata(&mut command)?;
     #[cfg(unix)]
     let process_group = rustix::process::Pid::from_child(&child);
     let stdout = child.stdout.take().ok_or_else(|| {
@@ -275,6 +276,22 @@ fn run_cargo_metadata(invocation: CargoMetadataInvocation<'_>) -> Result<Vec<u8>
         return Err(DiscoveryError::CargoFailed(stderr));
     }
     Ok(stdout)
+}
+
+fn spawn_cargo_metadata(command: &mut Command) -> io::Result<Child> {
+    for attempt in 0..=CARGO_METADATA_SPAWN_BUSY_RETRIES {
+        match command.spawn() {
+            Ok(child) => return Ok(child),
+            Err(error)
+                if error.kind() == io::ErrorKind::ExecutableFileBusy
+                    && attempt < CARGO_METADATA_SPAWN_BUSY_RETRIES =>
+            {
+                thread::sleep(CARGO_METADATA_POLL_INTERVAL);
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    unreachable!("the bounded Cargo metadata spawn loop always returns")
 }
 
 type OutputReader = thread::JoinHandle<Result<Vec<u8>, DiscoveryError>>;
@@ -1123,9 +1140,13 @@ mod tests {
 
     #[cfg(unix)]
     fn write_executable(path: &Path, source: &str) {
+        use std::io::Write as _;
         use std::os::unix::fs::PermissionsExt as _;
 
-        fs::write(path, source).unwrap();
+        let mut file = fs::File::create(path).unwrap();
+        file.write_all(source.as_bytes()).unwrap();
+        file.sync_all().unwrap();
+        drop(file);
         fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
     }
 
@@ -1164,6 +1185,11 @@ mod tests {
                 invocation_log,
             ),
         );
+        let transient_writer = fs::OpenOptions::new().write(true).open(&cargo).unwrap();
+        let writer_release = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(25));
+            drop(transient_writer);
+        });
         assert_eq!(
             run_cargo_metadata(CargoMetadataInvocation {
                 workspace_root: &workspace,
@@ -1178,6 +1204,7 @@ mod tests {
             .unwrap(),
             b"{}"
         );
+        writer_release.join().unwrap();
         let invocation = fs::read_to_string(&invocation_log).unwrap();
         assert!(invocation.contains(&format!(
             "args:metadata --format-version 1 --no-deps --locked --offline --filter-platform x86_64-unknown-linux-gnu --manifest-path {} --config {}",
@@ -1188,6 +1215,28 @@ mod tests {
         assert!(invocation.contains(&format!("rustc:{}", rustc.display())));
         assert!(invocation.contains(&format!("pwd:{}", working.display())));
         assert!(invocation.contains("offline:true\nepoch:0\n"));
+
+        let busy_cargo = root.path().join("fake-cargo-busy");
+        write_executable(&busy_cargo, "#!/bin/sh\nprintf '{}'\n");
+        let persistent_writer = fs::OpenOptions::new()
+            .write(true)
+            .open(&busy_cargo)
+            .unwrap();
+        assert!(matches!(
+            run_cargo_metadata(CargoMetadataInvocation {
+                workspace_root: &workspace,
+                cargo_path: &busy_cargo,
+                rustc_path: &rustc,
+                working_directory: &working,
+                cargo_target_input: Path::new("x86_64-unknown-linux-gnu"),
+                generated_config: &config,
+                cargo_home: &cargo_home,
+                timeout: Duration::from_secs(5),
+            }),
+            Err(DiscoveryError::Io(error))
+                if error.kind() == io::ErrorKind::ExecutableFileBusy
+        ));
+        drop(persistent_writer);
 
         let payload = root.path().join("oversized-output");
         File::create(&payload)

@@ -1005,10 +1005,11 @@ fn main() {
             },
             logical_path: "/rust-agent/runtime".into(),
             interpreter_paths: interpreters,
-            // Keep the toolchain's own `$ORIGIN/../lib` lookup authoritative.
-            // Injecting the system runtime directory through LD_LIBRARY_PATH can
-            // shadow rustc's digest-bound driver library on hosted runners.
-            library_paths: vec![],
+            // Descriptor-supervised descendant execution cannot rely on the
+            // executable pathname for `$ORIGIN`. Point the loader at the exact
+            // digest-bound sysroot library root and never at the copied system
+            // runtime, which could shadow rustc's driver ABI.
+            library_paths: vec!["/rust-agent/toolchain/lib".into()],
             null_input_path: "/rust-agent/runtime/empty-stdin".into(),
             symlinks: runtime_symlinks,
         },

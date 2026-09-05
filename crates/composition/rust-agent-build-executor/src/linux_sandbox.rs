@@ -34,6 +34,7 @@ const LANDLOCK_POLICY_LOGICAL_PATH: &str = "/rust-agent/backend/landlock-policy.
 const AUDIT_LOGICAL_ROOT: &str = "/rust-agent/backend-audit";
 const AUDIT_LOGICAL_PATH: &str = "/rust-agent/backend-audit/execution-report.json";
 const AUDIT_FILE_NAME: &str = "execution-report.json";
+const TOOLCHAIN_LIBRARY_PATH: &str = "/rust-agent/toolchain/lib";
 const MAX_BACKEND_VERSION_BYTES: usize = 4096;
 const MAX_SANDBOX_OUTPUT_BYTES: usize = 16 * 1024 * 1024;
 const POLL_INTERVAL: Duration = Duration::from_millis(10);
@@ -1048,7 +1049,8 @@ fn validate_runtime_identity(
         })
         && runtime.library_paths.iter().all(|path| {
             is_normalized_absolute_path(path)
-                && (path == &runtime.logical_path
+                && (path == TOOLCHAIN_LIBRARY_PATH
+                    || path == &runtime.logical_path
                     || path
                         .strip_prefix(&runtime.logical_path)
                         .is_some_and(|suffix| suffix.starts_with('/')))
@@ -1411,5 +1413,42 @@ mod tests {
                 "/rust-agent/toolchain/bin/rustc",
             ]
         );
+    }
+
+    #[test]
+    fn runtime_library_paths_admit_only_the_exact_toolchain_library_root() {
+        let runtime = |library_paths| LinuxSandboxRuntimeIdentity {
+            tree: crate::ProductionTreeIdentity {
+                path: "/host/runtime".into(),
+                tree_digest: "0".repeat(64),
+            },
+            logical_path: "/rust-agent/runtime".into(),
+            interpreter_paths: vec!["/lib64/ld-linux-x86-64.so.2".into()],
+            library_paths,
+            null_input_path: "/rust-agent/runtime/empty-stdin".into(),
+            symlinks: vec![
+                LinuxSandboxRuntimeSymlink {
+                    target: "/rust-agent/runtime/empty-stdin".into(),
+                    link: "/dev/null".into(),
+                },
+                LinuxSandboxRuntimeSymlink {
+                    target: "/rust-agent/runtime/lib64".into(),
+                    link: "/lib64".into(),
+                },
+            ],
+        };
+
+        validate_runtime_identity(&runtime(vec![TOOLCHAIN_LIBRARY_PATH.into()])).unwrap();
+        for rejected in [
+            "/rust-agent/toolchain",
+            "/rust-agent/toolchain/bin",
+            "/rust-agent/toolchain/lib/rustlib",
+            "/host/toolchain/lib",
+        ] {
+            assert!(matches!(
+                validate_runtime_identity(&runtime(vec![rejected.into()])),
+                Err(LinuxSandboxError::InvalidBackendIdentity("runtime"))
+            ));
+        }
     }
 }
