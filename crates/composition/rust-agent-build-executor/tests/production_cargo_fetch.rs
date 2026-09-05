@@ -209,6 +209,13 @@ fn host_linker_support_files_follow_the_logical_driver_install_root() {
         sha256_file(&relocated_plugin),
         sha256_file(&compiler_program_file(&linker, "liblto_plugin.so"))
     );
+    assert_eq!(
+        compiler_install_runtime_symlink(output.path()),
+        Some(LinuxSandboxRuntimeSymlink {
+            target: "/rust-agent/runtime/rust-agent/lib".into(),
+            link: "/rust-agent/lib".into(),
+        })
+    );
 }
 
 #[test]
@@ -2918,12 +2925,19 @@ fn copy_dynamic_runtime(
         target: "/rust-agent/runtime/empty-stdin".into(),
         link: "/dev/null".into(),
     });
-    symlinks.push(LinuxSandboxRuntimeSymlink {
-        target: "/rust-agent/runtime/lib".into(),
-        link: "/rust-agent/lib".into(),
-    });
+    symlinks.extend(compiler_install_runtime_symlink(output));
     symlinks.sort();
     (symlinks, loaders)
+}
+
+fn compiler_install_runtime_symlink(output: &Path) -> Option<LinuxSandboxRuntimeSymlink> {
+    output
+        .join("rust-agent/lib")
+        .is_dir()
+        .then(|| LinuxSandboxRuntimeSymlink {
+            target: "/rust-agent/runtime/rust-agent/lib".into(),
+            link: "/rust-agent/lib".into(),
+        })
 }
 
 fn copy_regular_tree(source: &Path, destination: &Path) {
