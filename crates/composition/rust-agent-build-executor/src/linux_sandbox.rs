@@ -744,7 +744,9 @@ impl LinuxSandboxReadOnlyMount {
                     LinuxSandboxMountKind::FetchTlsCaBundle,
                     "/rust-agent/fetch-inputs/ca-bundle.pem".into(),
                 ),
-                ProductionInputFileRole::BuildExecutable => (
+                ProductionInputFileRole::BuildExecutable
+                | ProductionInputFileRole::HostLinker
+                | ProductionInputFileRole::HostLinkerHelper => (
                     LinuxSandboxMountKind::BuildExecutable,
                     format!("/rust-agent/tools/{}", file.id),
                 ),

@@ -3,6 +3,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     env, fs,
+    os::unix::process::CommandExt as _,
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     thread,
@@ -27,7 +28,7 @@ use rust_agent_build_executor::{
     ProductionCargoInvocationIdentity, ProductionCompletionHandle,
     ProductionCompletionHandlePayload, ProductionEnforcementResultIdentity, ProductionEnvironment,
     ProductionExecutable, ProductionExecutionEvidence, ProductionFetchPolicy,
-    ProductionFetchRedirectPolicy, ProductionHostBuildPipelineOptions,
+    ProductionFetchRedirectPolicy, ProductionHostBuildPipelineOptions, ProductionHostLinker,
     ProductionIntegrationPostInput, ProductionIntegrationPrePipelineOptions,
     ProductionOperationKind, ProductionReadInput, ProductionSandboxBackend, ProductionToolIdentity,
     ProductionToolchain, ProductionTreeIdentity, RustcSettingsRecord, SigningHelper,
@@ -344,7 +345,8 @@ fn main() {
     assert_eq!(TcpStream::connect(("127.0.0.1", 9)).unwrap_err().raw_os_error(), Some(1));
     assert_eq!(UnixStream::connect("/rust-agent/tmp/escape.sock").unwrap_err().raw_os_error(), Some(1));
     assert!(Command::new("/bin/sh").status().is_err());
-    let output = Command::new("/rust-agent/tools/fixture-linker")
+    assert_eq!(std::env::var("COMPILER_PATH").unwrap(), "/rust-agent/tools");
+    let output = Command::new("/rust-agent/tools/fixture-probe")
         .arg("--escape-test")
         .output()
         .unwrap();
@@ -356,7 +358,7 @@ fn main() {
 }
 "#
         } else {
-            "fn main() { assert!(shared_helper::HOST_FEATURE); assert!(!shared_helper::TARGET_FEATURE); println!(\"cargo:rustc-check-cfg=cfg(rust_agent_build_script)\"); println!(\"cargo:rustc-cfg=rust_agent_build_script\"); }\n"
+            "fn main() { assert!(shared_helper::HOST_FEATURE); assert!(!shared_helper::TARGET_FEATURE); assert_eq!(std::env::var(\"COMPILER_PATH\").unwrap(), \"/rust-agent/tools\"); println!(\"cargo:rustc-check-cfg=cfg(rust_agent_build_script)\"); println!(\"cargo:rustc-cfg=rust_agent_build_script\"); }\n"
         };
         fs::write(generated_package.join("build.rs"), build_script).unwrap();
         let generated_source = if mode == FetchFixtureMode::WasmPipeline {
@@ -416,8 +418,13 @@ fn main() {
         fs::write(root.join("input.txt"), b"declared-sdk\n").unwrap();
         root
     });
-    let fixture_linker = (mode == FetchFixtureMode::HostPipeline)
+    let fixture_probe = (mode == FetchFixtureMode::HostPipeline)
         .then(|| build_escape_fixture_tool(temp.path(), &compiler_rustc));
+    let host_linker = cross_compile.then(|| find_executable("cc"));
+    let host_linker_collect2 = host_linker
+        .as_deref()
+        .map(|linker| compiler_program(linker, "collect2"));
+    let host_linker_ld = cross_compile.then(|| find_executable("ld"));
     let wasm_bindgen =
         (mode == FetchFixtureMode::WasmPipeline).then(|| find_executable("wasm-bindgen"));
     let sysroot = PathBuf::from(
@@ -469,7 +476,7 @@ fn main() {
         .unwrap();
 
     let policy = ProductionBuildExecutionPolicy {
-        schema: 2,
+        schema: 3,
         id: "real-fetch-fixture".into(),
         host: "cfg(target_os = \"linux\")".into(),
         backend: ProductionSandboxBackend::LinuxLandlockSeccomp,
@@ -547,15 +554,41 @@ fn main() {
             })
             .into_iter()
             .collect(),
-        executables: fixture_linker
+        executables: fixture_probe
             .as_ref()
             .map(|path| ProductionExecutable {
-                id: "fixture-linker".into(),
+                id: "fixture-probe".into(),
                 path: path.clone(),
                 sha256: sha256_file(path),
-                version: "fixture-linker 1".into(),
+                version: "fixture-probe 1".into(),
             })
             .into_iter()
+            .chain(host_linker.as_ref().map(|path| ProductionExecutable {
+                id: "host-linker".into(),
+                path: path.clone(),
+                sha256: sha256_file(path),
+                version: first_line_with_arg0(
+                    path,
+                    "/rust-agent/tools/host-linker",
+                    &["--version"],
+                ),
+            }))
+            .chain(
+                host_linker_collect2
+                    .as_ref()
+                    .map(|path| ProductionExecutable {
+                        id: "collect2".into(),
+                        path: path.clone(),
+                        sha256: sha256_file(path),
+                        version: first_line(path, &["--version"]),
+                    }),
+            )
+            .chain(host_linker_ld.as_ref().map(|path| ProductionExecutable {
+                id: "ld".into(),
+                path: path.clone(),
+                sha256: sha256_file(path),
+                version: first_line(path, &["--version"]),
+            }))
             .chain(wasm_bindgen.as_ref().map(|path| ProductionExecutable {
                 id: WASM_BINDGEN_CLI_LOGICAL_ID.into(),
                 path: path.clone(),
@@ -563,6 +596,10 @@ fn main() {
                 version: first_line(path, &["--version"]),
             }))
             .collect(),
+        host_linker: cross_compile.then(|| ProductionHostLinker {
+            executable: "host-linker".into(),
+            helpers: vec!["collect2".into(), "ld".into()],
+        }),
         environment: (mode == FetchFixtureMode::HostPipeline)
             .then_some(ProductionEnvironment {
                 id: "fixture-channel".into(),
@@ -784,21 +821,22 @@ fn main() {
             product_build_contributions: &[],
         })
         .unwrap();
-    let requirements = if mode == FetchFixtureMode::HostPipeline {
-        BuildRequirements {
-            executables: BTreeSet::from(["fixture-linker".into()]),
-            read_inputs: BTreeSet::from(["fixture-sdk".into()]),
-            environment: BTreeSet::from(["fixture-channel".into()]),
-        }
-    } else if mode == FetchFixtureMode::WasmPipeline {
-        BuildRequirements {
-            executables: BTreeSet::from([WASM_BINDGEN_CLI_LOGICAL_ID.into()]),
-            read_inputs: BTreeSet::new(),
-            environment: BTreeSet::new(),
-        }
-    } else {
-        BuildRequirements::default()
-    };
+    let mut requirements = BuildRequirements::default();
+    if cross_compile {
+        requirements
+            .executables
+            .extend(["collect2".into(), "host-linker".into(), "ld".into()]);
+    }
+    if mode == FetchFixtureMode::HostPipeline {
+        requirements.executables.insert("fixture-probe".into());
+        requirements.read_inputs.insert("fixture-sdk".into());
+        requirements.environment.insert("fixture-channel".into());
+    }
+    if mode == FetchFixtureMode::WasmPipeline {
+        requirements
+            .executables
+            .insert(WASM_BINDGEN_CLI_LOGICAL_ID.into());
+    }
     let mut closure_items = vec![
         file_item(
             HostBuildClosureItemRole::HostRootManifest,
@@ -981,10 +1019,16 @@ fn main() {
     ];
     runtime_executables.extend(credential_helper.as_deref());
     runtime_executables.extend(wasm_bindgen.as_deref());
+    runtime_executables.extend(host_linker.as_deref());
+    runtime_executables.extend(host_linker_collect2.as_deref());
+    runtime_executables.extend(host_linker_ld.as_deref());
     let (runtime_symlinks, interpreters) = copy_dynamic_runtime(
         &runtime_executables,
         &[cargo.as_path(), rustc.as_path()],
         &runtime,
+        &sysroot,
+        &build_triple,
+        host_linker.as_deref(),
     );
     let backend_path = Path::new("/usr/bin/bwrap");
     let launcher = Path::new(env!("CARGO_BIN_EXE_rust-agent-linux-sandbox-launcher"));
@@ -1012,7 +1056,7 @@ fn main() {
             // executable pathname for `$ORIGIN`. Use only the separately
             // copied, digest-bound dynamic closure observed for the exact
             // Cargo and rustc files.
-            library_paths: vec!["/rust-agent/runtime/toolchain-lib".into()],
+            library_paths: vec!["/rust-agent/runtime/lib".into()],
             null_input_path: "/rust-agent/runtime/empty-stdin".into(),
             symlinks: runtime_symlinks,
         },
@@ -1149,7 +1193,7 @@ fn main() {
         let composition = fixture_composition_manifest(&policy, &normalized_closure, build_kind);
         let build_inputs = preflight_production_build_inputs(&policy, &normalized_closure).unwrap();
         let planner_request = CargoPlannerRequest {
-            schema: 2,
+            schema: 3,
             root: CargoPlannerGraphRoot::EmittedStandalone,
         }
         .normalize(&policy, &normalized_closure)
@@ -1280,13 +1324,13 @@ fn main() {
         );
         let build_inputs = preflight_production_build_inputs(&policy, &normalized_closure).unwrap();
         let standalone_request = CargoPlannerRequest {
-            schema: 2,
+            schema: 3,
             root: CargoPlannerGraphRoot::EmittedStandalone,
         }
         .normalize(&policy, &normalized_closure)
         .unwrap();
         let final_request = CargoPlannerRequest {
-            schema: 2,
+            schema: 3,
             root: CargoPlannerGraphRoot::FinalHost,
         }
         .normalize(&policy, &normalized_closure)
@@ -1472,7 +1516,10 @@ fn main() {
             &snapshot,
         )
         .unwrap();
-        assert_eq!(preflight.version_sandbox_observations().len(), 2);
+        assert_eq!(
+            preflight.version_sandbox_observations().len(),
+            build_inputs.request().expected_probes().count()
+        );
         assert_eq!(
             preflight.validated_version_observation().request_digest(),
             build_inputs.request().digest()
@@ -1485,7 +1532,7 @@ fn main() {
         );
         if cross_compile {
             let standalone_request = CargoPlannerRequest {
-                schema: 2,
+                schema: 3,
                 root: CargoPlannerGraphRoot::EmittedStandalone,
             }
             .normalize(&policy, &normalized_closure)
@@ -1518,7 +1565,7 @@ fn main() {
             );
         }
         let planner_request = CargoPlannerRequest {
-            schema: 2,
+            schema: 3,
             root: CargoPlannerGraphRoot::FinalHost,
         }
         .normalize(&policy, &normalized_closure)
@@ -1734,7 +1781,7 @@ fn build_escape_fixture_tool(root: &Path, rustc: &Path) -> PathBuf {
         r#"use std::{fs, net::TcpStream, os::unix::net::UnixStream, process::Command};
 fn main() {
     match std::env::args().nth(1).as_deref() {
-        Some("--version") => println!("fixture-linker 1"),
+        Some("--version") => println!("fixture-probe 1"),
         Some("--escape-test") => {
             assert!(fs::read("/etc/passwd").is_err());
             assert!(fs::write("/tmp/descendant-escape", b"escape").is_err());
@@ -1743,7 +1790,7 @@ fn main() {
             assert!(Command::new("/bin/sh").status().is_err());
             println!("descendant-escape-denied");
         }
-        _ => panic!("unsupported fixture-linker invocation"),
+        _ => panic!("unsupported fixture-probe invocation"),
     }
 }
 "#,
@@ -2266,7 +2313,7 @@ fn derive_fixture_cargo_graph(
     locked: &rust_agent_build_executor::NormalizedLockedSourceClosure,
 ) -> HostCargoUnitGraph {
     let request = CargoPlannerRequest {
-        schema: 2,
+        schema: 3,
         root: CargoPlannerGraphRoot::EmittedStandalone,
     }
     .normalize(policy, bootstrap_closure)
@@ -2761,6 +2808,9 @@ fn copy_dynamic_runtime(
     executables: &[&Path],
     toolchain_executables: &[&Path],
     output: &Path,
+    toolchain_sysroot: &Path,
+    build_triple: &str,
+    host_linker: Option<&Path>,
 ) -> (Vec<LinuxSandboxRuntimeSymlink>, Vec<String>) {
     fs::write(output.join("empty-stdin"), []).unwrap();
     let mut sources = Vec::new();
@@ -2791,6 +2841,7 @@ fn copy_dynamic_runtime(
                             "the exact Cargo/rustc dynamic closures contain a basename collision"
                         );
                     }
+                    continue;
                 }
                 if !line.contains("=>") {
                     loaders.push(source.to_owned());
@@ -2822,10 +2873,17 @@ fn copy_dynamic_runtime(
         fs::create_dir_all(destination.parent().unwrap()).unwrap();
         fs::copy(&source, destination).unwrap();
     }
-    let toolchain_library_root = output.join("toolchain-lib");
-    fs::create_dir(&toolchain_library_root).unwrap();
+    let toolchain_library_root = output.join("lib");
+    fs::create_dir_all(&toolchain_library_root).unwrap();
     for (basename, source) in toolchain_sources {
         fs::copy(source, toolchain_library_root.join(basename)).unwrap();
+    }
+    copy_regular_tree(
+        &toolchain_sysroot.join("lib/rustlib").join(build_triple),
+        &toolchain_library_root.join("rustlib").join(build_triple),
+    );
+    if let Some(host_linker) = host_linker {
+        copy_compiler_support_files(host_linker, output);
     }
     let mut symlinks = ["lib", "lib64", "root", "usr"]
         .into_iter()
@@ -2843,6 +2901,105 @@ fn copy_dynamic_runtime(
     (symlinks, loaders)
 }
 
+fn copy_regular_tree(source: &Path, destination: &Path) {
+    assert!(source.is_dir(), "required runtime tree is unavailable");
+    for entry in WalkDir::new(source).sort_by_file_name() {
+        let entry = entry.unwrap();
+        let relative = entry.path().strip_prefix(source).unwrap();
+        let output = destination.join(relative);
+        let file_type = entry.file_type();
+        assert!(
+            !file_type.is_symlink(),
+            "runtime tree contains an unsupported symlink: {}",
+            entry.path().display()
+        );
+        if file_type.is_dir() {
+            fs::create_dir_all(&output).unwrap();
+        } else {
+            assert!(
+                file_type.is_file(),
+                "runtime tree contains a special entry: {}",
+                entry.path().display()
+            );
+            fs::create_dir_all(output.parent().unwrap()).unwrap();
+            fs::copy(entry.path(), output).unwrap();
+        }
+    }
+}
+
+fn copy_compiler_support_files(host_linker: &Path, output: &Path) {
+    const REQUIRED: &[&str] = &[
+        "Scrt1.o",
+        "crti.o",
+        "crtn.o",
+        "crtbeginS.o",
+        "crtendS.o",
+        "libgcc.a",
+        "libgcc_s.so",
+        "libc.so",
+        "libc_nonshared.a",
+    ];
+    const OPTIONAL: &[&str] = &[
+        "crt1.o",
+        "crtbegin.o",
+        "crtend.o",
+        "libdl.a",
+        "libgcc_eh.a",
+        "libgcc_s.so.1",
+        "liblto_plugin.so",
+        "libm.so",
+        "libm.so.6",
+        "libmvec.so.1",
+        "libpthread.a",
+        "librt.a",
+        "libutil.a",
+        "lto-wrapper",
+    ];
+    for (name, required) in REQUIRED
+        .iter()
+        .map(|name| (*name, true))
+        .chain(OPTIONAL.iter().map(|name| (*name, false)))
+    {
+        let query = Command::new(host_linker)
+            .arg(format!("-print-file-name={name}"))
+            .output()
+            .unwrap();
+        assert!(
+            query.status.success(),
+            "compiler file query failed for {name}"
+        );
+        let printed = String::from_utf8(query.stdout).unwrap();
+        let printed = Path::new(printed.trim());
+        if !printed.is_absolute() || !printed.is_file() {
+            assert!(
+                !required,
+                "required compiler support file `{name}` is unavailable"
+            );
+            continue;
+        }
+        let logical = normalize_absolute_path(printed);
+        let source = printed.canonicalize().unwrap();
+        let destination = output.join(logical.strip_prefix(Path::new("/")).unwrap());
+        fs::create_dir_all(destination.parent().unwrap()).unwrap();
+        fs::copy(source, destination).unwrap();
+    }
+}
+
+fn normalize_absolute_path(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::from("/");
+    for component in path.components() {
+        match component {
+            std::path::Component::Normal(component) => normalized.push(component),
+            std::path::Component::ParentDir => {
+                assert!(normalized.pop(), "absolute compiler path escaped root");
+            }
+            std::path::Component::RootDir | std::path::Component::CurDir => {}
+            std::path::Component::Prefix(_) => panic!("Windows path in Linux fixture"),
+        }
+    }
+    normalized
+}
+
 fn sha256(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
 }
@@ -2857,8 +3014,35 @@ fn find_executable(name: &str) -> PathBuf {
         .canonicalize()
         .unwrap()
 }
+fn compiler_program(compiler: &Path, name: &str) -> PathBuf {
+    let output = Command::new(compiler)
+        .arg(format!("-print-prog-name={name}"))
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let path = PathBuf::from(String::from_utf8(output.stdout).unwrap().trim());
+    assert!(
+        path.is_absolute() && path.is_file(),
+        "compiler did not resolve required program `{name}` to an absolute file"
+    );
+    path.canonicalize().unwrap()
+}
 fn first_line(path: &Path, arguments: &[&str]) -> String {
     let output = Command::new(path).args(arguments).output().unwrap();
+    assert!(output.status.success());
+    String::from_utf8(output.stdout)
+        .unwrap()
+        .lines()
+        .next()
+        .unwrap()
+        .into()
+}
+fn first_line_with_arg0(path: &Path, arg0: &str, arguments: &[&str]) -> String {
+    let output = Command::new(path)
+        .arg0(arg0)
+        .args(arguments)
+        .output()
+        .unwrap();
     assert!(output.status.success());
     String::from_utf8(output.stdout)
         .unwrap()

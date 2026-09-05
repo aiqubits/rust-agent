@@ -7,7 +7,7 @@ represented in `docs/invariant-tests.md` and all applicable gates pass.
 |---|---|---|
 | 0 — repository and contract | Complete | Rust/Cargo 1.97.1 synchronization, workspace/deny/ADR gates, effect-free core/runtime contracts, checked lifecycle identities, closed target-fact/custom-target records, globally bounded catalog owners and symbolic per-target support analysis, resource-namespace bootstrap contracts, Host/runtime metadata, canonical Host Cargo unit-graph schemas and privacy fixtures are implemented. Production composition discovers schema-owned Capability/Component/runtime/Host and direct-root build-requirement metadata from workspace package manifests through bounded, timed, offline, isolated `cargo metadata`; package/path ownership is derived from the exact workspace-member result, unknown/mixed/spoofed metadata and default-feature drift fail closed, and a real discovery round-trip is checked against the test-only catalog fixture. All 12 Phase 0 acceptance criteria have exact non-wildcard mappings, and the mapping/CI gate passes. |
 | 1A — generated graph proof | Complete | The development-only generator/resolver/build path, path-free compose rustc executable/version/full-sysroot provenance, canonical target-fact and custom-spec snapshots with rustc/Cargo before/after drift checks, schema-owned Cargo package-metadata discovery, bounded/shared target-support analysis, direct-serde-bounded metadata/profile/trust/diagnostic/composition/security/Cargo-source collections, an identity-bound normalized catalog/trust-policy/evidence-byte/root-requirement generator-input commitment with resolver/attribution/generated-source/source-closure rederivation, selected-evidence snapshot verification, conservative aggregate App handoff, generated namespaced host APIs and required-field HostBindings builders, shared-host Config-field type/identity sealing with a real two-App same-identity/no-reopen external Host fixture, committed-built-in-fact Cargo target-dependency rewriting with transitive active path-package snapshots, composition-wide source entry/byte preflight before copy or hash, checked canonical resolution/manifests, exact Cargo.lock source projection, Cargo-config ancestor rejection, source snapshots, real graph presence/absence, integration verification, topology fixtures, target matrix and WASM packaging are implemented. A checked-in custom target now completes compose, lockfile generation and locked offline development build with the real pinned Rust/Cargo 1.97.1 toolchain. All 10 Phase 1A acceptance criteria have exact non-wildcard mappings, and every applicable local gate passes. Phase 1A artifacts remain `deployable=false`; immutable production mounted-view enforcement remains a Phase 1B gate. |
-| 1B — Linux production build | Implementation complete; runner gate pending | All 12 acceptance criteria are implemented and mapped: the descriptor-retaining Linux namespace/Landlock/seccomp backend, isolated locked fetch, pinned Cargo schema-2 unit planning and observation, exact Host feature accounting, trusted preflight, standalone/WASM/Host pre-build-post pipelines, complete manifest/SBOM identity, one-use signed completion, attestation-before-artifact publication and production CLI wiring are present. Every locally faithful gate passes; this checkout's Linux 5.15 kernel exposes only Landlock ABI 1, so the real ABI-2 rename, namespace/escape, fetch/planner/build, WASM and Host pipeline suite must pass the checked-in Ubuntu 24.04 `Phase 1B Linux production gate` before this row may become `Complete`. |
+| 1B — Linux production build | Implementation complete; runner gate pending | All 12 acceptance criteria are implemented and mapped: the descriptor-retaining Linux namespace/Landlock/seccomp backend, isolated locked fetch, pinned Cargo schema-3 unit planning and schema-2 Host/Target graph observation, exact Host feature accounting, trusted preflight, standalone/WASM/Host pre-build-post pipelines, complete manifest/SBOM identity, one-use signed completion, attestation-before-artifact publication and production CLI wiring are present. Every locally faithful gate passes; this checkout's Linux 5.15 kernel exposes only Landlock ABI 1, so the real ABI-2 rename, namespace/escape, fetch/planner/build, WASM and Host pipeline suite must pass the checked-in Ubuntu 24.04 `Phase 1B Linux production gate` before this row may become `Complete`. |
 | 2 — minimal runtime spine | Not started | The Phase 1A gate has passed; implementation must provide real minimal runtime behavior and must not be represented by empty product crates. |
 | 3 — tool execution plane | Not started | The Phase 1A contract is stable; no Phase 3 implementation has started. |
 | 4 — local execution providers | Not started | Real-target security regressions required. |
@@ -114,6 +114,11 @@ No test result above is evidence for Phase 1B deployability or for a Phase 2+ ru
   enforcement projection; exact build/target facts, Cargo resolution/config, profile, artifact,
   panic strategy, rustc settings and prefix-remap schema are also bound, while missing and
   cross-kind mappings fail closed;
+- schema-3 policy optionally declares one closed Host-linker bundle. Its linker and sorted unique
+  helper ids resolve to separately digest/version-bound executables and requirements must select
+  all or none. The schema-2 path-free enforcement identity binds the exact logical build-triple
+  linker configuration and `COMPILER_PATH`; old schemas, missing/duplicate helpers and partial
+  selection fail closed before Cargo;
 - concrete Host path, fetch mirror, policy id and signer/reviewer/helper rotation change the full
   policy digest but not build-output enforcement identity, while selected tool/input/environment
   content or enforcement semantics change the latter.
@@ -125,15 +130,16 @@ No test result above is evidence for Phase 1B deployability or for a Phase 2+ ru
   SHA-256/canonical-tree identity are checked, anchors are retained, and original path identity plus
   content are rechecked so same-content atomic pathname replacement also fails closed. No child is
   started by this preflight;
-- the corresponding closed, bounded probe request fixes Cargo to `-V`, rustc to `-vV` and selected
-  build executables to `--version`. Its observation must contain the exact ordered role/id/digest/
-  argv set, successful exits and exact declared first stdout lines, and is revalidated between
-  anchored input checks. A local Linux runner now consumes the retained ELF descriptor through
-  `/proc/self/fd`, clears environment/cwd/stdin, bounds both UTF-8 output streams, enforces a fixed
-  deadline and kills the complete process group including pipe-holding descendants. It successfully
-  probes the real pinned Cargo/rustc and fails closed on non-ELF format, nonzero exit, overflow,
-  invalid encoding and timeout. Production preflight reruns the same request in the trusted backend
-  and binds its observations into the signed executor evidence;
+- the corresponding closed, bounded schema-3 probe request fixes Cargo to `-V`, rustc to `-vV` and
+  selected build executables to `--version`, with distinct Host-linker and Host-linker-helper roles.
+  Its observation must contain the exact ordered role/id/digest/argv set, successful exits and exact
+  declared first stdout lines, and is revalidated between anchored input checks. A local Linux runner
+  consumes retained ELF descriptors, clears ambient environment/cwd/stdin, bounds both UTF-8 output
+  streams, enforces a fixed deadline and kills the complete process group including pipe-holding
+  descendants. Ordinary probes remain single-executable and read-only; only a Host-linker helper gets
+  a fresh disposable `/rust-agent/probe-tmp`, fixed logical `COMPILER_PATH` and the fully selected
+  bundle as its descendant allowlist. Production preflight binds the helper, scratch mount and every
+  descendant into signed executor evidence; old request schemas and ambient helper discovery fail;
 - the Linux production backend now pins and rechecks exact bubblewrap and launcher ELF/version
   identities, creates a rootless descriptor-only filesystem, unshares mount/PID/network and all
   other namespaces, drops capabilities, clears the environment and disconnects stdin. Its closed
@@ -152,6 +158,12 @@ No test result above is evidence for Phase 1B deployability or for a Phase 2+ ru
   backing metadata is not rewritten, and the real bubblewrap test observes this view from inside
   the namespace. The execution observation binds exact canonical roots and the enforced semantic
   set;
+- the production runtime tree carries the exact compiler dynamic-library closure, pinned Host
+  `lib/rustlib/<build-triple>` subtree, required system runtime libraries, native startup objects,
+  compiler runtime archives and linker support files. The selected Host linker/helper bundle is
+  mounted under exact logical tool ids; Host build scripts/proc macros resolve their pinned `std`
+  from the copied Host subtree while target units retain the explicit target sysroot. Every copied
+  file is runtime-tree-digest-bound and ambient Host linker/filesystem discovery remains invisible;
 - a closed target-facts probe request now binds the exact build-input request, Host closure, policy,
   retained rustc digest, target/custom-spec logical mount, cleared environment and fixed
   `rustc --print cfg --target` invocation. For built-in targets, the local Linux runner consumes the
@@ -178,11 +190,13 @@ No test result above is evidence for Phase 1B deployability or for a Phase 2+ ru
 - final Host artifact selection is a closed package plus `lib`/named `bin`/`example`/`test`/`bench`
   value, has its own domain digest and is a required HostBuildInputClosure canonical-record item;
   invalid names, missing records and selector drift fail before planning;
-- standalone and final planning requests derive their exact manifest, explicit Cargo config,
-  Host closure aggregate, target, profile, selector, panic strategy, Rust/Cargo 1.97.1 identity,
-  isolated logical environment and fixed `--locked --offline --unit-graph -Z unstable-options`
-  argv from the normalized closure. The unit-graph-v1 envelope is closed, bounded, context
-  checked, request-bound, acyclic and mutation detecting;
+- schema-3 standalone and final planning requests derive their exact manifest, explicit Cargo
+  config, Host closure aggregate, target, profile, selector, panic strategy, Rust/Cargo 1.97.1
+  identity, isolated logical environment and fixed `--locked --offline --unit-graph -Z
+  unstable-options` argv from the normalized closure. A selected Host-linker bundle adds only its
+  exact logical build-triple linker configuration and `COMPILER_PATH`; schema 2 is rejected. The
+  unit-graph-v1 envelope is closed, bounded, context checked, request-bound, acyclic and mutation
+  detecting;
   stable Cargo's unavailable interface is an explicit unsupported result and never falls back to
   `cargo metadata` or executes build.rs;
 - verified raw unit graphs normalize into canonical `HostCargoUnitGraph` only when the Host input

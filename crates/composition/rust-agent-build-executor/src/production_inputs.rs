@@ -48,6 +48,8 @@ pub enum ProductionInputFileRole {
     CredentialHelper,
     FetchTlsCaBundle,
     BuildExecutable,
+    HostLinker,
+    HostLinkerHelper,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
@@ -218,11 +220,11 @@ struct VerifiedTree {
 
 #[derive(Debug, Error)]
 pub enum ProductionInputIdentityError {
-    #[error("production input identity JSON exceeds the schema-v2 byte limit")]
+    #[error("production input identity JSON exceeds the schema-v3 byte limit")]
     JsonTooLarge,
     #[error("production input identity JSON is invalid: {0}")]
     Json(#[from] serde_json::Error),
-    #[error("unsupported production input identity schema {0}; expected 2")]
+    #[error("unsupported production input identity schema {0}; expected 3")]
     UnsupportedSchema(u32),
     #[error("production input identity request is malformed: {0}")]
     InvalidRequest(&'static str),
@@ -412,7 +414,7 @@ impl ProductionInputIdentityRequest {
 
     fn recompute_digest(&self) -> Result<String, ProductionInputIdentityError> {
         Ok(hex::encode(canonical::domain_hash(
-            b"rust-agent-production-input-identity-request-v2\0",
+            b"rust-agent-production-input-identity-request-v3\0",
             &RequestProjection {
                 schema: self.schema,
                 scope: self.scope,
@@ -425,7 +427,7 @@ impl ProductionInputIdentityRequest {
     }
 
     fn verify_self(&self) -> Result<(), ProductionInputIdentityError> {
-        if self.schema != 2 {
+        if self.schema != 3 {
             return Err(ProductionInputIdentityError::UnsupportedSchema(self.schema));
         }
         if !is_digest(&self.build_execution_policy_digest)
@@ -478,10 +480,14 @@ impl ProductionInputIdentityRequest {
             ProductionInputPreflightScope::NetworkedFetch => {
                 if self.host_build_input_closure_digest.is_some()
                     || !has_only_one_sysroot(&self.trees)
-                    || self
-                        .files
-                        .iter()
-                        .any(|file| file.role == ProductionInputFileRole::BuildExecutable)
+                    || self.files.iter().any(|file| {
+                        matches!(
+                            file.role,
+                            ProductionInputFileRole::BuildExecutable
+                                | ProductionInputFileRole::HostLinker
+                                | ProductionInputFileRole::HostLinkerHelper
+                        )
+                    })
                     || self
                         .files
                         .iter()
@@ -509,6 +515,8 @@ impl ProductionInputIdentityRequest {
                             ProductionInputFileRole::CredentialHelper
                                 | ProductionInputFileRole::FetchTlsCaBundle
                                 | ProductionInputFileRole::BuildExecutable
+                                | ProductionInputFileRole::HostLinker
+                                | ProductionInputFileRole::HostLinkerHelper
                         )
                     })
                 {
@@ -518,6 +526,16 @@ impl ProductionInputIdentityRequest {
                 }
             }
             ProductionInputPreflightScope::Build => {
+                let host_linkers = self
+                    .files
+                    .iter()
+                    .filter(|file| file.role == ProductionInputFileRole::HostLinker)
+                    .count();
+                let host_linker_helpers = self
+                    .files
+                    .iter()
+                    .filter(|file| file.role == ProductionInputFileRole::HostLinkerHelper)
+                    .count();
                 if self.host_build_input_closure_digest.is_none()
                     || self.files.iter().any(|file| {
                         matches!(
@@ -532,6 +550,8 @@ impl ProductionInputIdentityRequest {
                         .filter(|tree| tree.role == ProductionInputTreeRole::RustSysroot)
                         .count()
                         != 1
+                    || host_linkers > 1
+                    || (host_linker_helpers > 0 && host_linkers != 1)
                 {
                     return Err(ProductionInputIdentityError::InvalidRequest("build scope"));
                 }
@@ -1506,8 +1526,20 @@ fn build_request(
             .ok_or(ProductionInputIdentityError::InvalidRequest(
                 "unresolved executable",
             ))?;
-        files.push(tool_file(
+        let role = policy_data.host_linker.as_ref().map_or(
             ProductionInputFileRole::BuildExecutable,
+            |bundle| {
+                if bundle.executable == *id {
+                    ProductionInputFileRole::HostLinker
+                } else if bundle.helpers.contains(id) {
+                    ProductionInputFileRole::HostLinkerHelper
+                } else {
+                    ProductionInputFileRole::BuildExecutable
+                }
+            },
+        );
+        files.push(tool_file(
+            role,
             &executable.id,
             &executable.path,
             &executable.sha256,
@@ -1578,7 +1610,7 @@ fn finish_request(
     files.sort_by(|left, right| file_key(left).cmp(&file_key(right)));
     trees.sort_by(|left, right| tree_key(left).cmp(&tree_key(right)));
     let mut request = ProductionInputIdentityRequest {
-        schema: 2,
+        schema: 3,
         scope,
         build_execution_policy_digest: policy_digest.into(),
         host_build_input_closure_digest: closure_digest.map(str::to_owned),
@@ -1653,7 +1685,9 @@ fn validate_file(file: &ProductionInputFile) -> Result<(), ProductionInputIdenti
         ProductionInputFileRole::CredentialHelper | ProductionInputFileRole::FetchTlsCaBundle => {
             None
         }
-        ProductionInputFileRole::BuildExecutable => Some(&["--version"]),
+        ProductionInputFileRole::BuildExecutable
+        | ProductionInputFileRole::HostLinker
+        | ProductionInputFileRole::HostLinkerHelper => Some(&["--version"]),
     };
     match (&file.version_probe, expected_arguments) {
         (None, None) => Ok(()),
@@ -1839,7 +1873,7 @@ mod tests {
         fs::write(selected_read_input.join("sdk.h"), b"sdk-fixture").unwrap();
 
         let policy = ProductionBuildExecutionPolicy {
-            schema: 2,
+            schema: 3,
             id: "fixture-policy".into(),
             host: "cfg(target_os = \"linux\")".into(),
             backend: ProductionSandboxBackend::LinuxLandlockSeccomp,
@@ -1912,6 +1946,7 @@ mod tests {
                     version: "unused fixture-v1".into(),
                 },
             ],
+            host_linker: None,
             environment: vec![ProductionEnvironment {
                 id: "vendor-sdk-channel".into(),
                 variable: "VENDOR_SDK_CHANNEL".into(),
@@ -1946,6 +1981,53 @@ mod tests {
             &fixture.requirements,
             Some(&"a".repeat(64)),
         )?)
+    }
+
+    #[test]
+    fn host_linker_helper_preflight_roles_are_closed_and_schema_three() {
+        let fixture = fixture();
+        let mut policy = fixture.policy.policy().clone();
+        policy.host_linker = Some(crate::ProductionHostLinker {
+            executable: "target-linker".into(),
+            helpers: vec!["unused-codegen".into()],
+        });
+        let policy = policy.normalize().unwrap();
+        let requirements = BuildRequirements {
+            executables: BTreeSet::from(["target-linker".into(), "unused-codegen".into()]),
+            ..BuildRequirements::default()
+        };
+        let request = build_request(&policy, &requirements, Some(&"a".repeat(64))).unwrap();
+        assert_eq!(request.schema, 3);
+        assert!(request.files.iter().any(|file| {
+            file.id == "target-linker" && file.role == ProductionInputFileRole::HostLinker
+        }));
+        assert!(request.files.iter().any(|file| {
+            file.id == "unused-codegen" && file.role == ProductionInputFileRole::HostLinkerHelper
+        }));
+
+        let mut old_schema = request.clone();
+        old_schema.schema = 2;
+        old_schema.digest = old_schema.recompute_digest().unwrap();
+        assert!(matches!(
+            old_schema.verify_self(),
+            Err(ProductionInputIdentityError::UnsupportedSchema(2))
+        ));
+
+        let mut helper_without_linker = request;
+        helper_without_linker
+            .files
+            .iter_mut()
+            .find(|file| file.role == ProductionInputFileRole::HostLinker)
+            .unwrap()
+            .role = ProductionInputFileRole::BuildExecutable;
+        helper_without_linker
+            .files
+            .sort_by(|left, right| file_key(left).cmp(&file_key(right)));
+        helper_without_linker.digest = helper_without_linker.recompute_digest().unwrap();
+        assert!(matches!(
+            helper_without_linker.verify_self(),
+            Err(ProductionInputIdentityError::InvalidRequest("build scope"))
+        ));
     }
 
     fn successful_observation(

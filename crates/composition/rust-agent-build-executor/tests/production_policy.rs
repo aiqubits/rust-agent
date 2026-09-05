@@ -4,9 +4,9 @@ use rust_agent_build_executor::{
     BuildArtifactSelector, BuildArtifactTarget, BuildEnforcementContext, BuildPanicStrategy,
     DerivedExecutablePolicy, ProductionAttestationPolicy, ProductionBuildExecutionPolicy,
     ProductionBuildPolicyError, ProductionEnvironment, ProductionExecutable, ProductionFetchPolicy,
-    ProductionFetchRedirectPolicy, ProductionFileIdentity, ProductionReadInput,
-    ProductionSandboxBackend, ProductionToolIdentity, ProductionToolchain, ProductionTreeIdentity,
-    SigningHelper, TrustedReviewerPolicy, TrustedSigner,
+    ProductionFetchRedirectPolicy, ProductionFileIdentity, ProductionHostLinker,
+    ProductionReadInput, ProductionSandboxBackend, ProductionToolIdentity, ProductionToolchain,
+    ProductionTreeIdentity, SigningHelper, TrustedReviewerPolicy, TrustedSigner,
 };
 use rust_agent_composition::metadata::BuildRequirements;
 
@@ -16,7 +16,7 @@ fn digest(byte: &str) -> String {
 
 fn policy() -> ProductionBuildExecutionPolicy {
     ProductionBuildExecutionPolicy {
-        schema: 2,
+        schema: 3,
         id: "ci-linux-hermetic-v1".into(),
         host: "cfg(target_os = \"linux\")".into(),
         backend: ProductionSandboxBackend::LinuxLandlockSeccomp,
@@ -106,7 +106,17 @@ fn policy() -> ProductionBuildExecutionPolicy {
                 sha256: digest("b"),
                 version: "unused-codegen fixture-v1".into(),
             },
+            ProductionExecutable {
+                id: "host-linker-helper".into(),
+                path: "/runner-a/sdk/bin/host-linker-helper".into(),
+                sha256: digest("c"),
+                version: "host-linker-helper fixture-v1".into(),
+            },
         ],
+        host_linker: Some(ProductionHostLinker {
+            executable: "target-linker".into(),
+            helpers: vec!["host-linker-helper".into()],
+        }),
         environment: vec![
             ProductionEnvironment {
                 id: "unused-channel".into(),
@@ -128,7 +138,7 @@ fn policy() -> ProductionBuildExecutionPolicy {
 
 fn requirements() -> BuildRequirements {
     BuildRequirements {
-        executables: BTreeSet::from(["target-linker".into()]),
+        executables: BTreeSet::from(["host-linker-helper".into(), "target-linker".into()]),
         read_inputs: BTreeSet::from(["target-sdk".into()]),
         environment: BTreeSet::from(["vendor-sdk-channel".into()]),
     }
@@ -171,7 +181,12 @@ fn policy_and_enforcement_identity_have_separate_stable_domains() {
     assert!(!encoded.contains("ci-runner-2026"));
     assert!(!encoded.contains("cargo-feature-semantics-v1"));
     assert!(encoded.contains("/rust-agent/tools/target-linker"));
-    assert_eq!(identity.executables.len(), 1);
+    assert_eq!(identity.executables.len(), 2);
+    assert_eq!(identity.host_linker.as_ref().unwrap().helpers.len(), 1);
+    assert_eq!(
+        identity.deterministic_environment.get("COMPILER_PATH"),
+        Some(&"/rust-agent/tools".into())
+    );
     assert_eq!(identity.read_inputs.len(), 1);
     assert_eq!(identity.environment.len(), 1);
 
@@ -257,13 +272,13 @@ fn normalization_is_order_independent_and_schema_digest_is_frozen() {
 
     assert_eq!(
         normalized.full_digest(),
-        "e5d8e853f6d1bd816f721f9ad7aca0c513cc026c6ca1d12bd4a8d7b97fcaca22"
+        "ceb50e62bca590cf00851599eed1e85d8270f56af73e006deac6e72cbc5f89ab"
     );
     assert_eq!(
         normalized
             .enforcement_identity_digest(&requirements(), &context())
             .unwrap(),
-        "25c785d10162a695fa4fa4ce0ec18b8f0dcefeeeff91c166d305f10b1b1ea1b6"
+        "3f4d98e70d06b4bce6f70d53ea61ea10c1d17e22e71d75af4f53d97137a07efd"
     );
 }
 
@@ -286,6 +301,85 @@ fn requirement_resolution_is_typed_and_minimal() {
         Err(ProductionBuildPolicyError::Requirement(
             rust_agent_build_executor::BuildPolicyError::MissingMapping { .. }
         ))
+    ));
+}
+
+#[test]
+fn host_linker_bundle_is_closed_selected_and_path_free() {
+    let mut old_schema = policy();
+    old_schema.schema = 2;
+    assert!(matches!(
+        old_schema.normalize(),
+        Err(ProductionBuildPolicyError::UnsupportedSchema(2))
+    ));
+
+    let mut unordered = policy();
+    unordered.host_linker.as_mut().unwrap().helpers =
+        vec!["unused-codegen".into(), "host-linker-helper".into()];
+    let requirements = BuildRequirements {
+        executables: BTreeSet::from([
+            "host-linker-helper".into(),
+            "target-linker".into(),
+            "unused-codegen".into(),
+        ]),
+        ..BuildRequirements::default()
+    };
+    let normalized = unordered.normalize().unwrap();
+    assert_eq!(
+        normalized.policy().host_linker.as_ref().unwrap().helpers,
+        ["host-linker-helper", "unused-codegen"]
+    );
+    let identity = normalized
+        .enforcement_identity(&requirements, &context())
+        .unwrap();
+    let host_linker = identity.host_linker.unwrap();
+    assert_eq!(
+        host_linker.cargo_config,
+        "target.x86_64-unknown-linux-gnu.linker=\"/rust-agent/tools/target-linker\""
+    );
+    assert_eq!(host_linker.compiler_path, "/rust-agent/tools");
+    assert!(
+        !serde_json::to_string(&host_linker)
+            .unwrap()
+            .contains("/runner-a/")
+    );
+
+    let partial = BuildRequirements {
+        executables: BTreeSet::from(["target-linker".into()]),
+        ..BuildRequirements::default()
+    };
+    assert!(matches!(
+        normalized.enforcement_identity(&partial, &context()),
+        Err(ProductionBuildPolicyError::PartialHostLinkerSelection)
+    ));
+
+    let unselected = normalized
+        .enforcement_identity(&BuildRequirements::default(), &context())
+        .unwrap();
+    assert!(unselected.host_linker.is_none());
+    assert!(
+        !unselected
+            .deterministic_environment
+            .contains_key("COMPILER_PATH")
+    );
+
+    let mut duplicate = policy();
+    duplicate
+        .host_linker
+        .as_mut()
+        .unwrap()
+        .helpers
+        .push("host-linker-helper".into());
+    assert!(matches!(
+        duplicate.normalize(),
+        Err(ProductionBuildPolicyError::InvalidHostLinker(_))
+    ));
+
+    let mut missing = policy();
+    missing.host_linker.as_mut().unwrap().helpers = vec!["missing-helper".into()];
+    assert!(matches!(
+        missing.normalize(),
+        Err(ProductionBuildPolicyError::InvalidHostLinker(_))
     ));
 }
 
@@ -436,7 +530,7 @@ fn attestation_trust_graph_and_closed_toml_fail_closed() {
         .unwrap()
         .normalize()
         .unwrap();
-    let unknown = encoded.replacen("schema = 2", "schema = 2\nambient-home = true", 1);
+    let unknown = encoded.replacen("schema = 3", "schema = 3\nambient-home = true", 1);
     assert!(matches!(
         ProductionBuildExecutionPolicy::from_toml(&unknown),
         Err(ProductionBuildPolicyError::Toml(_))

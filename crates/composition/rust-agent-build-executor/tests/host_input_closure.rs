@@ -34,7 +34,7 @@ fn digest(byte: char) -> String {
 
 fn policy() -> NormalizedProductionBuildPolicy {
     ProductionBuildExecutionPolicy {
-        schema: 2,
+        schema: 3,
         id: "ci-linux-hermetic-v1".into(),
         host: "cfg(target_os = \"linux\")".into(),
         backend: ProductionSandboxBackend::LinuxLandlockSeccomp,
@@ -81,6 +81,7 @@ fn policy() -> NormalizedProductionBuildPolicy {
         },
         read_inputs: vec![],
         executables: vec![],
+        host_linker: None,
         environment: vec![],
         derived_executable: DerivedExecutablePolicy {
             roots: vec!["target".into()],
@@ -334,7 +335,7 @@ fn closure_digest_is_order_independent_and_stage_chain_is_exact() {
     assert_eq!(normalized.items(), reordered.items());
     assert_eq!(
         normalized.digest(),
-        "5df542d0b718d3412bb6d7e4b7dc8110c2b10e917f6d9e9d69c52e2cf13e7c4b"
+        "8962fa43c6bdced58d441a343bb55898f374e2f51b01bbf1e42026c5d9f5a448"
     );
 
     let pre = normalized

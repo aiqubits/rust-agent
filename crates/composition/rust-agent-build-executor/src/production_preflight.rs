@@ -1,22 +1,24 @@
 use std::{collections::BTreeMap, str};
 
+use tempfile::TempDir;
 use thiserror::Error;
 
 use crate::{
     LinuxSandboxCommand, LinuxSandboxError, LinuxSandboxExecutionObservation,
-    LinuxSandboxNetworkPolicy, LinuxSandboxReadOnlyMount, NormalizedHostBuildInputClosure,
-    ProductionInputFile, ProductionInputFileRole, ProductionInputIdentityError,
-    ProductionInputIdentityObservation, ProductionInputPreflightScope,
-    ProductionTargetFactsProbeObservation, ProductionVersionProbeResult,
-    SnapshotMaterializationError, ValidatedProductionInputIdentityObservation,
-    ValidatedProductionTargetFactsProbeObservation, VerifiedHostClosureSnapshot,
-    VerifiedLinuxSandboxBackend, VerifiedProductionInputs,
+    LinuxSandboxNetworkPolicy, LinuxSandboxReadOnlyMount, LinuxSandboxWritableMount,
+    NormalizedHostBuildInputClosure, ProductionInputFile, ProductionInputFileRole,
+    ProductionInputIdentityError, ProductionInputIdentityObservation,
+    ProductionInputPreflightScope, ProductionTargetFactsProbeObservation,
+    ProductionVersionProbeResult, SnapshotMaterializationError,
+    ValidatedProductionInputIdentityObservation, ValidatedProductionTargetFactsProbeObservation,
+    VerifiedHostClosureSnapshot, VerifiedLinuxSandboxBackend, VerifiedProductionInputs,
     production_inputs::target_facts_from_probe,
 };
 
 const PREFLIGHT_TIMEOUT_MILLISECONDS: u64 = 30_000;
 const LOGICAL_RUSTC: &str = "/rust-agent/toolchain/bin/rustc";
 const LOGICAL_EMPTY_HOME: &str = "/rust-agent/empty-home";
+const LOGICAL_HOST_LINKER_PROBE_TMP: &str = "/rust-agent/probe-tmp";
 
 #[derive(Debug)]
 pub struct TrustedProductionPreflightEvidence {
@@ -74,18 +76,48 @@ pub fn execute_trusted_production_preflight(
             .ok_or(TrustedProductionPreflightError::InputMismatch)?;
         let executable = logical_executable(file)?;
         let cargo_probe = file.role == ProductionInputFileRole::Cargo;
+        let host_linker_helper_probe = file.role == ProductionInputFileRole::HostLinkerHelper;
+        let allowed_executables = if host_linker_helper_probe {
+            host_linker_bundle_executables(inputs)
+        } else {
+            vec![executable.clone()]
+        };
+        let environment = if cargo_probe {
+            BTreeMap::from([("HOME".into(), LOGICAL_EMPTY_HOME.into())])
+        } else if host_linker_helper_probe {
+            BTreeMap::from([("COMPILER_PATH".into(), "/rust-agent/tools".into())])
+        } else {
+            BTreeMap::new()
+        };
+        let probe_temp = host_linker_helper_probe
+            .then(TempDir::new)
+            .transpose()
+            .map_err(LinuxSandboxError::from)?;
+        let writable_mounts = probe_temp
+            .as_ref()
+            .map(|temp| {
+                LinuxSandboxWritableMount::open(
+                    "host-linker-probe-tmp",
+                    temp.path(),
+                    LOGICAL_HOST_LINKER_PROBE_TMP,
+                    false,
+                )
+            })
+            .transpose()?
+            .into_iter()
+            .collect();
         let execution = backend.run_with_output(
             &LinuxSandboxCommand {
                 schema: 3,
                 executable: executable.clone(),
                 arguments: probe.arguments.clone(),
-                environment: if cargo_probe {
-                    BTreeMap::from([("HOME".into(), LOGICAL_EMPTY_HOME.into())])
+                environment,
+                working_directory: if host_linker_helper_probe {
+                    LOGICAL_HOST_LINKER_PROBE_TMP.into()
                 } else {
-                    BTreeMap::new()
+                    "/".into()
                 },
-                working_directory: "/".into(),
-                allowed_executables: vec![executable],
+                allowed_executables,
                 anonymous_socketpairs: vec![],
                 read_only_empty_directories: if cargo_probe {
                     vec![LOGICAL_EMPTY_HOME.into()]
@@ -96,7 +128,7 @@ pub fn execute_trusted_production_preflight(
                 timeout_milliseconds: PREFLIGHT_TIMEOUT_MILLISECONDS,
             },
             LinuxSandboxReadOnlyMount::production_inputs(inputs)?,
-            vec![],
+            writable_mounts,
         )?;
         require_success(&file.id, &execution)?;
         probe_results.push(ProductionVersionProbeResult {
@@ -193,11 +225,30 @@ fn logical_executable(
     match file.role {
         ProductionInputFileRole::Cargo => Ok("/rust-agent/toolchain/bin/cargo".into()),
         ProductionInputFileRole::Rustc => Ok(LOGICAL_RUSTC.into()),
-        ProductionInputFileRole::BuildExecutable => Ok(format!("/rust-agent/tools/{}", file.id)),
+        ProductionInputFileRole::BuildExecutable
+        | ProductionInputFileRole::HostLinker
+        | ProductionInputFileRole::HostLinkerHelper => Ok(format!("/rust-agent/tools/{}", file.id)),
         ProductionInputFileRole::CredentialHelper | ProductionInputFileRole::FetchTlsCaBundle => {
             Err(TrustedProductionPreflightError::InputMismatch)
         }
     }
+}
+
+fn host_linker_bundle_executables(inputs: &VerifiedProductionInputs) -> Vec<String> {
+    let mut executables = inputs
+        .request()
+        .files
+        .iter()
+        .filter(|file| {
+            matches!(
+                file.role,
+                ProductionInputFileRole::HostLinker | ProductionInputFileRole::HostLinkerHelper
+            )
+        })
+        .map(|file| format!("/rust-agent/tools/{}", file.id))
+        .collect::<Vec<_>>();
+    executables.sort();
+    executables
 }
 
 fn require_success(

@@ -72,8 +72,9 @@ the runtime-tree digest; undeclared Host files remain invisible.
 
 ## Acceptance tests
 
-- `production_policy::tests::host_linker_bundle_is_closed_selected_and_path_free`
+- `production_policy::host_linker_bundle_is_closed_selected_and_path_free`
 - `cargo_planner::tests::schema_three_binds_the_exact_host_linker_configuration`
+- `production_inputs::tests::host_linker_helper_preflight_roles_are_closed_and_schema_three`
 - `production_cargo_fetch::production_host_pre_build_post_pipeline_is_signed_and_reverified`
 - `production_cargo_fetch::production_standalone_pipeline_is_signed_and_reverified`
 - `production_cargo_fetch::production_wasm_pipeline_sandboxes_and_attests_the_complete_bundle`

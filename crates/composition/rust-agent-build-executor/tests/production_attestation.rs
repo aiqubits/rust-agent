@@ -365,7 +365,7 @@ fn main() {
         prefix_remap_schema: 1,
     };
     let policy = ProductionBuildExecutionPolicy {
-        schema: 2,
+        schema: 3,
         id: "phase-one-b-test-policy".into(),
         host: "cfg(target_os = \"linux\")".into(),
         backend: ProductionSandboxBackend::LinuxLandlockSeccomp,
@@ -412,6 +412,7 @@ fn main() {
         },
         read_inputs: vec![],
         executables: vec![],
+        host_linker: None,
         environment: vec![],
         derived_executable: DerivedExecutablePolicy {
             roots: vec!["target".into()],

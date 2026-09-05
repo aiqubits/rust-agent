@@ -629,7 +629,7 @@ fn run_production_build(args: BuildArgs) -> Result<()> {
         serde_json::from_slice(&fs::read(canonical_existing(&fetch_layout_path)?)?)?;
     let production_inputs = preflight_production_build_inputs(&policy, &closure)?;
     let planner_request = CargoPlannerRequest {
-        schema: 2,
+        schema: 3,
         root: CargoPlannerGraphRoot::EmittedStandalone,
     }
     .normalize(&policy, &closure)?;
@@ -785,12 +785,12 @@ fn run_host_build(args: HostBuildArgs) -> Result<()> {
         serde_json::from_slice(&fs::read(canonical_existing(&args.fetch_cache_layout)?)?)?;
     let production_inputs = preflight_production_build_inputs(&policy, &closure)?;
     let standalone_planner_request = CargoPlannerRequest {
-        schema: 2,
+        schema: 3,
         root: CargoPlannerGraphRoot::EmittedStandalone,
     }
     .normalize(&policy, &closure)?;
     let final_planner_request = CargoPlannerRequest {
-        schema: 2,
+        schema: 3,
         root: CargoPlannerGraphRoot::FinalHost,
     }
     .normalize(&policy, &closure)?;
@@ -1010,12 +1010,12 @@ fn run_verify_integration_pre(args: VerifyIntegrationArgs) -> Result<()> {
     )?)?;
     let production_inputs = preflight_production_build_inputs(&policy, &closure)?;
     let standalone_planner_request = CargoPlannerRequest {
-        schema: 2,
+        schema: 3,
         root: CargoPlannerGraphRoot::EmittedStandalone,
     }
     .normalize(&policy, &closure)?;
     let final_planner_request = CargoPlannerRequest {
-        schema: 2,
+        schema: 3,
         root: CargoPlannerGraphRoot::FinalHost,
     }
     .normalize(&policy, &closure)?;
@@ -1184,12 +1184,12 @@ fn run_verify_integration_post(args: VerifyIntegrationArgs) -> Result<()> {
     )?)?;
     let production_inputs = preflight_production_build_inputs(&policy, &closure)?;
     let standalone_planner_request = CargoPlannerRequest {
-        schema: 2,
+        schema: 3,
         root: CargoPlannerGraphRoot::EmittedStandalone,
     }
     .normalize(&policy, &closure)?;
     let final_planner_request = CargoPlannerRequest {
-        schema: 2,
+        schema: 3,
         root: CargoPlannerGraphRoot::FinalHost,
     }
     .normalize(&policy, &closure)?;

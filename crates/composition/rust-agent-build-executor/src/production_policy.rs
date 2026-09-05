@@ -32,6 +32,8 @@ pub struct ProductionBuildExecutionPolicy {
     pub read_inputs: Vec<ProductionReadInput>,
     #[serde(rename = "executable", default)]
     pub executables: Vec<ProductionExecutable>,
+    #[serde(rename = "host-linker", default)]
+    pub host_linker: Option<ProductionHostLinker>,
     #[serde(rename = "environment", default)]
     pub environment: Vec<ProductionEnvironment>,
     #[serde(rename = "derived-executable")]
@@ -150,6 +152,14 @@ pub struct ProductionExecutable {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
+pub struct ProductionHostLinker {
+    pub executable: String,
+    #[serde(default)]
+    pub helpers: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct ProductionEnvironment {
     pub id: String,
     pub variable: String,
@@ -183,6 +193,8 @@ pub struct BuildEnforcementIdentity {
     pub context: BuildEnforcementContext,
     pub toolchain: BuildEnforcementToolchain,
     pub executables: Vec<BuildEnforcementExecutable>,
+    #[serde(rename = "host-linker", skip_serializing_if = "Option::is_none")]
+    pub host_linker: Option<BuildEnforcementHostLinker>,
     #[serde(rename = "read-inputs")]
     pub read_inputs: Vec<BuildEnforcementReadInput>,
     pub environment: Vec<BuildEnforcementEnvironment>,
@@ -190,6 +202,17 @@ pub struct BuildEnforcementIdentity {
     pub derived_executable: DerivedExecutablePolicy,
     #[serde(rename = "deterministic-environment")]
     pub deterministic_environment: BTreeMap<String, String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct BuildEnforcementHostLinker {
+    pub executable: BuildEnforcementExecutable,
+    pub helpers: Vec<BuildEnforcementExecutable>,
+    #[serde(rename = "cargo-config")]
+    pub cargo_config: String,
+    #[serde(rename = "compiler-path")]
+    pub compiler_path: String,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -282,7 +305,7 @@ pub struct BuildEnforcementEnvironment {
 pub enum ProductionBuildPolicyError {
     #[error("production build policy TOML is invalid: {0}")]
     Toml(#[from] toml::de::Error),
-    #[error("unsupported production build policy schema {0}; expected 2")]
+    #[error("unsupported production build policy schema {0}; expected 3")]
     UnsupportedSchema(u32),
     #[error("invalid production policy id `{0}`")]
     InvalidPolicyId(String),
@@ -330,6 +353,10 @@ pub enum ProductionBuildPolicyError {
     InvalidReviewerSet,
     #[error("derived executables must use exactly root `target` and inherit the sandbox")]
     InvalidDerivedExecutablePolicy,
+    #[error("host linker bundle is invalid: {0}")]
+    InvalidHostLinker(&'static str),
+    #[error("host linker executable bundle must be selected atomically")]
+    PartialHostLinkerSelection,
     #[error("unsupported build enforcement context schema {0}; expected 1")]
     UnsupportedEnforcementContextSchema(u32),
     #[error("invalid build enforcement context field `{0}`")]
@@ -348,7 +375,7 @@ impl ProductionBuildExecutionPolicy {
     }
 
     pub fn normalize(&self) -> Result<NormalizedProductionBuildPolicy, ProductionBuildPolicyError> {
-        if self.schema != 2 {
+        if self.schema != 3 {
             return Err(ProductionBuildPolicyError::UnsupportedSchema(self.schema));
         }
         validate_id("policy", &self.id)
@@ -373,6 +400,9 @@ impl ProductionBuildExecutionPolicy {
         policy
             .executables
             .sort_by(|left, right| left.id.cmp(&right.id));
+        if let Some(host_linker) = &mut policy.host_linker {
+            host_linker.helpers.sort();
+        }
         policy
             .read_inputs
             .sort_by(|left, right| left.id.cmp(&right.id));
@@ -405,6 +435,7 @@ impl ProductionBuildExecutionPolicy {
                 });
             }
         }
+        validate_host_linker(policy.host_linker.as_ref(), &executable_ids)?;
         let mut read_input_ids = BTreeSet::new();
         for item in &policy.read_inputs {
             validate_id("read-input", &item.id)?;
@@ -453,7 +484,7 @@ impl ProductionBuildExecutionPolicy {
         reject_cross_kind_duplicates(&executable_ids, &read_input_ids, &environment_ids)?;
 
         let full_digest = hex::encode(canonical::domain_hash(
-            b"rust-agent-build-execution-policy-v2\0",
+            b"rust-agent-build-execution-policy-v3\0",
             &policy,
         )?);
         Ok(NormalizedProductionBuildPolicy {
@@ -500,18 +531,42 @@ impl NormalizedProductionBuildPolicy {
     ) -> Result<BuildEnforcementIdentity, ProductionBuildPolicyError> {
         self.authorize(requirements)?;
         context.validate()?;
-        let executables = self
+        let executables: Vec<_> = self
             .policy
             .executables
             .iter()
             .filter(|item| requirements.executables.contains(&item.id))
-            .map(|item| BuildEnforcementExecutable {
-                id: item.id.clone(),
-                sha256: item.sha256.clone(),
-                version: item.version.clone(),
-                logical_mount: format!("/rust-agent/tools/{}", item.id),
-            })
+            .map(executable_enforcement_identity)
             .collect();
+        let selected_host_linker = self.selected_host_linker(requirements)?;
+        let host_linker = selected_host_linker.map(|bundle| {
+            let executable = self
+                .policy
+                .executables
+                .iter()
+                .find(|item| item.id == bundle.executable)
+                .expect("normalized host linker executable exists");
+            BuildEnforcementHostLinker {
+                executable: executable_enforcement_identity(executable),
+                helpers: bundle
+                    .helpers
+                    .iter()
+                    .map(|id| {
+                        self.policy
+                            .executables
+                            .iter()
+                            .find(|item| item.id == *id)
+                            .map(executable_enforcement_identity)
+                            .expect("normalized host linker helper exists")
+                    })
+                    .collect(),
+                cargo_config: format!(
+                    "target.{}.linker=\"/rust-agent/tools/{}\"",
+                    context.build_triple, bundle.executable
+                ),
+                compiler_path: "/rust-agent/tools".into(),
+            }
+        });
         let read_inputs = self
             .policy
             .read_inputs
@@ -535,7 +590,7 @@ impl NormalizedProductionBuildPolicy {
             })
             .collect();
         Ok(BuildEnforcementIdentity {
-            schema: 1,
+            schema: 2,
             backend: self.policy.backend,
             backend_semantic_version: 3,
             context: context.clone(),
@@ -549,14 +604,20 @@ impl NormalizedProductionBuildPolicy {
                 },
             },
             executables,
+            host_linker,
             read_inputs,
             environment,
             derived_executable: self.policy.derived_executable.clone(),
-            deterministic_environment: BTreeMap::from([
+            deterministic_environment: [
                 ("LANG".into(), "C.UTF-8".into()),
                 ("LC_ALL".into(), "C.UTF-8".into()),
                 ("SOURCE_DATE_EPOCH".into(), "0".into()),
-            ]),
+            ]
+            .into_iter()
+            .chain(
+                selected_host_linker.map(|_| ("COMPILER_PATH".into(), "/rust-agent/tools".into())),
+            )
+            .collect(),
         })
     }
 
@@ -599,14 +660,34 @@ impl NormalizedProductionBuildPolicy {
                 &self.read_input_ids,
             )?;
         }
+        self.selected_host_linker(requirements)?;
         Ok(())
+    }
+
+    pub fn selected_host_linker(
+        &self,
+        requirements: &BuildRequirements,
+    ) -> Result<Option<&ProductionHostLinker>, ProductionBuildPolicyError> {
+        let Some(bundle) = self.policy.host_linker.as_ref() else {
+            return Ok(None);
+        };
+        let selected = std::iter::once(&bundle.executable)
+            .chain(&bundle.helpers)
+            .filter(|id| requirements.executables.contains(*id))
+            .count();
+        let total = 1 + bundle.helpers.len();
+        match selected {
+            0 => Ok(None),
+            count if count == total => Ok(Some(bundle)),
+            _ => Err(ProductionBuildPolicyError::PartialHostLinkerSelection),
+        }
     }
 }
 
 impl BuildEnforcementIdentity {
     pub fn digest(&self) -> Result<String, ProductionBuildPolicyError> {
         Ok(hex::encode(canonical::domain_hash(
-            b"rust-agent-build-enforcement-identity-v1\0",
+            b"rust-agent-build-enforcement-identity-v2\0",
             self,
         )?))
     }
@@ -847,6 +928,44 @@ fn reject_cross_kind_duplicates(
     Ok(())
 }
 
+fn validate_host_linker(
+    host_linker: Option<&ProductionHostLinker>,
+    executable_ids: &BTreeSet<String>,
+) -> Result<(), ProductionBuildPolicyError> {
+    let Some(host_linker) = host_linker else {
+        return Ok(());
+    };
+    validate_id("host linker executable", &host_linker.executable)?;
+    if !executable_ids.contains(&host_linker.executable) {
+        return Err(ProductionBuildPolicyError::InvalidHostLinker(
+            "linker executable is not declared",
+        ));
+    }
+    if host_linker
+        .helpers
+        .windows(2)
+        .any(|pair| pair[0] == pair[1])
+    {
+        return Err(ProductionBuildPolicyError::InvalidHostLinker(
+            "helper executable ids are not unique",
+        ));
+    }
+    for helper in &host_linker.helpers {
+        validate_id("host linker helper", helper)?;
+        if helper == &host_linker.executable {
+            return Err(ProductionBuildPolicyError::InvalidHostLinker(
+                "linker executable is also listed as a helper",
+            ));
+        }
+        if !executable_ids.contains(helper) {
+            return Err(ProductionBuildPolicyError::InvalidHostLinker(
+                "helper executable is not declared",
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn require_kind(
     id: &str,
     expected: &'static str,
@@ -898,6 +1017,17 @@ fn tool_enforcement_identity(
         sha256: tool.sha256.clone(),
         version: tool.version.clone(),
         logical_mount: format!("/rust-agent/toolchain/bin/{id}"),
+    }
+}
+
+fn executable_enforcement_identity(
+    executable: &ProductionExecutable,
+) -> BuildEnforcementExecutable {
+    BuildEnforcementExecutable {
+        id: executable.id.clone(),
+        sha256: executable.sha256.clone(),
+        version: executable.version.clone(),
+        logical_mount: format!("/rust-agent/tools/{}", executable.id),
     }
 }
 

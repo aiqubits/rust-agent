@@ -94,7 +94,7 @@ fn production_manifest_recomputes_identity_and_accounts_for_the_closed_artifact_
         logical_mount: format!("/rust-agent/toolchain/bin/{id}"),
     };
     let enforcement = BuildEnforcementIdentity {
-        schema: 1,
+        schema: 2,
         backend: ProductionSandboxBackend::LinuxLandlockSeccomp,
         backend_semantic_version: 3,
         context,
@@ -108,6 +108,7 @@ fn production_manifest_recomputes_identity_and_accounts_for_the_closed_artifact_
             },
         },
         executables: vec![],
+        host_linker: None,
         read_inputs: vec![],
         environment: Vec::<BuildEnforcementEnvironment>::new(),
         derived_executable: DerivedExecutablePolicy {

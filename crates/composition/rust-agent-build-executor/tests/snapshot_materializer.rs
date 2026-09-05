@@ -74,7 +74,7 @@ fn labeled_digest(label: &str) -> String {
 
 fn policy() -> NormalizedProductionBuildPolicy {
     ProductionBuildExecutionPolicy {
-        schema: 2,
+        schema: 3,
         id: "ci-linux-hermetic-v1".into(),
         host: "cfg(target_os = \"linux\")".into(),
         backend: ProductionSandboxBackend::LinuxLandlockSeccomp,
@@ -117,6 +117,7 @@ fn policy() -> NormalizedProductionBuildPolicy {
         },
         read_inputs: vec![],
         executables: vec![],
+        host_linker: None,
         environment: vec![],
         derived_executable: DerivedExecutablePolicy {
             roots: vec!["target".into()],
