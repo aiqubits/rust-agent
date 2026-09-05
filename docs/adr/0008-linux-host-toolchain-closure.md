@@ -36,6 +36,16 @@ them. `CargoPlannerRequest` advances to schema 3 and
 bind the complete selection. A wrapper, alias or ambient PATH lookup remains
 forbidden.
 
+Some compiler helpers, notably GCC `collect2`, implement `--version` by creating
+a temporary file and executing the selected `ld`. Such helpers use the
+schema-owned Host-linker-helper probe class rather than the ordinary
+single-executable probe class. The helper probe runs in a fresh, runner-owned
+`/rust-agent/probe-tmp`, receives only fixed `COMPILER_PATH=/rust-agent/tools`,
+and may execute only the fully selected Host linker bundle. The directory is
+discarded after the individual probe, network remains isolated, and the
+execution observation binds the helper and every descendant. Granting the same
+scratch or descendant set to an unrelated executable is forbidden.
+
 The Linux runner places the exact compiler dynamic-library closure beneath
 `/rust-agent/runtime/lib` and copies the exact pinned Host
 `lib/rustlib/<build-triple>` subtree beneath the same inferred sysroot. It also
@@ -50,6 +60,8 @@ the runtime-tree digest; undeclared Host files remain invisible.
   target units continue to use the selected target sysroot.
 - Cross-target native linking is possible only through the fully selected,
   digest-bound linker closure.
+- Linker helpers with composite version behavior remain verifiable without
+  granting write access to `/` or access to an ambient descendant executable.
 - Existing policy schema 2, planner schema 2 and enforcement-identity schema 1
   inputs are rejected rather than silently acquiring Host tools.
 - Supporting another compiler/linker layout requires a schema change or another
