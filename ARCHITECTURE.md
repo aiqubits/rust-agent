@@ -5045,9 +5045,13 @@ Composition 中的 normalized build-requirement union 必须在 Cargo 启动前�
 
 Policy normalization 固定验证：所有 path 必须绝对 canonical path；fetch endpoint 必须是规范化 HTTPS origin 或 exact SSH host/key policy，redirect 只能落到显式 allowlist 且计入上限；credential helper 与 fetch 所需的 `git` 必须作为带 digest 的 fetch-only executable 声明。Production policy 的 `allowed-executors`、`trusted-signers` 和唯一 `signing-helper` 均不得为空；每个 signer 固定 id、algorithm、public-key bytes digest，unknown algorithm 或重复 id 拒绝，helper 的 signer id 必须命中 trusted signer 且 executable digest 必须匹配。Signing helper 使用版本化协议，只接收 domain-separated canonical payload digest、CI workload identity 和由 trusted supervisor 产生且绑定 operation kind、executor/verifier identity、backend/upstream evidence digest 与 payload digest 的一次性 completion handle；它独立验证三者后返回 signer id/algorithm/signature，拒绝通用任意 digest 签名。Helper 可以连接 runner 外的 HSM/CI identity，但不得接收 artifact/source/secret bytes；没有可验证 completion handle 的本地环境只能产生 development evidence。Toolchain、SDK、linker、C/C++ compiler、assembler、`pkg-config`、code generator 和其它预置 build-time executable 必须分别进入 `executable` allowlist 并记录文件 digest；其只读数据目录进入 `read-input` 并记录 tree/package identity。位于 canonical target/temp root、由已受 sandbox 约束的 build process 写入的 build-script/host helper 可以作为 derived executable 运行；其首次执行记录 digest/provenance，且它与后代始终继承完整 sandbox，只能启动静态 allowlisted executable 或 target/temp 内的 derived executable。`BuildEnforcementIdentity` 使用 logical id、content digest、mode/version、target role 与 logical mount，不使用 Host absolute path；absolute path 只作为本次 runner mapping 进入 full policy digest 与 redacted attestation。Runner 为 composition/source/cache/toolchain/SDK/target/temp 注入固定 logical mount path，并强制 rustc/C/C++ 的 debug/file prefix remap，禁止 clone path、state root 或 temp path进入 artifact identity。Composition、verified Cargo source cache 与 policy inputs 在 build runner 中只读；只有独立 target、temp 和 runner-owned diagnostic directory 可写。未声明的 Host filesystem、用户目录、workspace、Unix socket、named pipe、device、credential store 与 network 全部不可见。所有 descendant 只能执行静态 allowlisted 或合法 derived binary 并继承相同或更窄 sandbox，禁止通过 wrapper、dynamic loader、response file 或 symlink 切换预置 executable identity。动态链接器和 system runtime 若为执行所需，必须作为只读 policy input 明列，不能使用隐式 Host 全盘读取。
 
+Schema 3 production policy 可以声明一个 closed `host-linker` bundle：一个 linker executable id 和按 id 排序、无重复的 helper executable id 集合；每个 id 都必须分别命中带 digest/version 的 `[[executable]]`。Normalized build requirements 对该 bundle 只能全不选或全选，partial selection 必须在 Cargo 前失败。选中时，planner 与 build 固定传入 exact `target.<build-triple>.linker="/rust-agent/tools/<linker-id>"` Cargo command-line config，并固定 `COMPILER_PATH=/rust-agent/tools`；Component 不得覆盖。该选择及 logical paths 进入 schema 2 `BuildEnforcementIdentity`，concrete Host paths 仍仅进入 full policy/attestation。Linker、helper、startup object、linker script 与 compiler runtime 必须由 policy/runtime closure 分别绑定，禁止 wrapper、alias 或 ambient PATH/filesystem discovery。
+
 Fetch runner 只挂载只读 composition/Cargo.lock 和独立可写 Cargo cache staging，只允许 Cargo、fetch-only executable 与 policy endpoint 网络。Registry token/SSH agent 不得通过 ambient environment、用户目录或 Host socket 继承；凭据只能由 runner 通过限时、限 endpoint 的管道交给 declared credential helper，不进入 cache、diagnostic 或 attestation。Fetch 成功后逐项验证 checksum/precise revision，再以同文件系统 staging 原子发布 immutable verified cache；build runner 无凭据、无网络、只读挂载该 cache。
 
-生产 runner 清空 ambient `RUSTFLAGS/RUSTDOCFLAGS/CARGO_ENCODED_RUSTFLAGS/RUSTC_WRAPPER`、Cargo profile override、代理变量与未由 schema baseline或已解析 `[[environment]]` role 产生的 build environment；`PATH/LANG/LC_ALL/SOURCE_DATE_EPOCH` 使用固定 baseline，额外变量只使用 selected entry 的 exact `variable=value`，不得读取同名 ambient value。Build script/proc macro 可以读取 composition、verified source、toolchain和显式 read-input，可以在 target/temp 写入；不能读取 secret。Target linker、rustc flags、canonical Cargo resolution config、target-fact/custom-spec digest、toolchain/input/executable/environment-role 的 path-free identity、sandbox semantic class/version 和规范化 logical environment 通过 `BuildEnforcementIdentity` 进入 build-output digest；concrete mappings、完整 normalized policy 与 enforcement evidence 只进入 attestation。依赖预置环境可以跳过联网 fetch，但仍执行 locked source verification。
+生产 runner 清空 ambient `RUSTFLAGS/RUSTDOCFLAGS/CARGO_ENCODED_RUSTFLAGS/RUSTC_WRAPPER`、Cargo profile override、代理变量与未由 schema baseline或已解析 `[[environment]]` role 产生的 build environment；`PATH/LANG/LC_ALL/SOURCE_DATE_EPOCH` 使用固定 baseline，额外变量只使用 selected entry 的 exact `variable=value`，不得读取同名 ambient value。选中 schema-owned Host linker bundle 时，baseline 还包含固定 `COMPILER_PATH=/rust-agent/tools`。Build script/proc macro 可以读取 composition、verified source、toolchain和显式 read-input，可以在 target/temp 写入；不能读取 secret。Target linker、rustc flags、canonical Cargo resolution config、target-fact/custom-spec digest、toolchain/input/executable/environment-role 的 path-free identity、sandbox semantic class/version 和规范化 logical environment 通过 `BuildEnforcementIdentity` 进入 build-output digest；concrete mappings、完整 normalized policy 与 enforcement evidence 只进入 attestation。依赖预置环境可以跳过联网 fetch，但仍执行 locked source verification。
+
+Linux runner 把 exact compiler dynamic-library closure 放在 `/rust-agent/runtime/lib`，并把 pinned Host `lib/rustlib/<build-triple>` subtree 放在同一 inferred sysroot；Host build-script/proc-macro 因而只能解析到该 closure。Target-compiled unit 仍显式使用 `/rust-agent/toolchain` sysroot。Host native link 所需的 system runtime、startup object、linker script、compiler support 与 plugin 文件按 canonical logical location复制进 isolated root，全部进入 runtime-tree digest；未复制的 Host path 不可见。
 
 Build sandbox backend 支持矩阵固定为：Linux 使用受监控的 Landlock + seccomp/no-new-privileges 或等强度 namespace runner；macOS 使用由 CI runner 提供并 attested 的 deny-by-default filesystem/network sandbox；Windows 使用 restricted token、Job Object、filesystem ACL/virtualized workspace 与 runner-level outbound firewall。平台原语不能可靠阻止 descendant network/filesystem escape 时，只接受隔离 VM/container executor 的签名 attestation；仅设置环境变量、Cargo `--offline`、应用层 proxy 或 Job Object 不构成 network/filesystem isolation。Policy 声明的 backend 与 attestation backend 必须一致。Production executor 在 sandbox 退出、输入与 artifact digest 复验完成后，由 runner 外层 signer 对 domain-separated canonical attestation payload 签名；私钥、signing socket/service 和 credential 不挂载进 fetch/build runner。Verifier 必须校验 signer allowlist、公钥 digest、payload signature 和 executor/backend identity；签名、nonce、timestamp 与 transparency proof 只在 outer envelope，不进入 build-output identity。
 
@@ -7883,10 +7887,12 @@ I37  a library composition enters a final Rust Host only as a verified emitted
 I38  every production build is executed under a versioned BuildExecutionPolicy;
      all descendants inherit enforced filesystem/network/executable limits and
      every extra environment input maps one typed role id to an exact non-secret
-     variable/value apart from the fixed runner baseline; the full normalized policy
-     and enforcement evidence remain signed attestation inputs, while only their
-     path-free enforcement/result semantic projections participate in build-output
-     identity and trust/mapping/envelope rotation does not.
+     variable/value apart from the fixed runner baseline; a selected Host linker is
+     an atomic, digest-bound executable/helper closure with schema-owned Cargo config
+     and compiler path; the full normalized policy and enforcement evidence remain
+     signed attestation inputs, while only their path-free enforcement/result semantic
+     projections participate in build-output identity and trust/mapping/envelope
+     rotation does not.
 
 I39  PublicationDirectory publishes or removes the complete Session/Agent pair
      in one generation update; before_publish veto precedes directory publication
@@ -8058,7 +8064,8 @@ I66  build-output identity hashes the path-free BuildEnforcementIdentity, semant
      enforcement-result projection and canonical build-manifest digest; the signed
      attestation binds composition/output/manifest identities. Full runner mappings and
      trust remain evidence, so path/trust rotation does not rename identical output, while
-     changed logical input, enforcement semantics or manifest security fields always does.
+     changed logical input, selected Host linker closure, enforcement semantics or
+     manifest security fields always does.
 
 I67  SessionObserver delivery uses one owner-scoped dispatcher with bounded batch/byte
      storage and per-callback/shutdown deadlines. A first confirmed commit performs one
