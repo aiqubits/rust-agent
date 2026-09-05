@@ -162,8 +162,11 @@ No test result above is evidence for Phase 1B deployability or for a Phase 2+ ru
   `lib/rustlib/<build-triple>` subtree, required system runtime libraries, native startup objects,
   compiler runtime archives and linker support files. The selected Host linker/helper bundle is
   mounted under exact logical tool ids; Host build scripts/proc macros resolve their pinned `std`
-  from the copied Host subtree while target units retain the explicit target sysroot. Every copied
-  file is runtime-tree-digest-bound and ambient Host linker/filesystem discovery remains invisible;
+  from the copied Host subtree while target units retain the explicit target sysroot. GCC support
+  files are also projected at the install root derived from the linker's sandbox-logical `argv[0]`,
+  so its fixed `COMPILER_PATH` finds the exact copied LTO plugin rather than falling back to Host
+  discovery. Every copied file is runtime-tree-digest-bound and ambient Host linker/filesystem
+  discovery remains invisible;
 - a closed target-facts probe request now binds the exact build-input request, Host closure, policy,
   retained rustc digest, target/custom-spec logical mount, cleared environment and fixed
   `rustc --print cfg --target` invocation. For built-in targets, the local Linux runner consumes the

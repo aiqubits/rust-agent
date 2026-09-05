@@ -61,6 +61,8 @@ use tempfile::TempDir;
 use walkdir::WalkDir;
 
 const TEST_CREDENTIAL: &str = "phase-1b-fixture-token";
+const LOGICAL_HOST_LINKER: &str = "/rust-agent/tools/host-linker";
+const LOGICAL_COMPILER_PATH: &str = "/rust-agent/tools";
 
 struct FixtureSigning {
     key: SigningKey,
@@ -184,6 +186,29 @@ impl FetchFixtureMode {
                 | Self::HostPipeline
         )
     }
+}
+
+#[test]
+fn host_linker_support_files_follow_the_logical_driver_install_root() {
+    let linker = find_executable("cc");
+    let host_install = compiler_install_directory(&linker, None);
+    let logical_install = compiler_install_directory(&linker, Some(LOGICAL_HOST_LINKER));
+    assert_ne!(logical_install, host_install);
+    assert!(logical_install.starts_with("/rust-agent/lib/gcc"));
+
+    let output = TempDir::new().unwrap();
+    copy_compiler_support_files(&linker, output.path());
+    let relocated_plugin = output.path().join(
+        logical_install
+            .strip_prefix(Path::new("/"))
+            .unwrap()
+            .join("liblto_plugin.so"),
+    );
+    assert!(relocated_plugin.is_file());
+    assert_eq!(
+        sha256_file(&relocated_plugin),
+        sha256_file(&compiler_program_file(&linker, "liblto_plugin.so"))
+    );
 }
 
 #[test]
@@ -567,11 +592,7 @@ fn main() {
                 id: "host-linker".into(),
                 path: path.clone(),
                 sha256: sha256_file(path),
-                version: first_line_with_arg0(
-                    path,
-                    "/rust-agent/tools/host-linker",
-                    &["--version"],
-                ),
+                version: first_line_with_arg0(path, LOGICAL_HOST_LINKER, &["--version"]),
             }))
             .chain(
                 host_linker_collect2
@@ -2897,6 +2918,10 @@ fn copy_dynamic_runtime(
         target: "/rust-agent/runtime/empty-stdin".into(),
         link: "/dev/null".into(),
     });
+    symlinks.push(LinuxSandboxRuntimeSymlink {
+        target: "/rust-agent/runtime/lib".into(),
+        link: "/rust-agent/lib".into(),
+    });
     symlinks.sort();
     (symlinks, loaders)
 }
@@ -2938,6 +2963,7 @@ fn copy_compiler_support_files(host_linker: &Path, output: &Path) {
         "libgcc_s.so",
         "libc.so",
         "libc_nonshared.a",
+        "liblto_plugin.so",
     ];
     const OPTIONAL: &[&str] = &[
         "crt1.o",
@@ -2946,7 +2972,6 @@ fn copy_compiler_support_files(host_linker: &Path, output: &Path) {
         "libdl.a",
         "libgcc_eh.a",
         "libgcc_s.so.1",
-        "liblto_plugin.so",
         "libm.so",
         "libm.so.6",
         "libmvec.so.1",
@@ -2955,6 +2980,8 @@ fn copy_compiler_support_files(host_linker: &Path, output: &Path) {
         "libutil.a",
         "lto-wrapper",
     ];
+    let host_install = compiler_install_directory(host_linker, None);
+    let logical_install = compiler_install_directory(host_linker, Some(LOGICAL_HOST_LINKER));
     for (name, required) in REQUIRED
         .iter()
         .map(|name| (*name, true))
@@ -2979,10 +3006,38 @@ fn copy_compiler_support_files(host_linker: &Path, output: &Path) {
         }
         let logical = normalize_absolute_path(printed);
         let source = printed.canonicalize().unwrap();
-        let destination = output.join(logical.strip_prefix(Path::new("/")).unwrap());
-        fs::create_dir_all(destination.parent().unwrap()).unwrap();
-        fs::copy(source, destination).unwrap();
+        let mut destinations = BTreeSet::from([logical.clone()]);
+        if let Ok(relative) = logical.strip_prefix(&host_install) {
+            destinations.insert(logical_install.join(relative));
+        }
+        for destination in destinations {
+            let destination = output.join(destination.strip_prefix(Path::new("/")).unwrap());
+            fs::create_dir_all(destination.parent().unwrap()).unwrap();
+            fs::copy(&source, destination).unwrap();
+        }
     }
+}
+
+fn compiler_install_directory(compiler: &Path, arg0: Option<&str>) -> PathBuf {
+    let mut command = Command::new(compiler);
+    if let Some(arg0) = arg0 {
+        command
+            .arg0(arg0)
+            .env("COMPILER_PATH", LOGICAL_COMPILER_PATH);
+    }
+    let output = command.arg("-print-search-dirs").output().unwrap();
+    assert!(output.status.success(), "compiler search-dir query failed");
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let install = stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("install: "))
+        .expect("compiler search dirs omitted its install root");
+    let install = Path::new(install);
+    assert!(
+        install.is_absolute(),
+        "compiler install root is not absolute"
+    );
+    normalize_absolute_path(install)
 }
 
 fn normalize_absolute_path(path: &Path) -> PathBuf {
@@ -3024,6 +3079,19 @@ fn compiler_program(compiler: &Path, name: &str) -> PathBuf {
     assert!(
         path.is_absolute() && path.is_file(),
         "compiler did not resolve required program `{name}` to an absolute file"
+    );
+    path.canonicalize().unwrap()
+}
+fn compiler_program_file(compiler: &Path, name: &str) -> PathBuf {
+    let output = Command::new(compiler)
+        .arg(format!("-print-file-name={name}"))
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let path = PathBuf::from(String::from_utf8(output.stdout).unwrap().trim());
+    assert!(
+        path.is_absolute() && path.is_file(),
+        "compiler did not resolve required file `{name}` to an absolute file"
     );
     path.canonicalize().unwrap()
 }

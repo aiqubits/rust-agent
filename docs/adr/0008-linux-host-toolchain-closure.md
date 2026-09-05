@@ -53,9 +53,13 @@ The Linux runner places the exact compiler dynamic-library closure beneath
 `/rust-agent/runtime/lib` and copies the exact pinned Host
 `lib/rustlib/<build-triple>` subtree beneath the same inferred sysroot. It also
 copies every required system runtime and native-link support file to its
-canonical logical location in the isolated root. Target-compiled units retain
-the explicit `/rust-agent/toolchain` sysroot. All copied files participate in
-the runtime-tree digest; undeclared Host files remain invisible.
+canonical logical location in the isolated root. If the compiler driver
+relocates its install root from `argv[0]`, the runner derives and projects that
+root using the exact sandbox-logical linker `argv[0]`; this includes the LTO
+plugin searched under the fixed `COMPILER_PATH`. Copying only the original Host
+install path is insufficient. Target-compiled units retain the explicit
+`/rust-agent/toolchain` sysroot. All copied files participate in the runtime-tree
+digest; undeclared Host files remain invisible.
 
 ## Consequences
 
@@ -75,6 +79,7 @@ the runtime-tree digest; undeclared Host files remain invisible.
 - `production_policy::host_linker_bundle_is_closed_selected_and_path_free`
 - `cargo_planner::tests::schema_three_binds_the_exact_host_linker_configuration`
 - `production_inputs::tests::host_linker_helper_preflight_roles_are_closed_and_schema_three`
+- `production_cargo_fetch::host_linker_support_files_follow_the_logical_driver_install_root`
 - `production_cargo_fetch::production_host_pre_build_post_pipeline_is_signed_and_reverified`
 - `production_cargo_fetch::production_standalone_pipeline_is_signed_and_reverified`
 - `production_cargo_fetch::production_wasm_pipeline_sandboxes_and_attests_the_complete_bundle`
