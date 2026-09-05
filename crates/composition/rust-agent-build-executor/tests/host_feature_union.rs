@@ -13,7 +13,7 @@ use rust_agent_build_executor::{
     DevelopmentHostFeatureVerification, FeatureAccountingMode, HostCargoUnitGraph,
     HostFeaturePolicyEntry, HostFeaturePolicyError, HostFeaturePolicyStageDigests,
     HostFeatureUnionPolicy, HostFeatureUnitObservation, ProductBuildContribution, emit_integration,
-    verify_development_host_feature_union,
+    verify_development_host_feature_union, verify_production_host_feature_union,
 };
 use rust_agent_composition::{ComposeError, ComposeOptions, compose, metadata::BuildRequirements};
 use serde_json::Value;
@@ -204,6 +204,8 @@ fn hex_metadata(output: &Output, lockfile: &Path) -> HexMetadata {
             target_name,
             compilation_kind: CargoCompilationKind::Target,
             compilation_target: TARGET.into(),
+            cargo_target_context:
+                rust_agent_build_executor::CargoUnitTargetContext::CompositionTarget,
             compile_mode: CargoCompileMode::Build,
             profile: "dev".into(),
             crate_kind: CargoCrateKind::Library,
@@ -246,7 +248,7 @@ fn unit_graph(
     features: Vec<String>,
 ) -> rust_agent_build_executor::NormalizedHostCargoUnitGraph {
     HostCargoUnitGraph {
-        schema: 1,
+        schema: 2,
         planner: planner.clone(),
         build_triple: build_triple.to_owned(),
         composition_target: TARGET.into(),
@@ -294,6 +296,7 @@ fn product_selector(host: &Path, build_triple: &str, build_script: bool) -> Carg
             CargoCompilationKind::Target
         },
         compilation_target: if build_script { build_triple } else { TARGET }.into(),
+        cargo_target_context: rust_agent_build_executor::CargoUnitTargetContext::CompositionTarget,
         compile_mode: if build_script {
             CargoCompileMode::RunCustomBuild
         } else {
@@ -527,7 +530,7 @@ fn external_shared_target_feature_union_is_observed_and_accounted_end_to_end() {
         observations: &observations,
         composition_compiled_runtime_effects: &generated.manifest.compiled_runtime_effects,
         host_root_runtime_effects: &host_root_effects,
-        product_build_contributions: &[build_contribution],
+        product_build_contributions: std::slice::from_ref(&build_contribution),
     })
     .unwrap();
 
@@ -553,6 +556,21 @@ fn external_shared_target_feature_union_is_observed_and_accounted_end_to_end() {
         host_root_effects
     );
     assert_eq!(receipt.product_compiled_runtime_effects, host_root_effects);
+    let production = verify_production_host_feature_union(&DevelopmentHostFeatureVerification {
+        standalone_graph: &standalone_graph,
+        final_graph: &final_graph,
+        observed_graph: &observed_graph,
+        first_party_units: &BTreeSet::new(),
+        policy: Some(&policy),
+        stage_policy_digests: &stages,
+        observations: &observations,
+        composition_compiled_runtime_effects: &generated.manifest.compiled_runtime_effects,
+        host_root_runtime_effects: &host_root_effects,
+        product_build_contributions: &[build_contribution],
+    })
+    .unwrap();
+    assert!(production.receipt().deployable);
+    assert_ne!(production.receipt().digest, receipt.digest);
 
     let first_party = [final_metadata.selector.clone()].into_iter().collect();
     let rejected = verify_development_host_feature_union(&DevelopmentHostFeatureVerification {

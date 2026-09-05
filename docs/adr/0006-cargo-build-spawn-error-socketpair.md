@@ -56,5 +56,5 @@ future process-spawn shape change requires another ADR/schema change.
 ## Acceptance tests
 
 - `linux_sandbox_launcher::socketpair_classes_are_command_bound_and_closed`
-- `production_build::planned_and_observed_cross_compile_units_match_exactly`
-- `production_build::build_descendant_escape_matrix_fails_closed`
+- `production_cargo_fetch::trusted_build_observer_covers_cross_compiled_build_and_proc_macro_units`
+- `production_cargo_fetch::production_host_pre_build_post_pipeline_is_signed_and_reverified`

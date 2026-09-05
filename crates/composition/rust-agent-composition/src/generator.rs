@@ -46,7 +46,7 @@ use crate::{
         CargoResolutionRecord, CompositionIdentityPayload, CompositionManifest,
         GeneratedFileRecord, MAX_CARGO_SOURCE_IDENTITIES, MAX_COMPOSITION_SOURCE_ENTRIES,
         MAX_COMPOSITION_SOURCE_FILE_BYTES, MAX_COMPOSITION_SOURCE_PACKAGES, SecurityManifest,
-        SourcePackageRecord,
+        SourcePackageRecord, canonical_cargo_config,
     },
     metadata::{
         AppCoexistence, BuildRequirements, CatalogTrustPolicy, ConfigSource, HostBoundaryKind,
@@ -3631,8 +3631,7 @@ fn generate_cargo_config(
 ) -> String {
     let cargo_target_input =
         custom_target_spec.map_or(target.triple.as_str(), |spec| spec.snapshot_path.as_str());
-    let rustflags = custom_target_spec.map_or("", |_| "rustflags = [\"-Zunstable-options\"]\n");
-    format!("[build]\ntarget = {cargo_target_input:?}\n{rustflags}\n[net]\noffline = true\n")
+    canonical_cargo_config(cargo_target_input, custom_target_spec.is_some())
 }
 
 fn generate_lib_rs(

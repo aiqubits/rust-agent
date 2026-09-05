@@ -1,13 +1,17 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 pub use rust_agent_composition::snapshot::CanonicalSnapshotMetadataContract;
-use rust_agent_composition::{canonical, metadata::BuildRequirements};
+use rust_agent_composition::{
+    canonical, custom_target::CustomTargetSpecRecord, manifest::CargoResolutionRecord,
+    metadata::BuildRequirements, target::TargetFactsRecord,
+};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
-    BuildEnforcementContext, CargoPackageIdentity, CargoUnitGraphError, HostCargoUnitGraph,
-    NormalizedProductionBuildPolicy, ProductionBuildPolicyError,
+    BuildEnforcementContext, BuildPanicStrategy, CargoPackageIdentity, CargoUnitGraphError,
+    HostCargoUnitGraph, NormalizedHostCargoUnitGraph, NormalizedProductionBuildPolicy,
+    ProductionBuildPolicyError,
 };
 
 const CLOSURE_LOGICAL_ROOT: &str = "/rust-agent/closure/";
@@ -87,6 +91,11 @@ pub enum HostBuildClosureContent {
         #[serde(rename = "bytes-sha256")]
         bytes_sha256: String,
     },
+    CustomTargetSpec {
+        digest: String,
+        #[serde(rename = "bytes-sha256")]
+        bytes_sha256: String,
+    },
     SignedEvidence {
         #[serde(rename = "bytes-digest")]
         bytes_digest: String,
@@ -125,17 +134,41 @@ pub struct NormalizedHostBuildClosureItem {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NormalizedHostBuildInputClosure {
+    composition_hash: String,
+    host_dependency_alias: String,
     items: Vec<NormalizedHostBuildClosureItem>,
     generated_package_name: String,
     build_context: BuildEnforcementContext,
+    build_requirements: BuildRequirements,
     final_unit_packages: BTreeSet<CargoPackageIdentity>,
+    standalone_unit_graph: NormalizedHostCargoUnitGraph,
+    final_unit_graph: NormalizedHostCargoUnitGraph,
     standalone_unit_graph_digest: String,
     final_unit_graph_digest: String,
     build_execution_policy_digest: String,
     build_enforcement_identity_digest: String,
     host_feature_policy_digest: Option<String>,
     unit_feature_delta_digest: String,
+    content_identity_digest: String,
     digest: String,
+}
+
+/// Closed schema for the rustc settings that affect a Host build.
+///
+/// This record deliberately contains logical build settings only. Concrete
+/// executable paths and runner mappings remain in `BuildExecutionPolicy`.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RustcSettingsRecord {
+    pub schema: u32,
+    #[serde(rename = "build-triple")]
+    pub build_triple: String,
+    pub target: String,
+    pub profile: String,
+    #[serde(rename = "panic-strategy")]
+    pub panic_strategy: BuildPanicStrategy,
+    #[serde(rename = "prefix-remap-schema")]
+    pub prefix_remap_schema: u32,
 }
 
 #[derive(Serialize)]
@@ -231,6 +264,22 @@ pub enum HostBuildInputClosureError {
     BuildEnforcementIdentityMismatch,
     #[error("Host feature policy/evidence closure is invalid")]
     HostFeaturePolicyEvidenceMismatch,
+    #[error("canonical record `{item}` is invalid for role {role:?}: {reason}")]
+    InvalidCanonicalRecord {
+        item: String,
+        role: HostBuildClosureItemRole,
+        reason: String,
+    },
+    #[error("canonical record `{item}` has a semantic digest mismatch")]
+    CanonicalRecordDigestMismatch { item: String },
+    #[error("canonical record `{item}` does not match build context field `{field}`")]
+    CanonicalRecordContextMismatch { item: String, field: &'static str },
+    #[error("Cargo config `{item}` is not the exact schema-v1 projection of its resolution record")]
+    CargoConfigSemanticMismatch { item: String },
+    #[error("custom target specification `{item}` is invalid: {reason}")]
+    InvalidCustomTargetSpec { item: String, reason: String },
+    #[error("custom target specification `{item}` does not match its closure identity")]
+    CustomTargetSpecIdentityMismatch { item: String },
     #[error("feature-semantics evidence `{0}` does not match a trusted reviewer policy")]
     FeatureEvidenceTrustMismatch(String),
     #[error("Host Cargo unit graph is invalid: {0}")]
@@ -362,23 +411,41 @@ impl HostBuildInputClosure {
             b"rust-agent-host-build-input-closure-v1\0",
             &projection,
         )?);
+        let content_identity_digest = hex::encode(canonical::domain_hash(
+            b"rust-agent-host-build-input-content-identity-v1\0",
+            &items,
+        )?);
         Ok(NormalizedHostBuildInputClosure {
+            composition_hash: self.composition_hash.clone(),
+            host_dependency_alias: self.host_dependency_alias.clone(),
             items,
             generated_package_name: self.generated_package_name.clone(),
             build_context: self.build_context.clone(),
+            build_requirements: self.build_requirements.clone(),
             final_unit_packages,
+            standalone_unit_graph: standalone,
+            final_unit_graph: final_graph,
             standalone_unit_graph_digest,
             final_unit_graph_digest,
             build_execution_policy_digest: self.build_execution_policy_digest.clone(),
             build_enforcement_identity_digest: self.build_enforcement_identity_digest.clone(),
             host_feature_policy_digest,
             unit_feature_delta_digest: self.unit_feature_delta_digest.clone(),
+            content_identity_digest,
             digest,
         })
     }
 }
 
 impl NormalizedHostBuildInputClosure {
+    pub fn composition_hash(&self) -> &str {
+        &self.composition_hash
+    }
+
+    pub fn host_dependency_alias(&self) -> &str {
+        &self.host_dependency_alias
+    }
+
     pub fn digest(&self) -> &str {
         &self.digest
     }
@@ -395,6 +462,10 @@ impl NormalizedHostBuildInputClosure {
         &self.build_context
     }
 
+    pub fn build_requirements(&self) -> &BuildRequirements {
+        &self.build_requirements
+    }
+
     pub fn final_unit_packages(&self) -> &BTreeSet<CargoPackageIdentity> {
         &self.final_unit_packages
     }
@@ -403,12 +474,36 @@ impl NormalizedHostBuildInputClosure {
         &self.standalone_unit_graph_digest
     }
 
+    pub fn standalone_unit_graph(&self) -> &NormalizedHostCargoUnitGraph {
+        &self.standalone_unit_graph
+    }
+
     pub fn final_unit_graph_digest(&self) -> &str {
         &self.final_unit_graph_digest
     }
 
+    pub fn final_unit_graph(&self) -> &NormalizedHostCargoUnitGraph {
+        &self.final_unit_graph
+    }
+
     pub fn build_execution_policy_digest(&self) -> &str {
         &self.build_execution_policy_digest
+    }
+
+    pub fn build_enforcement_identity_digest(&self) -> &str {
+        &self.build_enforcement_identity_digest
+    }
+
+    pub fn host_feature_policy_digest(&self) -> Option<&str> {
+        self.host_feature_policy_digest.as_deref()
+    }
+
+    pub fn unit_feature_delta_digest(&self) -> &str {
+        &self.unit_feature_delta_digest
+    }
+
+    pub fn content_identity_digest(&self) -> &str {
+        &self.content_identity_digest
     }
 
     pub fn development_stage_receipt(
@@ -431,6 +526,356 @@ impl NormalizedHostBuildInputClosure {
         receipt.digest = receipt.recompute_digest()?;
         Ok(receipt)
     }
+}
+
+impl RustcSettingsRecord {
+    pub fn from_context(context: &BuildEnforcementContext) -> Self {
+        Self {
+            schema: 1,
+            build_triple: context.build_triple.clone(),
+            target: context.target.clone(),
+            profile: context.profile.clone(),
+            panic_strategy: context.panic_strategy,
+            prefix_remap_schema: context.prefix_remap_schema,
+        }
+    }
+
+    pub fn digest(&self) -> Result<String, HostBuildInputClosureError> {
+        Ok(hex::encode(canonical::domain_hash(
+            b"rust-agent-rustc-settings-record-v1\0",
+            self,
+        )?))
+    }
+}
+
+pub fn cargo_resolution_record_digest(
+    record: &CargoResolutionRecord,
+) -> Result<String, HostBuildInputClosureError> {
+    Ok(hex::encode(canonical::domain_hash(
+        b"rust-agent-cargo-resolution-record-v1\0",
+        record,
+    )?))
+}
+
+pub(crate) fn verify_canonical_record(
+    item: &NormalizedHostBuildClosureItem,
+    bytes: &[u8],
+    context: &BuildEnforcementContext,
+) -> Result<(), HostBuildInputClosureError> {
+    let HostBuildClosureContent::CanonicalRecord { digest, .. } = &item.content else {
+        return Ok(());
+    };
+    let actual_digest = match item.role {
+        HostBuildClosureItemRole::CargoResolutionRecord => {
+            let record: CargoResolutionRecord = parse_canonical_record(item, bytes)?;
+            verify_cargo_resolution_record(item, &record, context)?;
+            cargo_resolution_record_digest(&record)?
+        }
+        HostBuildClosureItemRole::TargetFactsRecord => {
+            let record = TargetFactsRecord::from_json(bytes)
+                .map_err(|error| invalid_canonical_record(item, error.to_string()))?;
+            verify_record_context(item, "target", &record.triple, &context.target)?;
+            verify_optional_record_context(
+                item,
+                "custom-target-spec-digest",
+                record.custom_target_spec_digest.as_deref(),
+                context.custom_target_spec_digest.as_deref(),
+            )?;
+            record
+                .semantic_digest()
+                .map_err(|error| invalid_canonical_record(item, error.to_string()))?
+        }
+        HostBuildClosureItemRole::RustcSettingsRecord => {
+            let record: RustcSettingsRecord = parse_canonical_record(item, bytes)?;
+            verify_rustc_settings_record(item, &record, context)?;
+            record.digest()?
+        }
+        HostBuildClosureItemRole::ArtifactSelectorRecord => {
+            let record: crate::BuildArtifactSelector = parse_canonical_record(item, bytes)?;
+            if record != context.artifact_selector {
+                return Err(HostBuildInputClosureError::CanonicalRecordContextMismatch {
+                    item: item.id.clone(),
+                    field: "artifact-selector",
+                });
+            }
+            record.digest()?
+        }
+        _ => {
+            return Err(invalid_canonical_record(
+                item,
+                "role does not admit canonical-record content",
+            ));
+        }
+    };
+    if &actual_digest != digest {
+        return Err(HostBuildInputClosureError::CanonicalRecordDigestMismatch {
+            item: item.id.clone(),
+        });
+    }
+    Ok(())
+}
+
+pub(crate) fn verify_canonical_cargo_config(
+    closure: &NormalizedHostBuildInputClosure,
+    cargo_config_bytes: &[u8],
+    cargo_resolution_bytes: &[u8],
+) -> Result<(), HostBuildInputClosureError> {
+    let cargo_config = closure
+        .items()
+        .iter()
+        .find(|item| item.role == HostBuildClosureItemRole::CargoConfig)
+        .expect("normalized closure has exactly one Cargo config");
+    let cargo_resolution = closure
+        .items()
+        .iter()
+        .find(|item| item.role == HostBuildClosureItemRole::CargoResolutionRecord)
+        .expect("normalized closure has exactly one Cargo resolution record");
+    verify_canonical_record(
+        cargo_resolution,
+        cargo_resolution_bytes,
+        closure.build_context(),
+    )?;
+    let record: CargoResolutionRecord =
+        parse_canonical_record(cargo_resolution, cargo_resolution_bytes)?;
+    if cargo_config_bytes != record.canonical_cargo_config().as_bytes() {
+        return Err(HostBuildInputClosureError::CargoConfigSemanticMismatch {
+            item: cargo_config.id.clone(),
+        });
+    }
+    if record.custom_target_spec_digest.is_some() {
+        let custom_target = closure
+            .items()
+            .iter()
+            .find(|item| item.role == HostBuildClosureItemRole::CustomTargetSpec)
+            .expect("normalized custom-target closure has exactly one specification");
+        let Some(working_root) = cargo_config
+            .logical_path
+            .strip_suffix("/.cargo/config.toml")
+        else {
+            return Err(HostBuildInputClosureError::CargoConfigSemanticMismatch {
+                item: cargo_config.id.clone(),
+            });
+        };
+        if custom_target.logical_path != format!("{working_root}/{}", record.cargo_target_input) {
+            return Err(HostBuildInputClosureError::CargoConfigSemanticMismatch {
+                item: cargo_config.id.clone(),
+            });
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn verify_custom_target_spec(
+    closure: &NormalizedHostBuildInputClosure,
+    bytes: &[u8],
+) -> Result<(), HostBuildInputClosureError> {
+    let item = closure
+        .items()
+        .iter()
+        .find(|item| item.role == HostBuildClosureItemRole::CustomTargetSpec)
+        .expect("custom-target bytes are retained only for a normalized custom-target closure");
+    let HostBuildClosureContent::CustomTargetSpec {
+        digest,
+        bytes_sha256,
+    } = &item.content
+    else {
+        return Err(HostBuildInputClosureError::ItemContentMismatch {
+            id: item.id.clone(),
+            role: item.role,
+        });
+    };
+    let record = CustomTargetSpecRecord::from_raw_bytes(&closure.build_context().target, bytes)
+        .map_err(
+            |error| HostBuildInputClosureError::InvalidCustomTargetSpec {
+                item: item.id.clone(),
+                reason: error.to_string(),
+            },
+        )?;
+    record.verify(bytes).map_err(
+        |error| HostBuildInputClosureError::InvalidCustomTargetSpec {
+            item: item.id.clone(),
+            reason: error.to_string(),
+        },
+    )?;
+    if &record.custom_target_spec_digest != digest
+        || &record.raw_bytes_sha256 != bytes_sha256
+        || closure.build_context().custom_target_spec_digest.as_deref() != Some(digest)
+    {
+        return Err(
+            HostBuildInputClosureError::CustomTargetSpecIdentityMismatch {
+                item: item.id.clone(),
+            },
+        );
+    }
+    Ok(())
+}
+
+fn parse_canonical_record<T: for<'de> Deserialize<'de>>(
+    item: &NormalizedHostBuildClosureItem,
+    bytes: &[u8],
+) -> Result<T, HostBuildInputClosureError> {
+    serde_json::from_slice(bytes).map_err(|error| invalid_canonical_record(item, error.to_string()))
+}
+
+fn verify_cargo_resolution_record(
+    item: &NormalizedHostBuildClosureItem,
+    record: &CargoResolutionRecord,
+    context: &BuildEnforcementContext,
+) -> Result<(), HostBuildInputClosureError> {
+    if record.schema != 1 {
+        return Err(invalid_canonical_record(
+            item,
+            format!("unsupported schema {}; expected 1", record.schema),
+        ));
+    }
+    verify_record_context(item, "target", &record.target, &context.target)?;
+    verify_record_context(
+        item,
+        "target-facts-digest",
+        &record.target_fact_digest,
+        &context.target_facts_digest,
+    )?;
+    verify_optional_record_context(
+        item,
+        "custom-target-spec-digest",
+        record.custom_target_spec_digest.as_deref(),
+        context.custom_target_spec_digest.as_deref(),
+    )?;
+    if record.resolver != "2"
+        || !record.offline
+        || !record.isolated_cargo_home
+        || record.ancestor_config != "forbidden"
+    {
+        return Err(invalid_canonical_record(
+            item,
+            "resolution isolation fields do not match schema 1",
+        ));
+    }
+    if context.custom_target_spec_digest.is_none() {
+        verify_record_context(
+            item,
+            "cargo-target-input",
+            &record.cargo_target_input,
+            &context.target,
+        )?;
+    } else {
+        verify_record_context(
+            item,
+            "cargo-target-input",
+            &record.cargo_target_input,
+            &format!("targets/{}.json", context.target),
+        )?;
+    }
+    if record.registries.iter().any(|(name, source)| {
+        name != "crates-io" || source != "registry+https://github.com/rust-lang/crates.io-index"
+    }) {
+        return Err(invalid_canonical_record(
+            item,
+            "only the canonical crates.io registry source is supported",
+        ));
+    }
+    if record
+        .git_sources
+        .iter()
+        .any(|source| !is_precise_https_git_source(source))
+    {
+        return Err(invalid_canonical_record(
+            item,
+            "git sources must be canonical HTTPS identities with a precise revision",
+        ));
+    }
+    Ok(())
+}
+
+fn verify_rustc_settings_record(
+    item: &NormalizedHostBuildClosureItem,
+    record: &RustcSettingsRecord,
+    context: &BuildEnforcementContext,
+) -> Result<(), HostBuildInputClosureError> {
+    if record.schema != 1 {
+        return Err(invalid_canonical_record(
+            item,
+            format!("unsupported schema {}; expected 1", record.schema),
+        ));
+    }
+    verify_record_context(
+        item,
+        "build-triple",
+        &record.build_triple,
+        &context.build_triple,
+    )?;
+    verify_record_context(item, "target", &record.target, &context.target)?;
+    verify_record_context(item, "profile", &record.profile, &context.profile)?;
+    if record.panic_strategy != context.panic_strategy {
+        return Err(HostBuildInputClosureError::CanonicalRecordContextMismatch {
+            item: item.id.clone(),
+            field: "panic-strategy",
+        });
+    }
+    if record.prefix_remap_schema != context.prefix_remap_schema {
+        return Err(HostBuildInputClosureError::CanonicalRecordContextMismatch {
+            item: item.id.clone(),
+            field: "prefix-remap-schema",
+        });
+    }
+    Ok(())
+}
+
+fn verify_record_context(
+    item: &NormalizedHostBuildClosureItem,
+    field: &'static str,
+    actual: &str,
+    expected: &str,
+) -> Result<(), HostBuildInputClosureError> {
+    if actual == expected {
+        Ok(())
+    } else {
+        Err(HostBuildInputClosureError::CanonicalRecordContextMismatch {
+            item: item.id.clone(),
+            field,
+        })
+    }
+}
+
+fn verify_optional_record_context(
+    item: &NormalizedHostBuildClosureItem,
+    field: &'static str,
+    actual: Option<&str>,
+    expected: Option<&str>,
+) -> Result<(), HostBuildInputClosureError> {
+    if actual == expected {
+        Ok(())
+    } else {
+        Err(HostBuildInputClosureError::CanonicalRecordContextMismatch {
+            item: item.id.clone(),
+            field,
+        })
+    }
+}
+
+fn invalid_canonical_record(
+    item: &NormalizedHostBuildClosureItem,
+    reason: impl Into<String>,
+) -> HostBuildInputClosureError {
+    HostBuildInputClosureError::InvalidCanonicalRecord {
+        item: item.id.clone(),
+        role: item.role,
+        reason: reason.into(),
+    }
+}
+
+fn is_precise_https_git_source(value: &str) -> bool {
+    let Some((repository, revision)) = value.rsplit_once('#') else {
+        return false;
+    };
+    repository.starts_with("git+https://")
+        && repository.len() > "git+https://".len()
+        && repository.is_ascii()
+        && repository.bytes().all(|byte| byte.is_ascii_graphic())
+        && revision.len() == 40
+        && revision
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 impl DevelopmentHostClosureStageReceipt {
@@ -812,8 +1257,7 @@ fn role_accepts_content(role: HostBuildClosureItemRole, content: &HostBuildClosu
                 | HostBuildClosureItemRole::HostRootManifest
                 | HostBuildClosureItemRole::HostMemberManifest
                 | HostBuildClosureItemRole::HostCargoLock
-                | HostBuildClosureItemRole::CargoConfig
-                | HostBuildClosureItemRole::CustomTargetSpec,
+                | HostBuildClosureItemRole::CargoConfig,
             HostBuildClosureContent::File { .. }
         ) | (
             HostBuildClosureItemRole::HostPackageTree
@@ -827,6 +1271,9 @@ fn role_accepts_content(role: HostBuildClosureItemRole, content: &HostBuildClosu
                 | HostBuildClosureItemRole::ArtifactSelectorRecord,
             HostBuildClosureContent::CanonicalRecord { .. }
         ) | (
+            HostBuildClosureItemRole::CustomTargetSpec,
+            HostBuildClosureContent::CustomTargetSpec { .. }
+        ) | (
             HostBuildClosureItemRole::FeatureSemanticsEvidence,
             HostBuildClosureContent::SignedEvidence { .. }
         )
@@ -838,6 +1285,10 @@ fn content_has_valid_digests(content: &HostBuildClosureContent) -> bool {
         HostBuildClosureContent::File { sha256 } => is_digest(sha256),
         HostBuildClosureContent::SnapshotTree { tree_digest } => is_digest(tree_digest),
         HostBuildClosureContent::CanonicalRecord {
+            digest,
+            bytes_sha256,
+        }
+        | HostBuildClosureContent::CustomTargetSpec {
             digest,
             bytes_sha256,
         } => is_digest(digest) && is_digest(bytes_sha256),
@@ -858,7 +1309,8 @@ fn content_primary_digest(content: &HostBuildClosureContent) -> &str {
     match content {
         HostBuildClosureContent::File { sha256 } => sha256,
         HostBuildClosureContent::SnapshotTree { tree_digest } => tree_digest,
-        HostBuildClosureContent::CanonicalRecord { digest, .. } => digest,
+        HostBuildClosureContent::CanonicalRecord { digest, .. }
+        | HostBuildClosureContent::CustomTargetSpec { digest, .. } => digest,
         HostBuildClosureContent::SignedEvidence { bytes_digest, .. } => bytes_digest,
     }
 }

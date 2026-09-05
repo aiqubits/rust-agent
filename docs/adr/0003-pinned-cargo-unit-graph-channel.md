@@ -56,4 +56,4 @@ output changes.
 - `cargo_planner::tests::schema_two_binds_the_exact_pinned_channel_override`
 - `cargo_planner::tests::pinned_cargo_produces_a_real_unit_graph_without_build_side_effects`
 - `cargo_planner::tests::channel_override_digest_argv_and_output_drift_fail_closed`
-- `production_build::planned_and_observed_cross_compile_units_match_exactly`
+- `production_cargo_fetch::trusted_build_observer_covers_cross_compiled_build_and_proc_macro_units`

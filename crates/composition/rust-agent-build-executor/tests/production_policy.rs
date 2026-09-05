@@ -4,9 +4,9 @@ use rust_agent_build_executor::{
     BuildArtifactSelector, BuildArtifactTarget, BuildEnforcementContext, BuildPanicStrategy,
     DerivedExecutablePolicy, ProductionAttestationPolicy, ProductionBuildExecutionPolicy,
     ProductionBuildPolicyError, ProductionEnvironment, ProductionExecutable, ProductionFetchPolicy,
-    ProductionFileIdentity, ProductionReadInput, ProductionSandboxBackend, ProductionToolIdentity,
-    ProductionToolchain, ProductionTreeIdentity, SigningHelper, TrustedReviewerPolicy,
-    TrustedSigner,
+    ProductionFetchRedirectPolicy, ProductionFileIdentity, ProductionReadInput,
+    ProductionSandboxBackend, ProductionToolIdentity, ProductionToolchain, ProductionTreeIdentity,
+    SigningHelper, TrustedReviewerPolicy, TrustedSigner,
 };
 use rust_agent_composition::metadata::BuildRequirements;
 
@@ -16,7 +16,7 @@ fn digest(byte: &str) -> String {
 
 fn policy() -> ProductionBuildExecutionPolicy {
     ProductionBuildExecutionPolicy {
-        schema: 1,
+        schema: 2,
         id: "ci-linux-hermetic-v1".into(),
         host: "cfg(target_os = \"linux\")".into(),
         backend: ProductionSandboxBackend::LinuxLandlockSeccomp,
@@ -29,7 +29,11 @@ fn policy() -> ProductionBuildExecutionPolicy {
                 path: "/runner-a/bin/cargo-credential-helper".into(),
                 sha256: digest("1"),
             }),
-            max_redirects: 0,
+            tls_ca_bundle: Some(ProductionFileIdentity {
+                path: "/runner-a/tls/ca-bundle.pem".into(),
+                sha256: digest("0"),
+            }),
+            redirect_policy: ProductionFetchRedirectPolicy::DenyUnlistedOrigin,
         },
         attestation: ProductionAttestationPolicy {
             allowed_executors: vec![
@@ -176,6 +180,7 @@ fn policy_and_enforcement_identity_have_separate_stable_domains() {
     rotated.fetch.network_endpoints = vec!["https://mirror.example:443".into()];
     rotated.fetch.credential_helper.as_mut().unwrap().path =
         "/runner-b/bin/cargo-credential-helper".into();
+    rotated.fetch.tls_ca_bundle.as_mut().unwrap().path = "/runner-b/tls/ca-bundle.pem".into();
     rotated.attestation.trusted_signers[0].public_key = "/runner-b/keys/ci.pub".into();
     rotated.attestation.trusted_signers[0].sha256 = digest("c");
     rotated.attestation.signing_helper.path = "/runner-b/bin/sign".into();
@@ -252,13 +257,13 @@ fn normalization_is_order_independent_and_schema_digest_is_frozen() {
 
     assert_eq!(
         normalized.full_digest(),
-        "c740633164da6d87ae133635915b65572bf960b9401217a3b3afa84f5b40efe4"
+        "e5d8e853f6d1bd816f721f9ad7aca0c513cc026c6ca1d12bd4a8d7b97fcaca22"
     );
     assert_eq!(
         normalized
             .enforcement_identity_digest(&requirements(), &context())
             .unwrap(),
-        "2b7ebfca99a0fcf39e6878e6602c5a1ace96b3f3ebe75de121cbdd3c5f0acd5f"
+        "25c785d10162a695fa4fa4ce0ec18b8f0dcefeeeff91c166d305f10b1b1ea1b6"
     );
 }
 
@@ -336,10 +341,18 @@ fn production_policy_rejects_untrusted_or_ambient_surfaces() {
     ));
 
     let mut invalid = policy();
-    invalid.fetch.max_redirects = 1;
+    invalid.fetch.tls_ca_bundle = None;
     assert!(matches!(
         invalid.normalize(),
-        Err(ProductionBuildPolicyError::RedirectsUnsupported)
+        Err(ProductionBuildPolicyError::MissingFetchTlsCaBundle)
+    ));
+
+    let mut invalid = policy();
+    invalid.fetch.network_endpoints.clear();
+    invalid.fetch.tls_ca_bundle = None;
+    assert!(matches!(
+        invalid.normalize(),
+        Err(ProductionBuildPolicyError::CredentialHelperWithoutEndpoint)
     ));
 
     let mut invalid = policy();
@@ -423,7 +436,31 @@ fn attestation_trust_graph_and_closed_toml_fail_closed() {
         .unwrap()
         .normalize()
         .unwrap();
-    let unknown = encoded.replacen("schema = 1", "schema = 1\nambient-home = true", 1);
+    let unknown = encoded.replacen("schema = 2", "schema = 2\nambient-home = true", 1);
+    assert!(matches!(
+        ProductionBuildExecutionPolicy::from_toml(&unknown),
+        Err(ProductionBuildPolicyError::Toml(_))
+    ));
+}
+
+#[test]
+fn network_fetch_schema_two_binds_ca_and_redirect_policy() {
+    let normalized = policy().normalize().unwrap();
+    let encoded = toml::to_string(normalized.policy()).unwrap();
+    assert!(encoded.contains("redirect-policy = \"deny-unlisted-origin\""));
+    assert!(encoded.contains("[fetch.tls-ca-bundle]"));
+
+    let mut changed = policy();
+    changed.fetch.tls_ca_bundle.as_mut().unwrap().sha256 = digest("d");
+    assert_ne!(
+        changed.normalize().unwrap().full_digest(),
+        normalized.full_digest()
+    );
+
+    let unknown = encoded.replace(
+        "redirect-policy = \"deny-unlisted-origin\"",
+        "redirect-policy = \"follow-anywhere\"",
+    );
     assert!(matches!(
         ProductionBuildExecutionPolicy::from_toml(&unknown),
         Err(ProductionBuildPolicyError::Toml(_))

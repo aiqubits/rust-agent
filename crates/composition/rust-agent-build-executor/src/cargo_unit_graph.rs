@@ -39,6 +39,8 @@ pub struct CargoUnitSelector {
     pub compilation_kind: CargoCompilationKind,
     #[serde(rename = "compilation-target")]
     pub compilation_target: String,
+    #[serde(rename = "cargo-target-context")]
+    pub cargo_target_context: CargoUnitTargetContext,
     #[serde(rename = "compile-mode")]
     pub compile_mode: CargoCompileMode,
     pub profile: String,
@@ -52,6 +54,13 @@ pub enum CargoCompilationKind {
     #[serde(rename = "host")]
     BuildHost,
     Target,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CargoUnitTargetContext {
+    BuildHost,
+    CompositionTarget,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
@@ -166,7 +175,7 @@ pub struct NormalizedHostCargoUnitGraph {
 
 #[derive(Debug, Error)]
 pub enum CargoUnitGraphError {
-    #[error("unsupported HostCargoUnitGraph schema {0}; expected 1")]
+    #[error("unsupported HostCargoUnitGraph schema {0}; expected 2")]
     UnsupportedSchema(u32),
     #[error("invalid planner identity field `{0}`")]
     InvalidPlannerIdentity(&'static str),
@@ -196,7 +205,7 @@ pub enum CargoUnitGraphError {
 
 impl HostCargoUnitGraph {
     pub fn normalize(&self) -> Result<NormalizedHostCargoUnitGraph, CargoUnitGraphError> {
-        if self.schema != 1 {
+        if self.schema != 2 {
             return Err(CargoUnitGraphError::UnsupportedSchema(self.schema));
         }
         validate_planner(&self.planner)?;
@@ -241,9 +250,9 @@ impl HostCargoUnitGraph {
         let canonical_nodes: Vec<_> = nodes.values().cloned().collect();
         let canonical_edges: Vec<_> = edges.iter().cloned().collect();
         let digest = hex::encode(canonical::domain_hash(
-            b"rust-agent-host-cargo-unit-graph-v1\0",
+            b"rust-agent-host-cargo-unit-graph-v2\0",
             &(
-                1_u32,
+                2_u32,
                 &self.planner,
                 &self.build_triple,
                 &self.composition_target,
@@ -349,6 +358,39 @@ pub(crate) fn validate_selector(
         return Err(CargoUnitGraphError::InvalidSelector(format!(
             "compilation target `{}` does not match `{expected}`",
             selector.compilation_target
+        )));
+    }
+    let valid_context = matches!(
+        (
+            selector.compilation_kind,
+            selector.cargo_target_context,
+            selector.crate_kind,
+            selector.compile_mode,
+        ),
+        (
+            CargoCompilationKind::Target,
+            CargoUnitTargetContext::CompositionTarget,
+            _,
+            _
+        ) | (
+            CargoCompilationKind::BuildHost,
+            CargoUnitTargetContext::BuildHost,
+            _,
+            _
+        ) | (
+            CargoCompilationKind::BuildHost,
+            CargoUnitTargetContext::CompositionTarget,
+            CargoCrateKind::CustomBuild,
+            CargoCompileMode::RunCustomBuild,
+        )
+    );
+    if !valid_context {
+        return Err(CargoUnitGraphError::InvalidSelector(format!(
+            "Cargo target context {:?} is invalid for {:?}/{:?}/{:?}",
+            selector.cargo_target_context,
+            selector.compilation_kind,
+            selector.crate_kind,
+            selector.compile_mode,
         )));
     }
     Ok(())
@@ -564,6 +606,10 @@ mod tests {
                 CargoCompilationKind::Target => "wasm32-unknown-unknown",
             }
             .into(),
+            cargo_target_context: match compilation_kind {
+                CargoCompilationKind::BuildHost => CargoUnitTargetContext::BuildHost,
+                CargoCompilationKind::Target => CargoUnitTargetContext::CompositionTarget,
+            },
             compile_mode: CargoCompileMode::Build,
             profile: "release".into(),
             crate_kind,
@@ -582,7 +628,7 @@ mod tests {
             CargoCompilationKind::BuildHost,
         );
         HostCargoUnitGraph {
-            schema: 1,
+            schema: 2,
             planner: CargoUnitGraphPlannerIdentity {
                 interface: "cargo-unit-graph-v1".into(),
                 cargo_version: "1.97.1".into(),
@@ -632,6 +678,61 @@ mod tests {
         let mut reordered = graph();
         reordered.nodes.reverse();
         assert_eq!(first.digest(), reordered.normalize().unwrap().digest());
+    }
+
+    #[test]
+    fn schema_two_distinguishes_build_script_target_contexts() {
+        let mut build_host = selector(
+            "linked-helper",
+            CargoCrateKind::CustomBuild,
+            CargoCompilationKind::BuildHost,
+        );
+        build_host.compile_mode = CargoCompileMode::RunCustomBuild;
+        let mut composition_target = build_host.clone();
+        composition_target.cargo_target_context = CargoUnitTargetContext::CompositionTarget;
+        let mut value = graph();
+        value.nodes = vec![
+            CargoUnit {
+                selector: build_host,
+                features: vec![],
+                build_script: true,
+                proc_macro: false,
+            },
+            CargoUnit {
+                selector: composition_target,
+                features: vec![],
+                build_script: true,
+                proc_macro: false,
+            },
+        ];
+        value.edges.clear();
+        let normalized = value.normalize().unwrap();
+        assert_eq!(normalized.nodes().len(), 2);
+        assert_eq!(
+            normalized
+                .nodes()
+                .keys()
+                .map(|selector| selector.cargo_target_context)
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([
+                CargoUnitTargetContext::BuildHost,
+                CargoUnitTargetContext::CompositionTarget,
+            ])
+        );
+
+        let mut legacy = graph();
+        legacy.schema = 1;
+        assert!(matches!(
+            legacy.normalize(),
+            Err(CargoUnitGraphError::UnsupportedSchema(1))
+        ));
+
+        let mut invalid = graph();
+        invalid.nodes[0].selector.cargo_target_context = CargoUnitTargetContext::BuildHost;
+        assert!(matches!(
+            invalid.normalize(),
+            Err(CargoUnitGraphError::InvalidSelector(_))
+        ));
     }
 
     #[test]

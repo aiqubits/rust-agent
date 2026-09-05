@@ -1,6 +1,7 @@
 #![cfg(target_os = "linux")]
 
 use std::{
+    collections::{BTreeMap, BTreeSet},
     fs::{self, FileTimes, OpenOptions},
     io::Write,
     os::unix::{
@@ -8,6 +9,7 @@ use std::{
         net::UnixListener,
     },
     path::{Path, PathBuf},
+    process::Command,
     sync::{Arc, Barrier},
     thread,
     time::{Duration, SystemTime},
@@ -19,22 +21,27 @@ use rust_agent_build_executor::{
     CargoDependencyKind, CargoPackageIdentity, CargoPackageSource, CargoTargetEvaluationDomain,
     CargoUnit, CargoUnitEdge, CargoUnitGraphPlannerIdentity, CargoUnitSelector,
     DerivedExecutablePolicy, HostBuildClosureContent, HostBuildClosureItem,
-    HostBuildClosureItemRole, HostBuildInputClosure, HostCargoUnitGraph,
-    HostClosureMountObservation, HostClosureSnapshotManifest, HostClosureSnapshotSource,
-    HostFeaturePolicyClosure, NormalizedHostBuildInputClosure, NormalizedProductionBuildPolicy,
-    ProductionAttestationPolicy, ProductionBuildExecutionPolicy, ProductionFetchPolicy,
-    ProductionSandboxBackend, ProductionToolIdentity, ProductionToolchain, ProductionTreeIdentity,
-    SigningHelper, SnapshotMaterializationError, TrustedSigner, materialize_host_closure_snapshot,
-    verify_host_closure_snapshot,
+    HostBuildClosureItemRole, HostBuildInputClosure, HostBuildInputClosureError,
+    HostCargoUnitGraph, HostClosureMountObservation, HostClosureSnapshotManifest,
+    HostClosureSnapshotSource, HostFeaturePolicyClosure, NormalizedHostBuildInputClosure,
+    NormalizedProductionBuildPolicy, ProductionAttestationPolicy, ProductionBuildExecutionPolicy,
+    ProductionFetchPolicy, ProductionFetchRedirectPolicy, ProductionSandboxBackend,
+    ProductionTargetFactsProbeObservation, ProductionTargetFactsProbeRequest,
+    ProductionToolIdentity, ProductionToolchain, ProductionTreeIdentity, RustcSettingsRecord,
+    SigningHelper, SnapshotMaterializationError, TrustedSigner, cargo_resolution_record_digest,
+    materialize_host_closure_snapshot, open_verified_host_closure_snapshot,
+    preflight_production_build_inputs, verify_host_closure_snapshot,
 };
 use rust_agent_composition::{
-    canonical,
+    CustomTargetSpecRecord, MAX_CUSTOM_TARGET_SPEC_BYTES, canonical,
+    manifest::CargoResolutionRecord,
     metadata::BuildRequirements,
     snapshot::{
         CanonicalSnapshotEntry, CanonicalSnapshotEntryKind, CanonicalSnapshotTree,
         MAX_CANONICAL_SNAPSHOT_FILE_BYTES, MAX_CANONICAL_SNAPSHOT_JSON_BYTES,
         MAX_CANONICAL_SNAPSHOT_TOTAL_FILE_BYTES,
     },
+    target::{MAX_RUSTC_CFG_OUTPUT_BYTES, TargetFactsRecord, parse_facts},
 };
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
@@ -43,16 +50,12 @@ const HOST_MANIFEST_IN_TREE: &[u8] = b"[package]\nname = \"host-fixture\"\nversi
 const HOST_MANIFEST_CONFLICT: &[u8] =
     b"[package]\nname = \"different-host\"\nversion = \"0.1.0\"\n";
 const HOST_LOCK: &[u8] = b"version = 4\n";
-const CARGO_CONFIG: &[u8] = b"[net]\noffline = true\n";
+const CARGO_CONFIG: &[u8] =
+    b"[build]\ntarget = \"aarch64-unknown-linux-gnu\"\n\n[net]\noffline = true\n";
+const CUSTOM_TARGET_SPEC: &[u8] = br#"{"arch":"aarch64","llvm-target":"aarch64-unknown-linux-gnu","os":"linux","target-endian":"little","target-pointer-width":"64"}"#;
 const HOST_LIB: &[u8] = b"pub fn host() {}\n";
 const EMITTED_MANIFEST: &[u8] = b"[package]\nname = \"generated-agent\"\nversion = \"0.1.0\"\n";
 const EMITTED_LIB: &[u8] = b"pub fn generated() {}\n";
-const CARGO_RESOLUTION_BYTES: &[u8] = b"{\"schema\":1,\"registries\":{}}";
-const TARGET_FACTS_BYTES: &[u8] = b"{\"schema\":1,\"target\":\"aarch64-unknown-linux-gnu\"}";
-const RUSTC_SETTINGS_BYTES: &[u8] = b"{\"schema\":1,\"remap\":true}";
-const ARTIFACT_SELECTOR_BYTES: &[u8] =
-    b"{\"package\":\"host-fixture\",\"target\":{\"kind\":\"library\"}}";
-
 struct Fixture {
     raw: HostBuildInputClosure,
     closure: NormalizedHostBuildInputClosure,
@@ -71,14 +74,15 @@ fn labeled_digest(label: &str) -> String {
 
 fn policy() -> NormalizedProductionBuildPolicy {
     ProductionBuildExecutionPolicy {
-        schema: 1,
+        schema: 2,
         id: "ci-linux-hermetic-v1".into(),
         host: "cfg(target_os = \"linux\")".into(),
         backend: ProductionSandboxBackend::LinuxLandlockSeccomp,
         fetch: ProductionFetchPolicy {
             network_endpoints: vec![],
             credential_helper: None,
-            max_redirects: 0,
+            tls_ca_bundle: None,
+            redirect_policy: ProductionFetchRedirectPolicy::DenyUnlistedOrigin,
         },
         attestation: ProductionAttestationPolicy {
             allowed_executors: vec!["rust-agent-build-host-v1".into()],
@@ -123,14 +127,92 @@ fn policy() -> NormalizedProductionBuildPolicy {
     .unwrap()
 }
 
+fn pinned_tool_path(name: &str) -> PathBuf {
+    let output = Command::new("rustup")
+        .args(["which", name])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    PathBuf::from(String::from_utf8(output.stdout).unwrap().trim())
+        .canonicalize()
+        .unwrap()
+}
+
+fn tool_version_line(path: &Path, arguments: &[&str]) -> String {
+    let output = Command::new(path)
+        .args(arguments)
+        .env_clear()
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    String::from_utf8(output.stdout)
+        .unwrap()
+        .lines()
+        .next()
+        .unwrap()
+        .into()
+}
+
+fn bind_real_toolchain_policy(
+    raw: &mut HostBuildInputClosure,
+    source_root: &Path,
+) -> NormalizedProductionBuildPolicy {
+    let cargo = pinned_tool_path("cargo");
+    let rustc = pinned_tool_path("rustc");
+    let probe_sysroot = source_root.join("probe-sysroot");
+    fs::create_dir(&probe_sysroot).unwrap();
+    fs::write(probe_sysroot.join("marker"), b"probe-sysroot").unwrap();
+    let mut raw_policy = policy().policy().clone();
+    raw_policy.toolchain.cargo = ProductionToolIdentity {
+        path: cargo.clone(),
+        sha256: sha256(&fs::read(&cargo).unwrap()),
+        version: tool_version_line(&cargo, &["-V"]),
+    };
+    raw_policy.toolchain.rustc = ProductionToolIdentity {
+        path: rustc.clone(),
+        sha256: sha256(&fs::read(&rustc).unwrap()),
+        version: tool_version_line(&rustc, &["-vV"]),
+    };
+    raw_policy.toolchain.sysroot = ProductionTreeIdentity {
+        path: probe_sysroot,
+        tree_digest: canonical_tree(vec![CanonicalSnapshotEntry::regular_file(
+            "marker",
+            sha256(b"probe-sysroot"),
+            b"probe-sysroot".len() as u64,
+        )])
+        .digest()
+        .into(),
+    };
+    let real_policy = raw_policy.normalize().unwrap();
+    for graph in [&mut raw.standalone_unit_graph, &mut raw.final_unit_graph] {
+        graph.planner.cargo_version = "1.97.1".into();
+        graph
+            .planner
+            .cargo_digest
+            .clone_from(&real_policy.policy().toolchain.cargo.sha256);
+        graph.planner.rustc_version = "1.97.1".into();
+        graph
+            .planner
+            .rustc_digest
+            .clone_from(&real_policy.policy().toolchain.rustc.sha256);
+    }
+    raw.build_execution_policy_digest = real_policy.full_digest().into();
+    raw.build_enforcement_identity_digest = real_policy
+        .enforcement_identity_digest(&raw.build_requirements, &raw.build_context)
+        .unwrap();
+    real_policy
+}
+
 fn context() -> BuildEnforcementContext {
-    BuildEnforcementContext {
+    let target_facts = target_facts_record();
+    let cargo_resolution = cargo_resolution_record(&target_facts);
+    let mut context = BuildEnforcementContext {
         schema: 1,
         build_triple: "x86_64-unknown-linux-gnu".into(),
         target: "aarch64-unknown-linux-gnu".into(),
-        target_facts_digest: labeled_digest("target-facts-record"),
+        target_facts_digest: target_facts.semantic_digest().unwrap(),
         custom_target_spec_digest: None,
-        cargo_resolution_digest: labeled_digest("cargo-resolution-record"),
+        cargo_resolution_digest: cargo_resolution_record_digest(&cargo_resolution).unwrap(),
         cargo_config_digest: sha256(CARGO_CONFIG),
         profile: "release".into(),
         artifact_selector: BuildArtifactSelector {
@@ -138,8 +220,54 @@ fn context() -> BuildEnforcementContext {
             target: BuildArtifactTarget::Library,
         },
         panic_strategy: BuildPanicStrategy::Unwind,
-        rustc_settings_digest: labeled_digest("rustc-settings-record"),
+        rustc_settings_digest: labeled_digest("pending-rustc-settings-record"),
         prefix_remap_schema: 1,
+    };
+    context.rustc_settings_digest = RustcSettingsRecord::from_context(&context)
+        .digest()
+        .unwrap();
+    context
+}
+
+fn target_facts_record() -> TargetFactsRecord {
+    let facts = BTreeMap::from([
+        ("panic".into(), BTreeSet::from([Some("unwind".into())])),
+        ("target_abi".into(), BTreeSet::from([Some(String::new())])),
+        (
+            "target_arch".into(),
+            BTreeSet::from([Some("aarch64".into())]),
+        ),
+        (
+            "target_endian".into(),
+            BTreeSet::from([Some("little".into())]),
+        ),
+        ("target_env".into(), BTreeSet::from([Some("gnu".into())])),
+        ("target_os".into(), BTreeSet::from([Some("linux".into())])),
+        (
+            "target_pointer_width".into(),
+            BTreeSet::from([Some("64".into())]),
+        ),
+        (
+            "target_vendor".into(),
+            BTreeSet::from([Some("unknown".into())]),
+        ),
+    ]);
+    TargetFactsRecord::new("aarch64-unknown-linux-gnu", facts, None).unwrap()
+}
+
+fn cargo_resolution_record(target_facts: &TargetFactsRecord) -> CargoResolutionRecord {
+    CargoResolutionRecord {
+        schema: 1,
+        target: "aarch64-unknown-linux-gnu".into(),
+        cargo_target_input: "aarch64-unknown-linux-gnu".into(),
+        target_fact_digest: target_facts.semantic_digest().unwrap(),
+        custom_target_spec_digest: None,
+        resolver: "2".into(),
+        offline: true,
+        isolated_cargo_home: true,
+        ancestor_config: "forbidden".into(),
+        registries: BTreeMap::new(),
+        git_sources: BTreeSet::new(),
     }
 }
 
@@ -159,6 +287,7 @@ fn host_selector() -> CargoUnitSelector {
         target_name: "build-script-build".into(),
         compilation_kind: CargoCompilationKind::BuildHost,
         compilation_target: "x86_64-unknown-linux-gnu".into(),
+        cargo_target_context: rust_agent_build_executor::CargoUnitTargetContext::CompositionTarget,
         compile_mode: CargoCompileMode::RunCustomBuild,
         profile: "release".into(),
         crate_kind: CargoCrateKind::CustomBuild,
@@ -171,6 +300,7 @@ fn target_selector() -> CargoUnitSelector {
         target_name: "host_fixture".into(),
         compilation_kind: CargoCompilationKind::Target,
         compilation_target: "aarch64-unknown-linux-gnu".into(),
+        cargo_target_context: rust_agent_build_executor::CargoUnitTargetContext::CompositionTarget,
         compile_mode: CargoCompileMode::Build,
         profile: "release".into(),
         crate_kind: CargoCrateKind::Library,
@@ -179,7 +309,7 @@ fn target_selector() -> CargoUnitSelector {
 
 fn unit_graph() -> HostCargoUnitGraph {
     HostCargoUnitGraph {
-        schema: 1,
+        schema: 2,
         planner: CargoUnitGraphPlannerIdentity {
             interface: "cargo-unit-graph-v1".into(),
             cargo_version: "1.97.1".into(),
@@ -218,12 +348,16 @@ fn canonical_tree(entries: Vec<CanonicalSnapshotEntry>) -> CanonicalSnapshotTree
 }
 
 fn host_tree_digest() -> String {
+    host_tree_digest_with_config(CARGO_CONFIG)
+}
+
+fn host_tree_digest_with_config(cargo_config: &[u8]) -> String {
     canonical_tree(vec![
         CanonicalSnapshotEntry::directory(".cargo"),
         CanonicalSnapshotEntry::regular_file(
             ".cargo/config.toml",
-            sha256(CARGO_CONFIG),
-            CARGO_CONFIG.len() as u64,
+            sha256(cargo_config),
+            cargo_config.len() as u64,
         ),
         CanonicalSnapshotEntry::regular_file(
             "Cargo.lock",
@@ -237,6 +371,41 @@ fn host_tree_digest() -> String {
         ),
         CanonicalSnapshotEntry::directory("src"),
         CanonicalSnapshotEntry::regular_file("src/lib.rs", sha256(HOST_LIB), HOST_LIB.len() as u64),
+    ])
+    .digest()
+    .into()
+}
+
+fn host_tree_digest_with_custom_target(
+    cargo_config: &[u8],
+    spec: &CustomTargetSpecRecord,
+    spec_bytes: &[u8],
+) -> String {
+    canonical_tree(vec![
+        CanonicalSnapshotEntry::directory(".cargo"),
+        CanonicalSnapshotEntry::regular_file(
+            ".cargo/config.toml",
+            sha256(cargo_config),
+            cargo_config.len() as u64,
+        ),
+        CanonicalSnapshotEntry::regular_file(
+            "Cargo.lock",
+            sha256(HOST_LOCK),
+            HOST_LOCK.len() as u64,
+        ),
+        CanonicalSnapshotEntry::regular_file(
+            "Cargo.toml",
+            sha256(HOST_MANIFEST_IN_TREE),
+            HOST_MANIFEST_IN_TREE.len() as u64,
+        ),
+        CanonicalSnapshotEntry::directory("src"),
+        CanonicalSnapshotEntry::regular_file("src/lib.rs", sha256(HOST_LIB), HOST_LIB.len() as u64),
+        CanonicalSnapshotEntry::directory("targets"),
+        CanonicalSnapshotEntry::regular_file(
+            spec.snapshot_path.clone(),
+            sha256(spec_bytes),
+            spec_bytes.len() as u64,
+        ),
     ])
     .digest()
     .into()
@@ -322,6 +491,13 @@ impl Fixture {
     fn new(parent: &Path, name: &str, conflicting_overlay: bool) -> Self {
         let policy = policy();
         let context = context();
+        let target_facts_record = target_facts_record();
+        let cargo_resolution_record = cargo_resolution_record(&target_facts_record);
+        let rustc_settings_record = RustcSettingsRecord::from_context(&context);
+        let cargo_resolution_bytes = serde_json::to_vec_pretty(&cargo_resolution_record).unwrap();
+        let target_facts_bytes = serde_json::to_vec(&target_facts_record).unwrap();
+        let rustc_settings_bytes = serde_json::to_vec(&rustc_settings_record).unwrap();
+        let artifact_selector_bytes = serde_json::to_vec(&context.artifact_selector).unwrap();
         let requirements = BuildRequirements::default();
         let source_root = parent.join(name);
         fs::create_dir(&source_root).unwrap();
@@ -355,22 +531,22 @@ impl Fixture {
         let cargo_resolution = write_file(
             &source_root,
             "records/cargo-resolution.json",
-            CARGO_RESOLUTION_BYTES,
+            &cargo_resolution_bytes,
         );
         let target_facts = write_file(
             &source_root,
             "records/target-facts.json",
-            TARGET_FACTS_BYTES,
+            &target_facts_bytes,
         );
         let rustc_settings = write_file(
             &source_root,
             "records/rustc-settings.json",
-            RUSTC_SETTINGS_BYTES,
+            &rustc_settings_bytes,
         );
         let artifact_selector = write_file(
             &source_root,
             "records/artifact-selector.json",
-            ARTIFACT_SELECTOR_BYTES,
+            &artifact_selector_bytes,
         );
 
         let raw = HostBuildInputClosure {
@@ -414,28 +590,28 @@ impl Fixture {
                     "cargo-resolution",
                     "/rust-agent/closure/records/cargo-resolution.json",
                     context.cargo_resolution_digest.clone(),
-                    CARGO_RESOLUTION_BYTES,
+                    &cargo_resolution_bytes,
                 ),
                 record_item(
                     HostBuildClosureItemRole::TargetFactsRecord,
                     "target-facts",
                     "/rust-agent/closure/records/target-facts.json",
                     context.target_facts_digest.clone(),
-                    TARGET_FACTS_BYTES,
+                    &target_facts_bytes,
                 ),
                 record_item(
                     HostBuildClosureItemRole::RustcSettingsRecord,
                     "rustc-settings",
                     "/rust-agent/closure/records/rustc-settings.json",
                     context.rustc_settings_digest.clone(),
-                    RUSTC_SETTINGS_BYTES,
+                    &rustc_settings_bytes,
                 ),
                 record_item(
                     HostBuildClosureItemRole::ArtifactSelectorRecord,
                     "artifact-selector",
                     "/rust-agent/closure/records/artifact-selector.json",
                     context.artifact_selector.digest().unwrap(),
-                    ARTIFACT_SELECTOR_BYTES,
+                    &artifact_selector_bytes,
                 ),
             ],
             standalone_unit_graph: unit_graph(),
@@ -495,6 +671,109 @@ impl Fixture {
             source_root: fs::canonicalize(source_root).unwrap(),
             host_tree,
         }
+    }
+
+    fn with_custom_target(mut self) -> Self {
+        let policy = policy();
+        let spec = CustomTargetSpecRecord::from_raw_bytes(
+            &self.raw.build_context.target,
+            CUSTOM_TARGET_SPEC,
+        )
+        .unwrap();
+        let target_facts = target_facts_record();
+        let target_facts = TargetFactsRecord::new(
+            target_facts.triple,
+            target_facts.facts,
+            Some(spec.custom_target_spec_digest.clone()),
+        )
+        .unwrap();
+        let mut cargo_resolution = cargo_resolution_record(&target_facts);
+        cargo_resolution
+            .cargo_target_input
+            .clone_from(&spec.snapshot_path);
+        cargo_resolution.custom_target_spec_digest = Some(spec.custom_target_spec_digest.clone());
+        let cargo_config = cargo_resolution.canonical_cargo_config().into_bytes();
+        let target_facts_bytes = serde_json::to_vec(&target_facts).unwrap();
+        let cargo_resolution_bytes = serde_json::to_vec_pretty(&cargo_resolution).unwrap();
+
+        fs::write(self.host_tree.join(".cargo/config.toml"), &cargo_config).unwrap();
+        write_file(&self.host_tree, &spec.snapshot_path, CUSTOM_TARGET_SPEC);
+        let custom_target_source = write_file(
+            &self.source_root,
+            "direct/custom-target.json",
+            CUSTOM_TARGET_SPEC,
+        );
+        fs::write(
+            self.sources
+                .iter()
+                .find(|source| source.item_id == "cargo-config")
+                .unwrap()
+                .path
+                .as_path(),
+            &cargo_config,
+        )
+        .unwrap();
+        update_record_bytes(
+            &mut self.raw,
+            &self.sources,
+            "target-facts",
+            &target_facts_bytes,
+            Some(target_facts.semantic_digest().unwrap()),
+        );
+        update_record_bytes(
+            &mut self.raw,
+            &self.sources,
+            "cargo-resolution",
+            &cargo_resolution_bytes,
+            Some(cargo_resolution_record_digest(&cargo_resolution).unwrap()),
+        );
+
+        let config_item = self
+            .raw
+            .items
+            .iter_mut()
+            .find(|item| item.role == HostBuildClosureItemRole::CargoConfig)
+            .unwrap();
+        config_item.content = HostBuildClosureContent::File {
+            sha256: sha256(&cargo_config),
+        };
+        let host_tree_item = self
+            .raw
+            .items
+            .iter_mut()
+            .find(|item| item.role == HostBuildClosureItemRole::HostPackageTree)
+            .unwrap();
+        host_tree_item.content = HostBuildClosureContent::SnapshotTree {
+            tree_digest: host_tree_digest_with_custom_target(
+                &cargo_config,
+                &spec,
+                CUSTOM_TARGET_SPEC,
+            ),
+        };
+        self.raw.items.push(HostBuildClosureItem {
+            role: HostBuildClosureItemRole::CustomTargetSpec,
+            id: "custom-target-spec".into(),
+            logical_path: format!("/rust-agent/closure/host/{}", spec.snapshot_path),
+            metadata_contract: CanonicalSnapshotMetadataContract::ReadOnlyEpochV1,
+            content: HostBuildClosureContent::CustomTargetSpec {
+                digest: spec.custom_target_spec_digest.clone(),
+                bytes_sha256: spec.raw_bytes_sha256,
+            },
+        });
+        self.sources.push(HostClosureSnapshotSource {
+            item_id: "custom-target-spec".into(),
+            path: custom_target_source,
+        });
+        self.raw.build_context.custom_target_spec_digest = Some(spec.custom_target_spec_digest);
+        self.raw.build_context.target_facts_digest = target_facts.semantic_digest().unwrap();
+        self.raw.build_context.cargo_resolution_digest =
+            cargo_resolution_record_digest(&cargo_resolution).unwrap();
+        self.raw.build_context.cargo_config_digest = sha256(&cargo_config);
+        self.raw.build_enforcement_identity_digest = policy
+            .enforcement_identity_digest(&self.raw.build_requirements, &self.raw.build_context)
+            .unwrap();
+        self.closure = self.raw.normalize(&policy).unwrap();
+        self
     }
 }
 
@@ -557,6 +836,36 @@ fn assert_no_staging_directory(parent: &Path) {
             .to_string_lossy()
             .starts_with("rust-agent-snapshot-stage-")
     }));
+}
+
+fn update_record_bytes(
+    raw: &mut HostBuildInputClosure,
+    sources: &[HostClosureSnapshotSource],
+    item_id: &str,
+    bytes: &[u8],
+    semantic_digest: Option<String>,
+) {
+    let source = sources
+        .iter()
+        .find(|source| source.item_id == item_id)
+        .unwrap();
+    fs::write(&source.path, bytes).unwrap();
+    let item = raw
+        .items
+        .iter_mut()
+        .find(|item| item.id == item_id)
+        .unwrap();
+    let HostBuildClosureContent::CanonicalRecord {
+        digest,
+        bytes_sha256,
+    } = &mut item.content
+    else {
+        panic!("fixture item must be a canonical record");
+    };
+    *bytes_sha256 = sha256(bytes);
+    if let Some(semantic_digest) = semantic_digest {
+        *digest = semantic_digest;
+    }
 }
 
 fn set_local_mode_mtime(path: &Path, mode: u32) {
@@ -644,6 +953,619 @@ fn materialization_is_deterministic_locally_sealed_and_live_source_independent()
 }
 
 #[test]
+fn canonical_records_are_role_reparsed_and_bind_semantics_separately_from_bytes() {
+    let temp = TempDir::new().unwrap();
+    let fixture = Fixture::new(temp.path(), "sources", false);
+    let policy = policy();
+
+    let cargo_record = cargo_resolution_record(&target_facts_record());
+    let compact_bytes = serde_json::to_vec(&cargo_record).unwrap();
+    let mut reformatted_raw = fixture.raw.clone();
+    update_record_bytes(
+        &mut reformatted_raw,
+        &fixture.sources,
+        "cargo-resolution",
+        &compact_bytes,
+        None,
+    );
+    let reformatted = reformatted_raw.normalize(&policy).unwrap();
+    assert_ne!(fixture.closure.digest(), reformatted.digest());
+    let output = temp.path().join("semantic-equivalent-record");
+    materialize_host_closure_snapshot(&reformatted, &fixture.sources, &output).unwrap();
+    verify_host_closure_snapshot(&reformatted, &output).unwrap();
+    make_tree_writable(&output);
+
+    let fixture = Fixture::new(temp.path(), "unknown-field-sources", false);
+    let mut malformed_raw = fixture.raw.clone();
+    let rustc_source = fixture
+        .sources
+        .iter()
+        .find(|source| source.item_id == "rustc-settings")
+        .unwrap();
+    let mut malformed: serde_json::Value =
+        serde_json::from_slice(&fs::read(&rustc_source.path).unwrap()).unwrap();
+    malformed["ambient-rustflags"] = serde_json::json!("-Ctarget-cpu=native");
+    let malformed_bytes = serde_json::to_vec(&malformed).unwrap();
+    update_record_bytes(
+        &mut malformed_raw,
+        &fixture.sources,
+        "rustc-settings",
+        &malformed_bytes,
+        None,
+    );
+    let malformed = malformed_raw.normalize(&policy).unwrap();
+    let malformed_output = temp.path().join("malformed-record");
+    assert!(matches!(
+        materialize_host_closure_snapshot(&malformed, &fixture.sources, &malformed_output,),
+        Err(SnapshotMaterializationError::CanonicalRecord(
+            HostBuildInputClosureError::InvalidCanonicalRecord {
+                role: HostBuildClosureItemRole::RustcSettingsRecord,
+                ..
+            }
+        ))
+    ));
+    assert!(!malformed_output.exists());
+
+    let fixture = Fixture::new(temp.path(), "wrong-role-sources", false);
+    let rustc_bytes = fs::read(
+        &fixture
+            .sources
+            .iter()
+            .find(|source| source.item_id == "rustc-settings")
+            .unwrap()
+            .path,
+    )
+    .unwrap();
+    let mut wrong_role_raw = fixture.raw.clone();
+    update_record_bytes(
+        &mut wrong_role_raw,
+        &fixture.sources,
+        "artifact-selector",
+        &rustc_bytes,
+        None,
+    );
+    let wrong_role = wrong_role_raw.normalize(&policy).unwrap();
+    let wrong_role_output = temp.path().join("wrong-role-record");
+    assert!(matches!(
+        materialize_host_closure_snapshot(&wrong_role, &fixture.sources, &wrong_role_output,),
+        Err(SnapshotMaterializationError::CanonicalRecord(
+            HostBuildInputClosureError::InvalidCanonicalRecord {
+                role: HostBuildClosureItemRole::ArtifactSelectorRecord,
+                ..
+            }
+        ))
+    ));
+    assert!(!wrong_role_output.exists());
+    assert_no_staging_directory(temp.path());
+}
+
+#[test]
+fn custom_target_bytes_semantics_and_cargo_topology_are_closed_before_publication() {
+    let temp = TempDir::new().unwrap();
+    let fixture = Fixture::new(temp.path(), "custom-target-sources", false).with_custom_target();
+    let output = temp.path().join("custom-target-snapshot");
+    let snapshot =
+        materialize_host_closure_snapshot(&fixture.closure, &fixture.sources, &output).unwrap();
+    assert_eq!(
+        fs::read(
+            output
+                .join("data/host/targets")
+                .join("aarch64-unknown-linux-gnu.json")
+        )
+        .unwrap(),
+        CUSTOM_TARGET_SPEC
+    );
+    verify_host_closure_snapshot(&fixture.closure, &output).unwrap();
+    assert!(!snapshot.manifest().deployable);
+    make_tree_writable(&output);
+
+    let mut invalid_bytes = CUSTOM_TARGET_SPEC.to_vec();
+    invalid_bytes[0] = b'[';
+    *invalid_bytes.last_mut().unwrap() = b']';
+    let mut invalid =
+        Fixture::new(temp.path(), "invalid-custom-target-sources", false).with_custom_target();
+    let custom_source = invalid
+        .sources
+        .iter()
+        .find(|source| source.item_id == "custom-target-spec")
+        .unwrap();
+    fs::write(&custom_source.path, &invalid_bytes).unwrap();
+    fs::write(
+        invalid
+            .host_tree
+            .join("targets/aarch64-unknown-linux-gnu.json"),
+        &invalid_bytes,
+    )
+    .unwrap();
+    let spec = CustomTargetSpecRecord::from_raw_bytes(
+        &invalid.raw.build_context.target,
+        CUSTOM_TARGET_SPEC,
+    )
+    .unwrap();
+    let cargo_config_bytes = fs::read(
+        &invalid
+            .sources
+            .iter()
+            .find(|source| source.item_id == "cargo-config")
+            .unwrap()
+            .path,
+    )
+    .unwrap();
+    invalid
+        .raw
+        .items
+        .iter_mut()
+        .find(|item| item.role == HostBuildClosureItemRole::CustomTargetSpec)
+        .unwrap()
+        .content = HostBuildClosureContent::CustomTargetSpec {
+        digest: spec.custom_target_spec_digest.clone(),
+        bytes_sha256: sha256(&invalid_bytes),
+    };
+    invalid
+        .raw
+        .items
+        .iter_mut()
+        .find(|item| item.role == HostBuildClosureItemRole::HostPackageTree)
+        .unwrap()
+        .content = HostBuildClosureContent::SnapshotTree {
+        tree_digest: host_tree_digest_with_custom_target(
+            &cargo_config_bytes,
+            &spec,
+            &invalid_bytes,
+        ),
+    };
+    invalid.closure = invalid.raw.normalize(&policy()).unwrap();
+    let invalid_output = temp.path().join("invalid-custom-target-snapshot");
+    assert!(matches!(
+        materialize_host_closure_snapshot(&invalid.closure, &invalid.sources, &invalid_output),
+        Err(SnapshotMaterializationError::CanonicalRecord(
+            HostBuildInputClosureError::InvalidCustomTargetSpec { item, .. }
+        )) if item == "custom-target-spec"
+    ));
+    assert!(!invalid_output.exists());
+
+    let oversized_bytes = vec![b' '; usize::try_from(MAX_CUSTOM_TARGET_SPEC_BYTES).unwrap() + 1];
+    let mut oversized =
+        Fixture::new(temp.path(), "oversized-custom-target-sources", false).with_custom_target();
+    let custom_source = oversized
+        .sources
+        .iter()
+        .find(|source| source.item_id == "custom-target-spec")
+        .unwrap();
+    fs::write(&custom_source.path, &oversized_bytes).unwrap();
+    fs::write(
+        oversized
+            .host_tree
+            .join("targets/aarch64-unknown-linux-gnu.json"),
+        &oversized_bytes,
+    )
+    .unwrap();
+    let spec = CustomTargetSpecRecord::from_raw_bytes(
+        &oversized.raw.build_context.target,
+        CUSTOM_TARGET_SPEC,
+    )
+    .unwrap();
+    let cargo_config_bytes = fs::read(
+        &oversized
+            .sources
+            .iter()
+            .find(|source| source.item_id == "cargo-config")
+            .unwrap()
+            .path,
+    )
+    .unwrap();
+    oversized
+        .raw
+        .items
+        .iter_mut()
+        .find(|item| item.role == HostBuildClosureItemRole::CustomTargetSpec)
+        .unwrap()
+        .content = HostBuildClosureContent::CustomTargetSpec {
+        digest: spec.custom_target_spec_digest.clone(),
+        bytes_sha256: sha256(&oversized_bytes),
+    };
+    oversized
+        .raw
+        .items
+        .iter_mut()
+        .find(|item| item.role == HostBuildClosureItemRole::HostPackageTree)
+        .unwrap()
+        .content = HostBuildClosureContent::SnapshotTree {
+        tree_digest: host_tree_digest_with_custom_target(
+            &cargo_config_bytes,
+            &spec,
+            &oversized_bytes,
+        ),
+    };
+    oversized.closure = oversized.raw.normalize(&policy()).unwrap();
+    let oversized_output = temp.path().join("oversized-custom-target-snapshot");
+    let oversized_error = materialize_host_closure_snapshot(
+        &oversized.closure,
+        &oversized.sources,
+        &oversized_output,
+    )
+    .unwrap_err();
+    assert!(
+        matches!(
+            &oversized_error,
+            SnapshotMaterializationError::SourceBounds(item)
+                if item == "custom-target-spec"
+        ),
+        "unexpected oversized custom-target error: {oversized_error:?}"
+    );
+    assert!(!oversized_output.exists());
+
+    let mut forged =
+        Fixture::new(temp.path(), "forged-custom-target-sources", false).with_custom_target();
+    let forged_digest = labeled_digest("forged-custom-target-semantic-identity");
+    let base_facts = target_facts_record();
+    let forged_facts = TargetFactsRecord::new(
+        base_facts.triple,
+        base_facts.facts,
+        Some(forged_digest.clone()),
+    )
+    .unwrap();
+    let mut forged_resolution = cargo_resolution_record(&forged_facts);
+    forged_resolution.cargo_target_input = "targets/aarch64-unknown-linux-gnu.json".into();
+    forged_resolution.custom_target_spec_digest = Some(forged_digest.clone());
+    update_record_bytes(
+        &mut forged.raw,
+        &forged.sources,
+        "target-facts",
+        &serde_json::to_vec(&forged_facts).unwrap(),
+        Some(forged_facts.semantic_digest().unwrap()),
+    );
+    update_record_bytes(
+        &mut forged.raw,
+        &forged.sources,
+        "cargo-resolution",
+        &serde_json::to_vec_pretty(&forged_resolution).unwrap(),
+        Some(cargo_resolution_record_digest(&forged_resolution).unwrap()),
+    );
+    let HostBuildClosureContent::CustomTargetSpec { digest, .. } = &mut forged
+        .raw
+        .items
+        .iter_mut()
+        .find(|item| item.role == HostBuildClosureItemRole::CustomTargetSpec)
+        .unwrap()
+        .content
+    else {
+        unreachable!();
+    };
+    *digest = forged_digest.clone();
+    forged.raw.build_context.custom_target_spec_digest = Some(forged_digest);
+    forged.raw.build_context.target_facts_digest = forged_facts.semantic_digest().unwrap();
+    forged.raw.build_context.cargo_resolution_digest =
+        cargo_resolution_record_digest(&forged_resolution).unwrap();
+    forged.raw.build_enforcement_identity_digest = policy()
+        .enforcement_identity_digest(&forged.raw.build_requirements, &forged.raw.build_context)
+        .unwrap();
+    forged.closure = forged.raw.normalize(&policy()).unwrap();
+    let forged_output = temp.path().join("forged-custom-target-snapshot");
+    assert!(matches!(
+        materialize_host_closure_snapshot(&forged.closure, &forged.sources, &forged_output),
+        Err(SnapshotMaterializationError::CanonicalRecord(
+            HostBuildInputClosureError::CustomTargetSpecIdentityMismatch { item }
+        )) if item == "custom-target-spec"
+    ));
+    assert!(!forged_output.exists());
+
+    let mut wrong_path =
+        Fixture::new(temp.path(), "wrong-custom-target-path-sources", false).with_custom_target();
+    wrong_path
+        .raw
+        .items
+        .iter_mut()
+        .find(|item| item.role == HostBuildClosureItemRole::CustomTargetSpec)
+        .unwrap()
+        .logical_path = "/rust-agent/closure/host/targets/not-the-target.json".into();
+    wrong_path.closure = wrong_path.raw.normalize(&policy()).unwrap();
+    let wrong_path_output = temp.path().join("wrong-custom-target-path-snapshot");
+    assert!(matches!(
+        materialize_host_closure_snapshot(
+            &wrong_path.closure,
+            &wrong_path.sources,
+            &wrong_path_output,
+        ),
+        Err(SnapshotMaterializationError::CanonicalRecord(
+            HostBuildInputClosureError::CargoConfigSemanticMismatch { item }
+        )) if item == "cargo-config"
+    ));
+    assert!(!wrong_path_output.exists());
+
+    let mut probe_raw = fixture.raw.clone();
+    let real_policy = bind_real_toolchain_policy(&mut probe_raw, &fixture.source_root);
+    let probe_closure = probe_raw.normalize(&real_policy).unwrap();
+    let verified = preflight_production_build_inputs(&real_policy, &probe_closure).unwrap();
+    let request = verified.target_facts_probe_request(&probe_closure).unwrap();
+    assert_eq!(
+        request.custom_target_spec_logical_path.as_deref(),
+        Some("/rust-agent/closure/host/targets/aarch64-unknown-linux-gnu.json")
+    );
+    assert_eq!(
+        request.arguments[3],
+        request
+            .custom_target_spec_logical_path
+            .as_ref()
+            .unwrap()
+            .as_str()
+    );
+    assert_eq!(request.arguments[4], "-Zunstable-options");
+    assert_eq!(
+        ProductionTargetFactsProbeRequest::from_json(&serde_json::to_string(&request).unwrap())
+            .unwrap(),
+        request
+    );
+    assert!(matches!(
+        verified.run_local_target_facts_probe(&probe_closure),
+        Err(
+            rust_agent_build_executor::ProductionInputIdentityError::CustomTargetProbeRequiresMountedView
+        )
+    ));
+    assert_no_staging_directory(temp.path());
+}
+
+#[test]
+fn cargo_config_is_rederived_from_the_resolution_before_publication() {
+    let temp = TempDir::new().unwrap();
+    let fixture = Fixture::new(temp.path(), "cargo-config-sources", false);
+    let policy = policy();
+    let semantically_extra = b"[build]\ntarget = \"aarch64-unknown-linux-gnu\"\n\n[net]\noffline = true\n\n[alias]\nsmuggle = \"build\"\n";
+
+    let direct_config = &fixture
+        .sources
+        .iter()
+        .find(|source| source.item_id == "cargo-config")
+        .expect("fixture has a direct Cargo config")
+        .path;
+    fs::write(direct_config, semantically_extra).unwrap();
+    fs::write(
+        fixture.host_tree.join(".cargo/config.toml"),
+        semantically_extra,
+    )
+    .unwrap();
+
+    let mut raw = fixture.raw.clone();
+    let HostBuildClosureContent::File { sha256: config_sha } = &mut raw
+        .items
+        .iter_mut()
+        .find(|item| item.role == HostBuildClosureItemRole::CargoConfig)
+        .expect("fixture has a Cargo config item")
+        .content
+    else {
+        panic!("Cargo config must be a file");
+    };
+    *config_sha = sha256(semantically_extra);
+    let HostBuildClosureContent::SnapshotTree { tree_digest } = &mut raw
+        .items
+        .iter_mut()
+        .find(|item| item.role == HostBuildClosureItemRole::HostPackageTree)
+        .expect("fixture has a Host package tree")
+        .content
+    else {
+        panic!("Host package must be a snapshot tree");
+    };
+    *tree_digest = host_tree_digest_with_config(semantically_extra);
+    raw.build_context.cargo_config_digest = sha256(semantically_extra);
+    raw.build_enforcement_identity_digest = policy
+        .enforcement_identity_digest(&raw.build_requirements, &raw.build_context)
+        .unwrap();
+    let closure = raw.normalize(&policy).unwrap();
+    let output = temp.path().join("semantic-cargo-config-drift");
+
+    assert!(matches!(
+        materialize_host_closure_snapshot(&closure, &fixture.sources, &output),
+        Err(SnapshotMaterializationError::CanonicalRecord(
+            HostBuildInputClosureError::CargoConfigSemanticMismatch { item }
+        )) if item == "cargo-config"
+    ));
+    assert!(!output.exists());
+    assert_no_staging_directory(temp.path());
+}
+
+#[test]
+fn builtin_target_facts_are_reproduced_through_the_retained_rustc_descriptor() {
+    let temp = TempDir::new().unwrap();
+    let fixture = Fixture::new(temp.path(), "target-probe-sources", false);
+    let rustc = pinned_tool_path("rustc");
+    let target = fixture.raw.build_context.target.clone();
+    let direct_query = Command::new(&rustc)
+        .args(["--print", "cfg", "--target", &target])
+        .env_clear()
+        .current_dir("/")
+        .output()
+        .unwrap();
+    assert!(direct_query.status.success());
+    let stdout = String::from_utf8(direct_query.stdout).unwrap();
+    let expected_record =
+        TargetFactsRecord::new(&target, parse_facts(&stdout).unwrap(), None).unwrap();
+    let target_facts_bytes = serde_json::to_vec(&expected_record).unwrap();
+
+    let mut raw = fixture.raw.clone();
+    raw.build_context.target_facts_digest = expected_record.semantic_digest().unwrap();
+    let target_facts_digest = raw.build_context.target_facts_digest.clone();
+    update_record_bytes(
+        &mut raw,
+        &fixture.sources,
+        "target-facts",
+        &target_facts_bytes,
+        Some(target_facts_digest),
+    );
+    let cargo_resolution = cargo_resolution_record(&expected_record);
+    let cargo_resolution_bytes = serde_json::to_vec(&cargo_resolution).unwrap();
+    raw.build_context.cargo_resolution_digest =
+        cargo_resolution_record_digest(&cargo_resolution).unwrap();
+    let cargo_resolution_digest = raw.build_context.cargo_resolution_digest.clone();
+    update_record_bytes(
+        &mut raw,
+        &fixture.sources,
+        "cargo-resolution",
+        &cargo_resolution_bytes,
+        Some(cargo_resolution_digest),
+    );
+
+    let real_policy = bind_real_toolchain_policy(&mut raw, &fixture.source_root);
+    let closure = raw.normalize(&real_policy).unwrap();
+    let verified = preflight_production_build_inputs(&real_policy, &closure).unwrap();
+
+    let request = verified.target_facts_probe_request(&closure).unwrap();
+    assert_eq!(
+        request,
+        verified.target_facts_probe_request(&closure).unwrap()
+    );
+    let request_json = serde_json::to_string(&request).unwrap();
+    assert_eq!(
+        ProductionTargetFactsProbeRequest::from_json(&request_json).unwrap(),
+        request
+    );
+    let observation = verified.run_local_target_facts_probe(&closure).unwrap();
+    assert_eq!(observation.target_facts, expected_record);
+    let validated = verified
+        .validate_target_facts_probe_observation(&closure, &observation)
+        .unwrap();
+    assert_eq!(validated.request_digest(), request.digest());
+    assert_eq!(validated.observation_digest(), observation.digest());
+    assert_eq!(
+        validated.target_facts_digest(),
+        raw.build_context.target_facts_digest
+    );
+
+    let observation_json = serde_json::to_string(&observation).unwrap();
+    assert_eq!(
+        ProductionTargetFactsProbeObservation::from_json(&observation_json).unwrap(),
+        observation
+    );
+    let observation_with_unknown =
+        observation_json.replacen("\"schema\":1", "\"schema\":1,\"ambient\":true", 1);
+    assert!(ProductionTargetFactsProbeObservation::from_json(&observation_with_unknown).is_err());
+    let request_with_unknown =
+        request_json.replacen("\"schema\":1", "\"schema\":1,\"ambient\":true", 1);
+    assert!(ProductionTargetFactsProbeRequest::from_json(&request_with_unknown).is_err());
+
+    let failed = ProductionTargetFactsProbeObservation::new(
+        &request,
+        9,
+        String::new(),
+        "probe failed".into(),
+        expected_record.clone(),
+    )
+    .unwrap();
+    assert!(matches!(
+        verified.validate_target_facts_probe_observation(&closure, &failed),
+        Err(rust_agent_build_executor::ProductionInputIdentityError::TargetFactsProbeFailed(9))
+    ));
+
+    let mut wrong_facts = expected_record.facts.clone();
+    wrong_facts.insert("panic".into(), BTreeSet::from([Some("abort".into())]));
+    let wrong_record = TargetFactsRecord::new(&target, wrong_facts, None).unwrap();
+    let wrong = ProductionTargetFactsProbeObservation::new(
+        &request,
+        0,
+        observation.stdout.clone(),
+        observation.stderr.clone(),
+        wrong_record,
+    )
+    .unwrap();
+    assert!(matches!(
+        verified.validate_target_facts_probe_observation(&closure, &wrong),
+        Err(rust_agent_build_executor::ProductionInputIdentityError::TargetFactsMismatch)
+    ));
+    assert!(matches!(
+        ProductionTargetFactsProbeObservation::new(
+            &request,
+            0,
+            "x".repeat(MAX_RUSTC_CFG_OUTPUT_BYTES + 1),
+            String::new(),
+            expected_record.clone(),
+        ),
+        Err(
+            rust_agent_build_executor::ProductionInputIdentityError::TargetFactsProbeObservationMismatch
+        )
+    ));
+    let malformed = ProductionTargetFactsProbeObservation::new(
+        &request,
+        0,
+        "target_arch=not-quoted\n".into(),
+        String::new(),
+        expected_record,
+    )
+    .unwrap();
+    assert!(matches!(
+        verified.validate_target_facts_probe_observation(&closure, &malformed),
+        Err(rust_agent_build_executor::ProductionInputIdentityError::TargetFacts(_))
+    ));
+    assert!(matches!(
+        verified.target_facts_probe_request(&fixture.closure),
+        Err(
+            rust_agent_build_executor::ProductionInputIdentityError::TargetFactsProbeRequestMismatch
+        )
+    ));
+}
+
+#[test]
+fn canonical_record_cross_context_drift_fails_before_publication() {
+    let temp = TempDir::new().unwrap();
+    let fixture = Fixture::new(temp.path(), "sources", false);
+    let policy = policy();
+    let mut record = cargo_resolution_record(&target_facts_record());
+    record.target_fact_digest = labeled_digest("different-target-facts");
+    let bytes = serde_json::to_vec(&record).unwrap();
+    let semantic_digest = cargo_resolution_record_digest(&record).unwrap();
+    let mut raw = fixture.raw.clone();
+    update_record_bytes(
+        &mut raw,
+        &fixture.sources,
+        "cargo-resolution",
+        &bytes,
+        Some(semantic_digest.clone()),
+    );
+    raw.build_context.cargo_resolution_digest = semantic_digest;
+    raw.build_enforcement_identity_digest = policy
+        .enforcement_identity_digest(&raw.build_requirements, &raw.build_context)
+        .unwrap();
+    let closure = raw.normalize(&policy).unwrap();
+    let output = temp.path().join("cross-context-drift");
+    assert!(matches!(
+        materialize_host_closure_snapshot(&closure, &fixture.sources, &output),
+        Err(SnapshotMaterializationError::CanonicalRecord(
+            HostBuildInputClosureError::CanonicalRecordContextMismatch {
+                field: "target-facts-digest",
+                ..
+            }
+        ))
+    ));
+    assert!(!output.exists());
+
+    let fixture = Fixture::new(temp.path(), "semantic-digest-sources", false);
+    let mut raw = fixture.raw.clone();
+    let spoofed_digest = labeled_digest("spoofed-cargo-resolution-semantic-digest");
+    let HostBuildClosureContent::CanonicalRecord { digest, .. } = &mut raw
+        .items
+        .iter_mut()
+        .find(|item| item.id == "cargo-resolution")
+        .unwrap()
+        .content
+    else {
+        panic!("fixture item must be a canonical record");
+    };
+    *digest = spoofed_digest.clone();
+    raw.build_context.cargo_resolution_digest = spoofed_digest;
+    raw.build_enforcement_identity_digest = policy
+        .enforcement_identity_digest(&raw.build_requirements, &raw.build_context)
+        .unwrap();
+    let closure = raw.normalize(&policy).unwrap();
+    let output = temp.path().join("semantic-digest-drift");
+    assert!(matches!(
+        materialize_host_closure_snapshot(&closure, &fixture.sources, &output),
+        Err(SnapshotMaterializationError::CanonicalRecord(
+            HostBuildInputClosureError::CanonicalRecordDigestMismatch { .. }
+        ))
+    ));
+    assert!(!output.exists());
+    assert_no_staging_directory(temp.path());
+}
+
+#[test]
 fn exact_overlay_is_allowed_but_conflicting_overlay_never_publishes() {
     let temp = TempDir::new().unwrap();
     let exact = Fixture::new(temp.path(), "exact-sources", false);
@@ -707,7 +1629,15 @@ fn descendant_file_and_record_overlays_work_on_both_sides_of_the_ancestor_tree()
     );
     assert_eq!(
         fs::read(output.join("data/host/after-tree/cargo-resolution.json")).unwrap(),
-        CARGO_RESOLUTION_BYTES
+        fs::read(
+            &fixture
+                .sources
+                .iter()
+                .find(|source| source.item_id == "cargo-resolution")
+                .unwrap()
+                .path
+        )
+        .unwrap()
     );
     verify_host_closure_snapshot(&closure, &output).unwrap();
 
@@ -903,6 +1833,28 @@ fn source_set_symlink_and_special_entries_fail_before_publication() {
     ));
     assert!(!direct_symlink_output.exists());
     fs::remove_file(direct_symlink).unwrap();
+
+    let ancestor_target = fixture.source_root.join("ancestor-target");
+    fs::create_dir(&ancestor_target).unwrap();
+    fs::write(ancestor_target.join("Cargo.toml"), HOST_MANIFEST_IN_TREE).unwrap();
+    let ancestor_link = fixture.source_root.join("ancestor-link");
+    symlink(&ancestor_target, &ancestor_link).unwrap();
+    let mut ancestor_symlink_sources = fixture.sources.clone();
+    ancestor_symlink_sources
+        .iter_mut()
+        .find(|source| source.item_id == "host-root-manifest")
+        .unwrap()
+        .path = ancestor_link.join("Cargo.toml");
+    let ancestor_symlink_output = temp.path().join("ancestor-symlink");
+    assert!(matches!(
+        materialize_host_closure_snapshot(
+            &fixture.closure,
+            &ancestor_symlink_sources,
+            &ancestor_symlink_output,
+        ),
+        Err(SnapshotMaterializationError::InvalidConcretePath(_))
+    ));
+    assert!(!ancestor_symlink_output.exists());
 
     let real_output_parent = temp.path().join("real-output-parent");
     fs::create_dir(&real_output_parent).unwrap();
@@ -1581,4 +2533,48 @@ fn manifest_symlinks_and_oversize_files_are_rejected_before_parsing() {
     ));
 
     make_tree_writable(&output);
+}
+
+#[test]
+fn verified_snapshot_handle_rejects_in_place_mutation() {
+    let temp = TempDir::new().unwrap();
+    let fixture = Fixture::new(temp.path(), "sources", false);
+    let output = temp.path().join("snapshot");
+    materialize_host_closure_snapshot(&fixture.closure, &fixture.sources, &output).unwrap();
+    let verified = open_verified_host_closure_snapshot(&fixture.closure, &output).unwrap();
+    verified.verify_unchanged().unwrap();
+
+    fs::set_permissions(&output, fs::Permissions::from_mode(0o755)).unwrap();
+    let manifest_path = output.join("rust-agent-host-closure-snapshot.json");
+    fs::set_permissions(&manifest_path, fs::Permissions::from_mode(0o644)).unwrap();
+    OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .open(&manifest_path)
+        .unwrap()
+        .write_all(b"{}")
+        .unwrap();
+
+    assert!(verified.verify_unchanged().is_err());
+    make_tree_writable(&output);
+}
+
+#[test]
+fn verified_snapshot_handle_rejects_exact_path_replacement() {
+    let temp = TempDir::new().unwrap();
+    let fixture = Fixture::new(temp.path(), "sources", false);
+    let output = temp.path().join("snapshot");
+    materialize_host_closure_snapshot(&fixture.closure, &fixture.sources, &output).unwrap();
+    let verified = open_verified_host_closure_snapshot(&fixture.closure, &output).unwrap();
+    let displaced = temp.path().join("displaced");
+
+    fs::rename(&output, &displaced).unwrap();
+    materialize_host_closure_snapshot(&fixture.closure, &fixture.sources, &output).unwrap();
+
+    assert!(matches!(
+        verified.verify_unchanged(),
+        Err(SnapshotMaterializationError::DestinationPathChanged(_))
+    ));
+    make_tree_writable(&output);
+    make_tree_writable(&displaced);
 }

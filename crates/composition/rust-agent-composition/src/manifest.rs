@@ -109,6 +109,26 @@ pub struct CargoResolutionRecord {
     pub git_sources: BTreeSet<String>,
 }
 
+impl CargoResolutionRecord {
+    /// Reconstructs the exact schema-v1 Cargo configuration committed by this
+    /// resolution record.
+    pub fn canonical_cargo_config(&self) -> String {
+        canonical_cargo_config(
+            &self.cargo_target_input,
+            self.custom_target_spec_digest.is_some(),
+        )
+    }
+}
+
+pub(crate) fn canonical_cargo_config(cargo_target_input: &str, custom_target: bool) -> String {
+    let rustflags = if custom_target {
+        "rustflags = [\"-Zunstable-options\"]\n"
+    } else {
+        ""
+    };
+    format!("[build]\ntarget = {cargo_target_input:?}\n{rustflags}\n[net]\noffline = true\n")
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct UncheckedCargoResolutionRecord {

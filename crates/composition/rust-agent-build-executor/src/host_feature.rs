@@ -67,7 +67,7 @@ pub struct NormalizedHostFeaturePolicy {
     digest: String,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct HostFeatureUnitObservation {
     #[serde(rename = "feature-requesters")]
@@ -86,7 +86,7 @@ pub struct HostFeatureUnitObservation {
     pub has_native_link_output: bool,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProductBuildContribution {
     pub unit: CargoUnitSelector,
@@ -96,7 +96,7 @@ pub struct ProductBuildContribution {
     pub downstream_runtime_effects: BTreeSet<String>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct HostFeaturePolicyStageDigests {
     pub pre: Option<String>,
@@ -112,6 +112,15 @@ impl HostFeaturePolicyStageDigests {
             pre: digest.clone(),
             build_host: digest.clone(),
             post: digest,
+        }
+    }
+}
+
+impl NormalizedHostFeaturePolicy {
+    pub fn attestation_policy(&self) -> HostFeatureUnionPolicy {
+        HostFeatureUnionPolicy {
+            schema: 1,
+            entries: self.entries.values().cloned().collect(),
         }
     }
 }
@@ -137,7 +146,7 @@ pub struct FeatureDelta {
     pub added_features: BTreeSet<String>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct HostFeatureDeltaRecord {
     pub unit: CargoUnitSelector,
@@ -164,9 +173,9 @@ pub struct HostFeatureDeltaRecord {
     pub audit_ref: String,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct DevelopmentHostFeatureReceipt {
+pub struct HostFeatureVerificationReceipt {
     pub schema: u32,
     pub deployable: bool,
     #[serde(rename = "standalone-unit-graph-digest")]
@@ -189,6 +198,14 @@ pub struct DevelopmentHostFeatureReceipt {
     #[serde(rename = "product-compiled-runtime-effects")]
     pub product_compiled_runtime_effects: BTreeSet<String>,
     pub digest: String,
+}
+
+pub type DevelopmentHostFeatureReceipt = HostFeatureVerificationReceipt;
+pub type ProductionHostFeatureReceipt = HostFeatureVerificationReceipt;
+
+#[derive(Clone, Debug)]
+pub struct VerifiedProductionHostFeatureReceipt {
+    receipt: HostFeatureVerificationReceipt,
 }
 
 #[derive(Debug, Error)]
@@ -322,6 +339,94 @@ impl NormalizedHostFeaturePolicy {
 pub fn verify_development_host_feature_union(
     verification: &DevelopmentHostFeatureVerification<'_>,
 ) -> Result<DevelopmentHostFeatureReceipt, HostFeaturePolicyError> {
+    verify_host_feature_union(verification, false)
+}
+
+pub fn verify_production_host_feature_union(
+    verification: &DevelopmentHostFeatureVerification<'_>,
+) -> Result<VerifiedProductionHostFeatureReceipt, HostFeaturePolicyError> {
+    Ok(VerifiedProductionHostFeatureReceipt {
+        receipt: verify_host_feature_union(verification, true)?,
+    })
+}
+
+impl VerifiedProductionHostFeatureReceipt {
+    pub fn receipt(&self) -> &ProductionHostFeatureReceipt {
+        &self.receipt
+    }
+
+    pub(crate) fn from_attested(
+        receipt: HostFeatureVerificationReceipt,
+    ) -> Result<Self, HostFeaturePolicyError> {
+        receipt.verify_identity()?;
+        if !receipt.deployable {
+            return Err(HostFeaturePolicyError::PolicyStageDigestMismatch);
+        }
+        Ok(Self { receipt })
+    }
+}
+
+impl HostFeatureVerificationReceipt {
+    pub fn verify_identity(&self) -> Result<(), HostFeaturePolicyError> {
+        if self.schema != 1
+            || self.digest != self.recompute_digest()?
+            || self.final_unit_graph_digest != self.observed_unit_graph_digest
+            || self.stage_policy_digests
+                != (HostFeaturePolicyStageDigests {
+                    pre: self.policy_digest.clone(),
+                    build_host: self.policy_digest.clone(),
+                    post: self.policy_digest.clone(),
+                })
+            || self
+                .deltas
+                .windows(2)
+                .any(|pair| pair[0].unit >= pair[1].unit)
+            || self
+                .product_build_contributions
+                .windows(2)
+                .any(|pair| pair[0].unit >= pair[1].unit)
+            || !self
+                .composition_compiled_runtime_effects
+                .is_subset(&self.product_compiled_runtime_effects)
+            || !self
+                .host_root_runtime_effects
+                .is_subset(&self.product_compiled_runtime_effects)
+            || self.product_build_contributions.iter().any(|contribution| {
+                !contribution
+                    .downstream_runtime_effects
+                    .is_subset(&self.product_compiled_runtime_effects)
+            })
+        {
+            return Err(HostFeaturePolicyError::PolicyStageDigestMismatch);
+        }
+        Ok(())
+    }
+
+    fn recompute_digest(&self) -> Result<String, HostFeaturePolicyError> {
+        Ok(hex::encode(canonical::domain_hash(
+            b"rust-agent-host-feature-verification-receipt-v1\0",
+            &(
+                self.schema,
+                self.deployable,
+                &self.standalone_unit_graph_digest,
+                &self.final_unit_graph_digest,
+                &self.observed_unit_graph_digest,
+                &self.policy_digest,
+                &self.stage_policy_digests,
+                &self.deltas,
+                &self.composition_compiled_runtime_effects,
+                &self.host_root_runtime_effects,
+                &self.product_build_contributions,
+                &self.product_compiled_runtime_effects,
+            ),
+        )?))
+    }
+}
+
+fn verify_host_feature_union(
+    verification: &DevelopmentHostFeatureVerification<'_>,
+    deployable: bool,
+) -> Result<HostFeatureVerificationReceipt, HostFeaturePolicyError> {
     verification
         .final_graph
         .verify_observation(verification.observed_graph)?;
@@ -399,11 +504,25 @@ pub fn verify_development_host_feature_union(
         }
     }
 
-    let actual_added_units: BTreeMap<_, _> = final_nodes
+    let all_added_units: BTreeMap<_, _> = final_nodes
         .iter()
         .filter(|(selector, _)| !baseline_nodes.contains_key(*selector))
         .map(|(selector, unit)| (selector.clone(), denormalize_unit(unit)))
         .collect();
+    let all_added_edges: BTreeSet<_> = verification
+        .final_graph
+        .edges()
+        .difference(verification.standalone_graph.edges())
+        .cloned()
+        .collect();
+    // The final Host graph normally contains product-owned ancestors of the emitted
+    // composition. They are not feature-delta dependencies and therefore must not
+    // require a HostFeatureUnionPolicy entry. Only new units/edges reachable in the
+    // dependency direction from a baseline unit whose features changed belong to
+    // the feature-delta closure. This also prevents a product ancestor from being
+    // smuggled into an allow-added-units entry.
+    let (actual_added_units, actual_added_edges) =
+        feature_delta_closure(&changed_units, &all_added_units, &all_added_edges);
     if let Some(unit) = actual_added_units
         .keys()
         .find(|unit| verification.first_party_units.contains(*unit))
@@ -415,13 +534,6 @@ pub fn verify_development_host_feature_union(
     for unit in actual_added_units.values() {
         validate_added_unit(unit)?;
     }
-    let actual_added_edges: BTreeSet<_> = verification
-        .final_graph
-        .edges()
-        .difference(verification.standalone_graph.edges())
-        .cloned()
-        .collect();
-
     let mut observed_added_units = BTreeMap::new();
     let mut observed_added_edges = BTreeSet::new();
     let mut policy_added_units = BTreeMap::new();
@@ -560,10 +672,10 @@ pub fn verify_development_host_feature_union(
         verification.composition_compiled_runtime_effects.clone();
     let host_root_runtime_effects = verification.host_root_runtime_effects.clone();
     let digest = hex::encode(canonical::domain_hash(
-        b"rust-agent-development-host-feature-receipt-v1\0",
+        b"rust-agent-host-feature-verification-receipt-v1\0",
         &(
             1_u32,
-            false,
+            deployable,
             &standalone_unit_graph_digest,
             &final_unit_graph_digest,
             &observed_unit_graph_digest,
@@ -576,9 +688,9 @@ pub fn verify_development_host_feature_union(
             &product_compiled_runtime_effects,
         ),
     )?);
-    Ok(DevelopmentHostFeatureReceipt {
+    let receipt = HostFeatureVerificationReceipt {
         schema: 1,
-        deployable: false,
+        deployable,
         standalone_unit_graph_digest,
         final_unit_graph_digest,
         observed_unit_graph_digest,
@@ -590,7 +702,43 @@ pub fn verify_development_host_feature_union(
         product_build_contributions,
         product_compiled_runtime_effects,
         digest,
-    })
+    };
+    receipt.verify_identity()?;
+    Ok(receipt)
+}
+
+fn feature_delta_closure(
+    changed_units: &BTreeSet<CargoUnitSelector>,
+    all_added_units: &BTreeMap<CargoUnitSelector, CargoUnit>,
+    all_added_edges: &BTreeSet<CargoUnitEdge>,
+) -> (
+    BTreeMap<CargoUnitSelector, CargoUnit>,
+    BTreeSet<CargoUnitEdge>,
+) {
+    let mut reachable_dependents = changed_units.clone();
+    let mut selected_units = BTreeMap::new();
+    let mut selected_edges = BTreeSet::new();
+    loop {
+        let mut changed = false;
+        for edge in all_added_edges {
+            if !reachable_dependents.contains(&edge.dependent) {
+                continue;
+            }
+            selected_edges.insert(edge.clone());
+            if let Some(unit) = all_added_units.get(&edge.dependency)
+                && selected_units
+                    .insert(edge.dependency.clone(), unit.clone())
+                    .is_none()
+            {
+                reachable_dependents.insert(edge.dependency.clone());
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    (selected_units, selected_edges)
 }
 
 fn normalize_entry(
@@ -932,6 +1080,7 @@ mod tests {
             target_name: "external_helper".into(),
             compilation_kind: CargoCompilationKind::Target,
             compilation_target: "x86_64-unknown-linux-gnu".into(),
+            cargo_target_context: crate::CargoUnitTargetContext::CompositionTarget,
             compile_mode: CargoCompileMode::Build,
             profile: "dev".into(),
             crate_kind: CargoCrateKind::Library,
@@ -951,6 +1100,8 @@ mod tests {
     fn build_selector() -> CargoUnitSelector {
         let mut value = product_selector();
         value.compilation_kind = CargoCompilationKind::BuildHost;
+        value.compilation_target = "x86_64-unknown-linux-gnu".into();
+        value.cargo_target_context = crate::CargoUnitTargetContext::BuildHost;
         value.crate_kind = CargoCrateKind::CustomBuild;
         value.compile_mode = crate::CargoCompileMode::RunCustomBuild;
         value
@@ -992,7 +1143,7 @@ mod tests {
 
     fn graph(features: &[&str]) -> NormalizedHostCargoUnitGraph {
         HostCargoUnitGraph {
-            schema: 1,
+            schema: 2,
             planner: CargoUnitGraphPlannerIdentity {
                 interface: "cargo-unit-graph-v1".into(),
                 cargo_version: "1.97.1".into(),
@@ -1019,8 +1170,14 @@ mod tests {
         let mut added_selector = selector();
         added_selector.package.name = "feature-activated-helper".into();
         added_selector.target_name = "feature_activated_helper".into();
+        let added_edge = CargoUnitEdge {
+            dependent: selector(),
+            dependency: added_selector.clone(),
+            dependency_kind: CargoDependencyKind::Normal,
+            target_evaluation_domain: CargoTargetEvaluationDomain::Target,
+        };
         HostCargoUnitGraph {
-            schema: 1,
+            schema: 2,
             planner: CargoUnitGraphPlannerIdentity {
                 interface: "cargo-unit-graph-v1".into(),
                 cargo_version: "1.97.1".into(),
@@ -1045,7 +1202,46 @@ mod tests {
                     proc_macro: false,
                 },
             ],
-            edges: vec![],
+            edges: vec![added_edge],
+        }
+        .normalize()
+        .unwrap()
+    }
+
+    fn graph_with_product_ancestor(features: &[&str]) -> NormalizedHostCargoUnitGraph {
+        let product = product_selector();
+        HostCargoUnitGraph {
+            schema: 2,
+            planner: CargoUnitGraphPlannerIdentity {
+                interface: "cargo-unit-graph-v1".into(),
+                cargo_version: "1.97.1".into(),
+                cargo_digest: "22".repeat(32),
+                rustc_version: "1.97.1".into(),
+                rustc_digest: "33".repeat(32),
+            },
+            build_triple: "x86_64-unknown-linux-gnu".into(),
+            composition_target: "x86_64-unknown-linux-gnu".into(),
+            profile: "dev".into(),
+            nodes: vec![
+                CargoUnit {
+                    selector: product.clone(),
+                    features: vec![],
+                    build_script: false,
+                    proc_macro: false,
+                },
+                CargoUnit {
+                    selector: selector(),
+                    features: features.iter().map(|value| (*value).to_owned()).collect(),
+                    build_script: false,
+                    proc_macro: false,
+                },
+            ],
+            edges: vec![CargoUnitEdge {
+                dependent: product,
+                dependency: selector(),
+                dependency_kind: CargoDependencyKind::Normal,
+                target_evaluation_domain: CargoTargetEvaluationDomain::Target,
+            }],
         }
         .normalize()
         .unwrap()
@@ -1287,6 +1483,24 @@ mod tests {
             }),
             Err(HostFeaturePolicyError::MissingPolicy)
         ));
+
+        let final_with_product = graph_with_product_ancestor(&["std"]);
+        let product_receipt =
+            verify_development_host_feature_union(&DevelopmentHostFeatureVerification {
+                standalone_graph: &baseline,
+                final_graph: &final_with_product,
+                observed_graph: &final_with_product,
+                first_party_units: &BTreeSet::new(),
+                policy: None,
+                stage_policy_digests: &stages,
+                observations: &BTreeMap::new(),
+                composition_compiled_runtime_effects: &BTreeSet::new(),
+                host_root_runtime_effects: &BTreeSet::new(),
+                product_build_contributions: &[],
+            })
+            .unwrap();
+        assert!(!product_receipt.deployable);
+        assert!(product_receipt.deltas.is_empty());
     }
 
     #[test]
@@ -1306,6 +1520,10 @@ mod tests {
         .normalize()
         .unwrap();
         assert_eq!(first.digest(), reversed.digest());
+        let attested = first.attestation_policy();
+        assert_eq!(attested.schema, 1);
+        assert_eq!(attested.entries.len(), 2);
+        assert_eq!(attested.normalize().unwrap().digest(), first.digest());
         assert!(matches!(
             (HostFeatureUnionPolicy {
                 schema: 1,

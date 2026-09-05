@@ -1,4 +1,7 @@
-use std::{collections::BTreeMap, path::PathBuf};
+use std::{
+    collections::BTreeMap,
+    path::{Path, PathBuf},
+};
 
 use rust_agent_composition::canonical;
 use serde::{Deserialize, Serialize};
@@ -7,19 +10,20 @@ use thiserror::Error;
 use crate::{
     BuildArtifactSelector, BuildArtifactTarget, BuildPanicStrategy, CargoUnitGraphPlannerIdentity,
     HostBuildClosureItemRole, NormalizedHostBuildInputClosure, NormalizedProductionBuildPolicy,
-    ProductionBuildPolicyError,
+    ProductionBuildPolicyError, fetch_runner::cargo_target_information_query,
 };
 
 mod normalization;
 
 pub use normalization::{
     CargoPlannerEdgeSemantic, CargoPlannerEdgeSemantics, CargoUnitGraphNormalizationError,
-    normalize_cargo_unit_graph,
+    derive_cargo_planner_edge_semantics_from_metadata, normalize_cargo_unit_graph,
 };
 
 const LOGICAL_RUSTC: &str = "/rust-agent/toolchain/bin/rustc";
 const LOGICAL_CARGO_HOME: &str = "/rust-agent/cargo-home";
 const LOGICAL_TARGET_DIR: &str = "/rust-agent/target";
+const CARGO_CHANNEL_OVERRIDE: &str = "__CARGO_TEST_CHANNEL_OVERRIDE_DO_NOT_USE_THIS";
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -75,7 +79,7 @@ pub struct VerifiedCargoUnitGraphEnvelope {
 
 #[derive(Debug, Error)]
 pub enum CargoPlannerError {
-    #[error("unsupported Cargo planner request schema {0}; expected 1")]
+    #[error("unsupported Cargo planner request schema {0}; expected 2")]
     UnsupportedRequestSchema(u32),
     #[error("Cargo planner policy does not match HostBuildInputClosure")]
     PolicyMismatch,
@@ -95,6 +99,8 @@ pub enum CargoPlannerError {
     PlannerFailed(i32),
     #[error("Cargo unit-graph planning emitted unexpected stderr")]
     UnexpectedStderr,
+    #[error("normalized Cargo planner request no longer matches its bound digest")]
+    RequestDigestMismatch,
     #[error("Cargo unit-graph output does not match the requested target/profile")]
     PlannerContextMismatch,
     #[error("production build policy verification failed: {0}")]
@@ -217,7 +223,7 @@ impl CargoPlannerRequest {
         policy: &NormalizedProductionBuildPolicy,
         closure: &NormalizedHostBuildInputClosure,
     ) -> Result<NormalizedCargoPlannerRequest, CargoPlannerError> {
-        if self.schema != 1 {
+        if self.schema != 2 {
             return Err(CargoPlannerError::UnsupportedRequestSchema(self.schema));
         }
         if closure.build_execution_policy_digest() != policy.full_digest() {
@@ -278,6 +284,8 @@ impl CargoPlannerRequest {
             "unstable-options".into(),
         ]);
         let environment = BTreeMap::from([
+            (CARGO_CHANNEL_OVERRIDE.into(), "nightly".into()),
+            ("CARGO_CACHE_RUSTC_INFO".into(), "0".into()),
             ("CARGO_HOME".into(), LOGICAL_CARGO_HOME.into()),
             ("CARGO_INCREMENTAL".into(), "0".into()),
             ("CARGO_NET_OFFLINE".into(), "true".into()),
@@ -290,13 +298,13 @@ impl CargoPlannerRequest {
         ]);
         let working_directory = manifest_parent(&manifest_logical_path)?.into();
         let invocation = CargoPlannerInvocation {
-            executable: toolchain.cargo.path.clone(),
+            executable: PathBuf::from("/rust-agent/toolchain/bin/cargo"),
             arguments,
             environment,
             working_directory,
         };
         let projection = PlannerRequestProjection {
-            schema: 1,
+            schema: 2,
             root: self.root,
             planner: &planner,
             build_execution_policy_digest: policy.full_digest(),
@@ -312,7 +320,7 @@ impl CargoPlannerRequest {
             working_directory: &invocation.working_directory,
         };
         let digest = hex::encode(canonical::domain_hash(
-            b"rust-agent-cargo-unit-graph-planner-request-v1\0",
+            b"rust-agent-cargo-unit-graph-planner-request-v2\0",
             &projection,
         )?);
         Ok(NormalizedCargoPlannerRequest {
@@ -382,12 +390,54 @@ impl NormalizedCargoPlannerRequest {
         &self.digest
     }
 
+    pub fn verify(&self) -> Result<(), CargoPlannerError> {
+        let projection = PlannerRequestProjection {
+            schema: 2,
+            root: self.root,
+            planner: &self.planner,
+            build_execution_policy_digest: &self.build_execution_policy_digest,
+            host_build_input_closure_digest: &self.host_build_input_closure_digest,
+            manifest_logical_path: &self.manifest_logical_path,
+            cargo_config_logical_path: &self.cargo_config_logical_path,
+            target: &self.target,
+            profile: &self.profile,
+            artifact_selector: &self.artifact_selector,
+            panic_strategy: self.panic_strategy,
+            arguments: &self.invocation.arguments,
+            environment: &self.invocation.environment,
+            working_directory: &self.invocation.working_directory,
+        };
+        let digest = hex::encode(canonical::domain_hash(
+            b"rust-agent-cargo-unit-graph-planner-request-v2\0",
+            &projection,
+        )?);
+        if digest != self.digest
+            || self.invocation.executable != Path::new("/rust-agent/toolchain/bin/cargo")
+            || self
+                .invocation
+                .environment
+                .get(CARGO_CHANNEL_OVERRIDE)
+                .map(String::as_str)
+                != Some("nightly")
+        {
+            return Err(CargoPlannerError::RequestDigestMismatch);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn allows_rustc_query(&self, arguments: &[String]) -> bool {
+        arguments == ["-vV"]
+            || arguments == cargo_target_information_query(None)
+            || arguments == cargo_target_information_query(Some(&self.target))
+    }
+
     pub fn verify_output(
         &self,
         exit_code: i32,
         stdout: &[u8],
         stderr: &[u8],
     ) -> Result<VerifiedCargoUnitGraphEnvelope, CargoPlannerError> {
+        self.verify()?;
         if exit_code != 0 {
             let stderr = String::from_utf8_lossy(stderr);
             if stderr.contains("the `--unit-graph` flag is unstable")
@@ -564,13 +614,43 @@ fn valid_profile(profile: &RawCargoProfile) -> bool {
         && scalar_or_null(&profile.codegen_units)
         && scalar_or_null(&profile.debuginfo)
         && scalar_or_null(&profile.split_debuginfo)
-        && scalar_or_null(&profile.strip)
+        && valid_strip(&profile.strip)
         && scalar_or_null(&profile.codegen_backend)
         && profile
             .rustflags
             .iter()
             .all(|rustflag| valid_text(rustflag, 4096))
         && profile.trim_paths.as_ref().is_none_or(valid_trim_paths)
+}
+
+fn valid_strip(value: &serde_json::Value) -> bool {
+    if scalar_or_null(value) {
+        return true;
+    }
+    let Some(object) = value.as_object() else {
+        return false;
+    };
+    if object.len() != 1 {
+        return false;
+    }
+    if object
+        .get("deferred")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|value| matches!(value, "None" | "Debuginfo" | "Symbols"))
+    {
+        return true;
+    }
+    let Some(resolved) = object
+        .get("resolved")
+        .and_then(serde_json::Value::as_object)
+    else {
+        return false;
+    };
+    resolved.len() == 1
+        && resolved
+            .get("Named")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|value| matches!(value, "none" | "debuginfo" | "symbols"))
 }
 
 fn valid_trim_paths(value: &serde_json::Value) -> bool {
@@ -668,7 +748,7 @@ fn strictly_sorted_text(values: &[String]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, process::Command};
+    use std::{collections::BTreeSet, fs, process::Command};
 
     use rust_agent_composition::metadata::BuildRequirements;
     use serde_json::json;
@@ -679,12 +759,13 @@ mod tests {
         BuildEnforcementContext, BuildPanicStrategy, CanonicalSnapshotMetadataContract,
         CargoCompilationKind, CargoCompileMode, CargoCrateKind, CargoDependencyKind,
         CargoPackageIdentity, CargoPackageSource, CargoTargetEvaluationDomain, CargoUnit,
-        CargoUnitGraphError, CargoUnitSelector, DerivedExecutablePolicy, HostBuildClosureContent,
-        HostBuildClosureItem, HostBuildInputClosure, HostCargoUnitGraph, HostFeaturePolicyClosure,
-        LockedSourceClosure, LockedSourceError, NormalizedLockedSourceClosure,
-        ProductionAttestationPolicy, ProductionBuildExecutionPolicy, ProductionFetchPolicy,
-        ProductionSandboxBackend, ProductionToolIdentity, ProductionToolchain,
-        ProductionTreeIdentity, SigningHelper, TrustedSigner,
+        CargoUnitGraphError, CargoUnitSelector, CargoUnitTargetContext, DerivedExecutablePolicy,
+        HostBuildClosureContent, HostBuildClosureItem, HostBuildInputClosure, HostCargoUnitGraph,
+        HostFeaturePolicyClosure, LockedSourceClosure, LockedSourceError,
+        NormalizedLockedSourceClosure, ProductionAttestationPolicy, ProductionBuildExecutionPolicy,
+        ProductionFetchPolicy, ProductionFetchRedirectPolicy, ProductionSandboxBackend,
+        ProductionToolIdentity, ProductionToolchain, ProductionTreeIdentity, SigningHelper,
+        TrustedSigner,
     };
 
     fn digest(byte: char) -> String {
@@ -693,14 +774,15 @@ mod tests {
 
     fn policy() -> NormalizedProductionBuildPolicy {
         ProductionBuildExecutionPolicy {
-            schema: 1,
+            schema: 2,
             id: "ci-linux-hermetic-v1".into(),
             host: "cfg(target_os = \"linux\")".into(),
             backend: ProductionSandboxBackend::LinuxLandlockSeccomp,
             fetch: ProductionFetchPolicy {
                 network_endpoints: vec![],
                 credential_helper: None,
-                max_redirects: 0,
+                tls_ca_bundle: None,
+                redirect_policy: ProductionFetchRedirectPolicy::DenyUnlistedOrigin,
             },
             attestation: ProductionAttestationPolicy {
                 allowed_executors: vec!["rust-agent-build-host-v1".into()],
@@ -769,7 +851,7 @@ mod tests {
 
     fn graph() -> HostCargoUnitGraph {
         HostCargoUnitGraph {
-            schema: 1,
+            schema: 2,
             planner: CargoUnitGraphPlannerIdentity {
                 interface: "cargo-unit-graph-v1".into(),
                 cargo_version: "1.97.1".into(),
@@ -792,6 +874,7 @@ mod tests {
                     target_name: "host_app".into(),
                     compilation_kind: CargoCompilationKind::Target,
                     compilation_target: "aarch64-unknown-linux-gnu".into(),
+                    cargo_target_context: CargoUnitTargetContext::CompositionTarget,
                     compile_mode: CargoCompileMode::Build,
                     profile: "release".into(),
                     crate_kind: CargoCrateKind::Binary,
@@ -1177,29 +1260,65 @@ mod tests {
                     target_evaluation_domain: CargoTargetEvaluationDomain::BuildHost,
                 },
                 CargoPlannerEdgeSemantic {
-                    dependent_index: 1,
-                    dependency_index: 2,
-                    extern_crate_name: "build_helper".into(),
-                    dependency_kind: CargoDependencyKind::Build,
-                    target_evaluation_domain: CargoTargetEvaluationDomain::BuildHost,
-                },
-                CargoPlannerEdgeSemantic {
                     dependent_index: 0,
                     dependency_index: 4,
                     extern_crate_name: "git_helper".into(),
                     dependency_kind: CargoDependencyKind::Normal,
                     target_evaluation_domain: CargoTargetEvaluationDomain::Target,
                 },
+                CargoPlannerEdgeSemantic {
+                    dependent_index: 1,
+                    dependency_index: 2,
+                    extern_crate_name: "build_helper".into(),
+                    dependency_kind: CargoDependencyKind::Build,
+                    target_evaluation_domain: CargoTargetEvaluationDomain::BuildHost,
+                },
             ],
         }
     }
 
+    fn cargo_metadata_for_cross_compile_graph() -> serde_json::Value {
+        let host = "path+file:///rust-agent/closure/trees/host-fixture#0.1.0";
+        let build = "registry+https://github.com/rust-lang/crates.io-index#build-helper@1.0.0";
+        let macro_helper =
+            "registry+https://github.com/rust-lang/crates.io-index#macro-helper@2.0.0";
+        let git = "git+https://github.com/example/git-helper?rev=stable#git-helper@3.0.0";
+        json!({
+            "packages": [],
+            "workspace_members": [host],
+            "workspace_default_members": [host],
+            "resolve": {
+                "nodes": [
+                    {
+                        "id": host,
+                        "dependencies": [build, macro_helper, git],
+                        "deps": [
+                            {"name": "build_helper", "pkg": build, "dep_kinds": [{"kind": "build", "target": null}]},
+                            {"name": "macro_helper", "pkg": macro_helper, "dep_kinds": [{"kind": null, "target": null}]},
+                            {"name": "git_helper", "pkg": git, "dep_kinds": [{"kind": null, "target": "cfg(target_arch = \"aarch64\")"}]}
+                        ],
+                        "features": ["host-ui"]
+                    },
+                    {"id": build, "dependencies": [], "deps": [], "features": ["host-only"]},
+                    {"id": macro_helper, "dependencies": [], "deps": [], "features": ["derive"]},
+                    {"id": git, "dependencies": [], "deps": [], "features": ["target-only"]}
+                ],
+                "root": host
+            },
+            "target_directory": "/rust-agent/target",
+            "version": 1,
+            "workspace_root": "/rust-agent/closure/trees/host-fixture",
+            "metadata": {},
+            "build_directory": "/rust-agent/target"
+        })
+    }
+
     #[test]
-    fn requests_bind_exact_roots_selector_policy_toolchain_and_invocation() {
+    fn schema_two_binds_the_exact_pinned_channel_override() {
         let policy = policy();
         let closure = closure(&policy);
         let final_request = CargoPlannerRequest {
-            schema: 1,
+            schema: 2,
             root: CargoPlannerGraphRoot::FinalHost,
         }
         .normalize(&policy, &closure)
@@ -1250,12 +1369,20 @@ mod tests {
             ]
         );
         assert_eq!(
+            final_request
+                .invocation()
+                .environment
+                .get(CARGO_CHANNEL_OVERRIDE)
+                .map(String::as_str),
+            Some("nightly")
+        );
+        assert_eq!(
             final_request.digest(),
-            "ee613603fb9fc2bfb1dbf85cde6858c4e8da9636b705cc9d4b4629e66b85bee5"
+            "1442d0cca528195c466098306df289cbcc24cc2f0322f4f60ad62586ac8d4ec3"
         );
 
         let standalone = CargoPlannerRequest {
-            schema: 1,
+            schema: 2,
             root: CargoPlannerGraphRoot::EmittedStandalone,
         }
         .normalize(&policy, &closure)
@@ -1278,7 +1405,7 @@ mod tests {
     fn unit_graph_v1_envelope_is_closed_context_checked_and_mutation_detecting() {
         let policy = policy();
         let request = CargoPlannerRequest {
-            schema: 1,
+            schema: 2,
             root: CargoPlannerGraphRoot::FinalHost,
         }
         .normalize(&policy, &closure(&policy))
@@ -1292,23 +1419,23 @@ mod tests {
         assert_eq!(verified.root_count(), 1);
         assert_eq!(
             verified.digest(),
-            "1b43001a1bec2cf536cec79fef3ae2e6b86be33a9e0ae5523fd5d9caf872fd7a"
+            "ddaa4a9781556472fbef20270f3bacf30436a75bca13e1ec76a4e3fe9ab8a0bd"
         );
 
         assert!(matches!(
             CargoPlannerRequest {
-                schema: 2,
+                schema: 1,
                 root: CargoPlannerGraphRoot::FinalHost,
             }
             .normalize(&policy, &closure(&policy)),
-            Err(CargoPlannerError::UnsupportedRequestSchema(2))
+            Err(CargoPlannerError::UnsupportedRequestSchema(1))
         ));
         let mut rotated = policy.policy().clone();
         rotated.attestation.allowed_executors = vec!["rotated-executor-v1".into()];
         let rotated = rotated.normalize().unwrap();
         assert!(matches!(
             CargoPlannerRequest {
-                schema: 1,
+                schema: 2,
                 root: CargoPlannerGraphRoot::FinalHost,
             }
             .normalize(&rotated, &closure(&policy)),
@@ -1409,7 +1536,7 @@ mod tests {
         let policy = policy();
         let host_closure = closure(&policy);
         let request = CargoPlannerRequest {
-            schema: 1,
+            schema: 2,
             root: CargoPlannerGraphRoot::FinalHost,
         }
         .normalize(&policy, &host_closure)
@@ -1419,6 +1546,30 @@ mod tests {
             .verify_output(0, &serde_json::to_vec(&raw).unwrap(), b"")
             .unwrap();
         let semantics = edge_semantics(&request, &envelope);
+        let derived_semantics = derive_cargo_planner_edge_semantics_from_metadata(
+            &request,
+            &envelope,
+            &serde_json::to_vec(&cargo_metadata_for_cross_compile_graph()).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(derived_semantics, semantics);
+        let mut duplicated_kinds = cargo_metadata_for_cross_compile_graph();
+        let macro_id = duplicated_kinds["resolve"]["nodes"][0]["deps"][1]["pkg"].clone();
+        duplicated_kinds["resolve"]["nodes"][0]["deps"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({
+                "name": "macro_helper",
+                "pkg": macro_id,
+                "dep_kinds": [{"kind": "build", "target": null}]
+            }));
+        let duplicated_semantics = derive_cargo_planner_edge_semantics_from_metadata(
+            &request,
+            &envelope,
+            &serde_json::to_vec(&duplicated_kinds).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(duplicated_semantics, semantics);
         let normalized = normalize_cargo_unit_graph(
             &request,
             &envelope,
@@ -1458,7 +1609,7 @@ mod tests {
         }));
         assert_eq!(
             normalized.digest(),
-            "34cc19f1c54a3c593c7a6609d09c048b2236a088f74e55880f8caee9fc5379f2"
+            "169c997ed7c500fec5535444ac032716291e55c81827959bc23edb7aa33a76e7"
         );
 
         let mut reordered = semantics;
@@ -1493,7 +1644,7 @@ mod tests {
         ] {
             let selected_closure = closure_with_artifact(&policy, target);
             let selected_request = CargoPlannerRequest {
-                schema: 1,
+                schema: 2,
                 root: CargoPlannerGraphRoot::FinalHost,
             }
             .normalize(&policy, &selected_closure)
@@ -1526,11 +1677,70 @@ mod tests {
     }
 
     #[test]
+    fn raw_duplicate_build_script_contexts_normalize_without_collapse() {
+        let policy = policy();
+        let host_closure = closure(&policy);
+        let request = CargoPlannerRequest {
+            schema: 2,
+            root: CargoPlannerGraphRoot::FinalHost,
+        }
+        .normalize(&policy, &host_closure)
+        .unwrap();
+        let mut raw = raw_cross_compile_graph();
+        let mut host_context = raw["units"][1].clone();
+        host_context["platform"] = serde_json::Value::Null;
+        raw["units"].as_array_mut().unwrap().push(host_context);
+        raw["units"][0]["dependencies"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({
+                "index": 5,
+                "extern_crate_name": "build_script_build",
+                "public": false,
+                "noprelude": false,
+                "nounused": false
+            }));
+        let envelope = request
+            .verify_output(0, &serde_json::to_vec(&raw).unwrap(), b"")
+            .unwrap();
+        let semantics = derive_cargo_planner_edge_semantics_from_metadata(
+            &request,
+            &envelope,
+            &serde_json::to_vec(&cargo_metadata_for_cross_compile_graph()).unwrap(),
+        )
+        .unwrap();
+        let normalized = normalize_cargo_unit_graph(
+            &request,
+            &envelope,
+            &host_closure,
+            &locked_sources(),
+            &semantics,
+        )
+        .unwrap();
+        let contexts = normalized
+            .nodes()
+            .keys()
+            .filter(|selector| {
+                selector.package.name == "host-fixture"
+                    && selector.compile_mode == CargoCompileMode::RunCustomBuild
+            })
+            .map(|selector| selector.cargo_target_context)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            contexts,
+            BTreeSet::from([
+                CargoUnitTargetContext::BuildHost,
+                CargoUnitTargetContext::CompositionTarget,
+            ])
+        );
+    }
+
+    #[test]
     fn raw_graph_normalization_rejects_identity_edge_and_root_drift() {
         let policy = policy();
         let host_closure = closure(&policy);
         let request = CargoPlannerRequest {
-            schema: 1,
+            schema: 2,
             root: CargoPlannerGraphRoot::FinalHost,
         }
         .normalize(&policy, &host_closure)
@@ -1543,7 +1753,7 @@ mod tests {
         let sources = locked_sources();
 
         let standalone = CargoPlannerRequest {
-            schema: 1,
+            schema: 2,
             root: CargoPlannerGraphRoot::EmittedStandalone,
         }
         .normalize(&policy, &closure(&policy))
@@ -1729,6 +1939,143 @@ mod tests {
     }
 
     #[test]
+    fn pinned_cargo_produces_a_real_unit_graph_without_build_side_effects() {
+        let temp = tempdir().unwrap();
+        fs::create_dir(temp.path().join("src")).unwrap();
+        fs::write(
+            temp.path().join("Cargo.toml"),
+            "[package]\nname='host-fixture'\nversion='0.1.0'\nedition='2024'\nbuild='build.rs'\n\n[[bin]]\nname='host-app'\npath='src/main.rs'\n",
+        )
+        .unwrap();
+        fs::write(temp.path().join("src/main.rs"), "fn main() {}\n").unwrap();
+        fs::write(
+            temp.path().join("build.rs"),
+            "fn main() { std::fs::write(\"build-script-ran\", b\"bad\").unwrap(); }\n",
+        )
+        .unwrap();
+        fs::write(
+            temp.path().join("Cargo.lock"),
+            "# This file is automatically @generated by Cargo.\n# It is not intended for manual editing.\nversion = 4\n\n[[package]]\nname = \"host-fixture\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+        let rustc = Command::new("rustup")
+            .args(["which", "rustc"])
+            .output()
+            .unwrap();
+        assert!(rustc.status.success());
+        let rustc = String::from_utf8(rustc.stdout).unwrap();
+        let rustc = rustc.trim();
+        let cargo_home = temp.path().join("cargo-home");
+        let target_dir = temp.path().join("target");
+        fs::create_dir(&cargo_home).unwrap();
+        fs::create_dir(&target_dir).unwrap();
+        let output = Command::new(cargo)
+            .env_clear()
+            .env(CARGO_CHANNEL_OVERRIDE, "nightly")
+            .env("CARGO_CACHE_RUSTC_INFO", "0")
+            .env("CARGO_HOME", &cargo_home)
+            .env("CARGO_INCREMENTAL", "0")
+            .env("CARGO_NET_OFFLINE", "true")
+            .env("CARGO_TARGET_DIR", &target_dir)
+            .env("LANG", "C.UTF-8")
+            .env("LC_ALL", "C.UTF-8")
+            .env("RUSTC", rustc)
+            .env("SOURCE_DATE_EPOCH", "0")
+            .current_dir(temp.path())
+            .args([
+                "build",
+                "--manifest-path",
+                "Cargo.toml",
+                "--locked",
+                "--offline",
+                "--target",
+                "aarch64-unknown-linux-gnu",
+                "--profile",
+                "release",
+                "--package",
+                "host-fixture",
+                "--bin",
+                "host-app",
+                "--unit-graph",
+                "-Z",
+                "unstable-options",
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "real unit graph failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(output.stderr.is_empty());
+        let policy = policy();
+        let request = CargoPlannerRequest {
+            schema: 2,
+            root: CargoPlannerGraphRoot::FinalHost,
+        }
+        .normalize(&policy, &closure(&policy))
+        .unwrap();
+        let envelope = request
+            .verify_output(0, &output.stdout, b"")
+            .unwrap_or_else(|error| {
+                panic!(
+                    "real Cargo output was rejected ({error}): {}",
+                    String::from_utf8_lossy(&output.stdout)
+                )
+            });
+        assert!(envelope.unit_count() >= 3);
+        assert!(!temp.path().join("build-script-ran").exists());
+        assert_eq!(fs::read_dir(&target_dir).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn channel_override_digest_argv_and_output_drift_fail_closed() {
+        let policy = policy();
+        let mut request = CargoPlannerRequest {
+            schema: 2,
+            root: CargoPlannerGraphRoot::FinalHost,
+        }
+        .normalize(&policy, &closure(&policy))
+        .unwrap();
+        let encoded = serde_json::to_vec(&raw_graph()).unwrap();
+
+        request
+            .invocation
+            .environment
+            .insert(CARGO_CHANNEL_OVERRIDE.into(), "stable".into());
+        assert!(matches!(
+            request.verify_output(0, &encoded, b""),
+            Err(CargoPlannerError::RequestDigestMismatch)
+        ));
+
+        let mut request = CargoPlannerRequest {
+            schema: 2,
+            root: CargoPlannerGraphRoot::FinalHost,
+        }
+        .normalize(&policy, &closure(&policy))
+        .unwrap();
+        request.invocation.arguments.push("--metadata-only".into());
+        assert!(matches!(
+            request.verify_output(0, &encoded, b""),
+            Err(CargoPlannerError::RequestDigestMismatch)
+        ));
+
+        let request = CargoPlannerRequest {
+            schema: 2,
+            root: CargoPlannerGraphRoot::FinalHost,
+        }
+        .normalize(&policy, &closure(&policy))
+        .unwrap();
+        let mut unknown_output = raw_graph();
+        unknown_output["units"][0]["profile"]["ambient"] = json!(true);
+        assert!(matches!(
+            request.verify_output(0, &serde_json::to_vec(&unknown_output).unwrap(), b""),
+            Err(CargoPlannerError::Json(_))
+        ));
+    }
+
+    #[test]
     fn stable_cargo_is_explicitly_unsupported_and_never_executes_build_script() {
         let temp = tempdir().unwrap();
         fs::create_dir(temp.path().join("src")).unwrap();
@@ -1758,7 +2105,7 @@ mod tests {
 
         let policy = policy();
         let request = CargoPlannerRequest {
-            schema: 1,
+            schema: 2,
             root: CargoPlannerGraphRoot::FinalHost,
         }
         .normalize(&policy, &closure(&policy))

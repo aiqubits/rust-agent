@@ -10,9 +10,9 @@ use super::{
 use crate::{
     BuildArtifactTarget, CargoCompilationKind, CargoCompileMode, CargoCrateKind,
     CargoDependencyKind, CargoPackageIdentity, CargoPackageSource, CargoTargetEvaluationDomain,
-    CargoUnit, CargoUnitEdge, CargoUnitGraphError, CargoUnitSelector, HostCargoUnitGraph,
-    LockedSourceError, NormalizedHostBuildInputClosure, NormalizedHostCargoUnitGraph,
-    NormalizedLockedSourceClosure,
+    CargoUnit, CargoUnitEdge, CargoUnitGraphError, CargoUnitSelector, CargoUnitTargetContext,
+    HostCargoUnitGraph, LockedSourceError, NormalizedHostBuildInputClosure,
+    NormalizedHostCargoUnitGraph, NormalizedLockedSourceClosure,
 };
 
 const MAX_EDGE_COUNT: usize = 1_000_000;
@@ -55,6 +55,12 @@ pub enum CargoUnitGraphNormalizationError {
     EdgeSemanticsIdentityMismatch,
     #[error("Cargo edge semantics are incomplete, duplicated or contain an unknown edge")]
     EdgeSemanticsMismatch,
+    #[error("Cargo metadata output is invalid JSON: {0}")]
+    MetadataJson(serde_json::Error),
+    #[error("Cargo metadata output violates the closed v1 edge-semantics contract: {0}")]
+    InvalidMetadata(&'static str),
+    #[error("Cargo metadata cannot identify one exact dependency kind for a unit edge")]
+    AmbiguousEdgeSemantic,
     #[error("Cargo raw package id is not an exact locked source identity: {0}")]
     PackageIdentityMismatch(String),
     #[error("Cargo raw unit platform/mode conflicts with its target kind: {0}")]
@@ -73,6 +79,294 @@ impl CargoPlannerEdgeSemantics {
     pub fn from_json(input: &str) -> Result<Self, serde_json::Error> {
         serde_json::from_str(input)
     }
+}
+
+/// Derives the dependency-kind and target-domain labels which Cargo's unit-graph
+/// v1 output omits. The metadata bytes must be produced by the same pinned Cargo
+/// invocation boundary as the unit graph; the returned record is bound to both
+/// the exact planner request and verified graph envelope.
+pub fn derive_cargo_planner_edge_semantics_from_metadata(
+    request: &NormalizedCargoPlannerRequest,
+    envelope: &VerifiedCargoUnitGraphEnvelope,
+    metadata: &[u8],
+) -> Result<CargoPlannerEdgeSemantics, CargoUnitGraphNormalizationError> {
+    if envelope.request_digest() != request.digest() {
+        return Err(CargoUnitGraphNormalizationError::PlannerRequestMismatch);
+    }
+    if metadata.is_empty() || metadata.len() > 64 * 1024 * 1024 {
+        return Err(CargoUnitGraphNormalizationError::InvalidMetadata(
+            "encoded size",
+        ));
+    }
+    let metadata: CargoMetadata =
+        serde_json::from_slice(metadata).map_err(CargoUnitGraphNormalizationError::MetadataJson)?;
+    metadata.validate()?;
+    let resolve = metadata
+        .resolve
+        .ok_or(CargoUnitGraphNormalizationError::InvalidMetadata(
+            "missing resolve graph",
+        ))?;
+    let nodes = resolve
+        .nodes
+        .iter()
+        .map(|node| (node.id.as_str(), node))
+        .collect::<BTreeMap<_, _>>();
+    if nodes.len() != resolve.nodes.len() {
+        return Err(CargoUnitGraphNormalizationError::InvalidMetadata(
+            "duplicate resolve node",
+        ));
+    }
+
+    let graph = &envelope.graph;
+    let mut edges = Vec::new();
+    for (dependent_index, unit) in graph.units.iter().enumerate() {
+        let node = nodes.get(unit.pkg_id.as_str()).ok_or(
+            CargoUnitGraphNormalizationError::InvalidMetadata("unit package is absent"),
+        )?;
+        for dependency in &unit.dependencies {
+            let dependency_unit = graph
+                .units
+                .get(dependency.index)
+                .ok_or(CargoUnitGraphNormalizationError::EdgeSemanticsMismatch)?;
+            let (dependency_kind, target_evaluation_domain) = if unit.pkg_id
+                == dependency_unit.pkg_id
+                && (unit.target.kind.as_slice() == ["custom-build"]
+                    || dependency_unit.target.kind.as_slice() == ["custom-build"])
+            {
+                (
+                    CargoDependencyKind::Build,
+                    CargoTargetEvaluationDomain::BuildHost,
+                )
+            } else {
+                let matches = node
+                    .deps
+                    .iter()
+                    .filter(|candidate| {
+                        metadata_dependency_matches(candidate, dependency, dependency_unit)
+                    })
+                    .collect::<Vec<_>>();
+                if matches.is_empty() {
+                    return Err(CargoUnitGraphNormalizationError::AmbiguousEdgeSemantic);
+                }
+                let expected_kind = expected_dependency_kind(unit, &matches)?;
+                let dependency_crate_kind = crate_kind(&dependency_unit.target)?;
+                let dependency_compilation_kind =
+                    compilation_kind(dependency_unit, dependency_crate_kind)?;
+                let domain = if expected_kind == CargoDependencyKind::Build
+                    || dependency_compilation_kind == CargoCompilationKind::BuildHost
+                {
+                    CargoTargetEvaluationDomain::BuildHost
+                } else {
+                    CargoTargetEvaluationDomain::Target
+                };
+                (expected_kind, domain)
+            };
+            edges.push(CargoPlannerEdgeSemantic {
+                dependent_index,
+                dependency_index: dependency.index,
+                extern_crate_name: dependency.extern_crate_name.clone(),
+                dependency_kind,
+                target_evaluation_domain,
+            });
+        }
+    }
+    edges.sort();
+    Ok(CargoPlannerEdgeSemantics {
+        schema: 1,
+        planner_request_digest: request.digest().into(),
+        unit_graph_envelope_digest: envelope.digest().into(),
+        edges,
+    })
+}
+
+fn metadata_dependency_matches(
+    candidate: &CargoMetadataNodeDependency,
+    dependency: &super::RawCargoUnitDependency,
+    dependency_unit: &super::RawCargoUnit,
+) -> bool {
+    candidate.pkg == dependency_unit.pkg_id
+        && (candidate.name == dependency.extern_crate_name
+            || dependency.extern_crate_name == "build_script_build"
+                && dependency_unit.target.kind.as_slice() == ["custom-build"])
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CargoMetadata {
+    packages: Vec<serde_json::Value>,
+    workspace_members: Vec<String>,
+    workspace_default_members: Vec<String>,
+    resolve: Option<CargoMetadataResolve>,
+    target_directory: String,
+    version: u32,
+    workspace_root: String,
+    metadata: serde_json::Value,
+    build_directory: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CargoMetadataResolve {
+    nodes: Vec<CargoMetadataNode>,
+    root: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CargoMetadataNode {
+    id: String,
+    dependencies: Vec<String>,
+    deps: Vec<CargoMetadataNodeDependency>,
+    features: Vec<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CargoMetadataNodeDependency {
+    name: String,
+    pkg: String,
+    dep_kinds: Vec<CargoMetadataDependencyKind>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CargoMetadataDependencyKind {
+    kind: Option<String>,
+    target: Option<String>,
+}
+
+impl CargoMetadata {
+    fn validate(&self) -> Result<(), CargoUnitGraphNormalizationError> {
+        if self.version != 1
+            || self.packages.len() > 100_000
+            || self.workspace_members.len() > 100_000
+            || self.workspace_default_members.len() > 100_000
+            || !valid_metadata_text(&self.target_directory, 4096)
+            || !valid_metadata_text(&self.workspace_root, 4096)
+            || !valid_metadata_text(&self.build_directory, 4096)
+            || !(self.metadata.is_null() || self.metadata.is_object())
+        {
+            return Err(CargoUnitGraphNormalizationError::InvalidMetadata(
+                "root context",
+            ));
+        }
+        let Some(resolve) = &self.resolve else {
+            return Ok(());
+        };
+        if resolve.nodes.is_empty() || resolve.nodes.len() > 100_000 {
+            return Err(CargoUnitGraphNormalizationError::InvalidMetadata(
+                "resolve cardinality",
+            ));
+        }
+        if resolve
+            .root
+            .as_deref()
+            .is_some_and(|root| !valid_metadata_text(root, 4096))
+        {
+            return Err(CargoUnitGraphNormalizationError::InvalidMetadata(
+                "resolve root",
+            ));
+        }
+        for node in &resolve.nodes {
+            if !valid_metadata_text(&node.id, 4096)
+                || node.dependencies.len() > 100_000
+                || node.deps.len() > 100_000
+                || node.features.len() > 16_384
+                || node
+                    .dependencies
+                    .iter()
+                    .any(|value| !valid_metadata_text(value, 4096))
+                || node
+                    .features
+                    .iter()
+                    .any(|value| !super::valid_feature(value))
+            {
+                return Err(CargoUnitGraphNormalizationError::InvalidMetadata(
+                    "resolve node",
+                ));
+            }
+            let dependency_packages = node
+                .deps
+                .iter()
+                .map(|dep| dep.pkg.as_str())
+                .collect::<BTreeSet<_>>();
+            let legacy_dependencies = node
+                .dependencies
+                .iter()
+                .map(String::as_str)
+                .collect::<BTreeSet<_>>();
+            if dependency_packages != legacy_dependencies {
+                return Err(CargoUnitGraphNormalizationError::InvalidMetadata(
+                    "dependency projection",
+                ));
+            }
+            for dependency in &node.deps {
+                if !super::valid_cargo_name(&dependency.name)
+                    || !valid_metadata_text(&dependency.pkg, 4096)
+                    || dependency.dep_kinds.is_empty()
+                    || dependency.dep_kinds.len() > 128
+                    || dependency.dep_kinds.iter().any(|kind| {
+                        !matches!(kind.kind.as_deref(), None | Some("dev" | "build"))
+                            || kind
+                                .target
+                                .as_deref()
+                                .is_some_and(|target| !valid_metadata_text(target, 4096))
+                    })
+                {
+                    return Err(CargoUnitGraphNormalizationError::InvalidMetadata(
+                        "dependency",
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+fn expected_dependency_kind(
+    dependent: &super::RawCargoUnit,
+    dependencies: &[&CargoMetadataNodeDependency],
+) -> Result<CargoDependencyKind, CargoUnitGraphNormalizationError> {
+    let candidates = dependencies
+        .iter()
+        .flat_map(|dependency| &dependency.dep_kinds)
+        .map(|kind| match kind.kind.as_deref() {
+            None => CargoDependencyKind::Normal,
+            Some("dev") => CargoDependencyKind::Development,
+            Some("build") => CargoDependencyKind::Build,
+            Some(_) => unreachable!("validated Cargo dependency kind"),
+        })
+        .collect::<BTreeSet<_>>();
+    let preferred = if dependent.target.kind.as_slice() == ["custom-build"] {
+        CargoDependencyKind::Build
+    } else if matches!(
+        dependent.target.kind.as_slice(),
+        [kind] if matches!(kind.as_str(), "test" | "bench" | "example")
+    ) && candidates.contains(&CargoDependencyKind::Development)
+    {
+        CargoDependencyKind::Development
+    } else {
+        CargoDependencyKind::Normal
+    };
+    if candidates.contains(&preferred) {
+        Ok(preferred)
+    } else if dependent.target.kind.as_slice() == ["custom-build"]
+        && candidates == BTreeSet::from([CargoDependencyKind::Normal])
+    {
+        // A package with `links` makes Cargo connect its run-custom-build unit
+        // to the linked normal dependency's run-custom-build unit. Metadata
+        // correctly retains the original normal dependency kind for that edge.
+        Ok(CargoDependencyKind::Normal)
+    } else {
+        Err(CargoUnitGraphNormalizationError::AmbiguousEdgeSemantic)
+    }
+}
+
+fn valid_metadata_text(value: &str, maximum: usize) -> bool {
+    !value.is_empty()
+        && value.len() <= maximum
+        && !value.contains(['\0', '\n', '\r'])
+        && value.trim() == value
 }
 
 pub fn normalize_cargo_unit_graph(
@@ -123,11 +417,17 @@ pub fn normalize_cargo_unit_graph(
             CargoCompilationKind::BuildHost => request.build_triple(),
             CargoCompilationKind::Target => request.target(),
         };
+        let cargo_target_context = if raw.platform.is_some() {
+            CargoUnitTargetContext::CompositionTarget
+        } else {
+            CargoUnitTargetContext::BuildHost
+        };
         let selector = CargoUnitSelector {
             package,
             target_name: raw.target.name.clone(),
             compilation_kind,
             compilation_target: compilation_target.into(),
+            cargo_target_context,
             compile_mode: compile_mode(raw.mode),
             profile: raw.profile.name.clone(),
             crate_kind,
@@ -189,7 +489,7 @@ pub fn normalize_cargo_unit_graph(
     }
 
     Ok(HostCargoUnitGraph {
-        schema: 1,
+        schema: 2,
         planner: request.planner().clone(),
         build_triple: request.build_triple().into(),
         composition_target: request.target().into(),
@@ -440,4 +740,106 @@ fn verify_root(
         return Err(CargoUnitGraphNormalizationError::RootArtifactMismatch);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn custom_build_unit() -> super::super::RawCargoUnit {
+        serde_json::from_value(serde_json::json!({
+            "pkg_id": "registry+https://github.com/rust-lang/crates.io-index#consumer@1.0.0",
+            "target": {
+                "kind": ["custom-build"],
+                "crate_types": ["bin"],
+                "name": "build-script-build",
+                "src_path": "/rust-agent/cargo-home/registry/src/consumer/build.rs",
+                "edition": "2024",
+                "doc": false,
+                "doctest": false,
+                "test": false
+            },
+            "profile": {
+                "name": "release",
+                "opt_level": "0",
+                "lto": "false",
+                "codegen_units": null,
+                "debuginfo": 0,
+                "debug_assertions": false,
+                "overflow_checks": false,
+                "rpath": false,
+                "incremental": false,
+                "panic": "unwind",
+                "split_debuginfo": null,
+                "strip": "none",
+                "codegen_backend": null
+            },
+            "platform": "wasm32-unknown-unknown",
+            "mode": "run-custom-build",
+            "features": [],
+            "dependencies": []
+        }))
+        .unwrap()
+    }
+
+    fn dependency(kind: Option<&str>) -> CargoMetadataNodeDependency {
+        CargoMetadataNodeDependency {
+            name: "linked_dependency".into(),
+            pkg: "registry+https://github.com/rust-lang/crates.io-index#linked-dependency@1.0.0"
+                .into(),
+            dep_kinds: vec![CargoMetadataDependencyKind {
+                kind: kind.map(str::to_owned),
+                target: None,
+            }],
+        }
+    }
+
+    #[test]
+    fn custom_build_links_edge_retains_exact_normal_metadata_kind() {
+        let unit = custom_build_unit();
+        let normal = dependency(None);
+        assert_eq!(
+            expected_dependency_kind(&unit, &[&normal]).unwrap(),
+            CargoDependencyKind::Normal
+        );
+
+        let build = dependency(Some("build"));
+        assert_eq!(
+            expected_dependency_kind(&unit, &[&build]).unwrap(),
+            CargoDependencyKind::Build
+        );
+
+        let development = dependency(Some("dev"));
+        assert!(matches!(
+            expected_dependency_kind(&unit, &[&development]),
+            Err(CargoUnitGraphNormalizationError::AmbiguousEdgeSemantic)
+        ));
+        assert!(matches!(
+            expected_dependency_kind(&unit, &[&normal, &development]),
+            Err(CargoUnitGraphNormalizationError::AmbiguousEdgeSemantic)
+        ));
+
+        let unit_edge = super::super::RawCargoUnitDependency {
+            index: 1,
+            extern_crate_name: "build_script_build".into(),
+            public: Some(false),
+            noprelude: Some(false),
+            nounused: Some(false),
+        };
+        let mut linked_unit = custom_build_unit();
+        linked_unit.pkg_id.clone_from(&normal.pkg);
+        assert!(metadata_dependency_matches(
+            &normal,
+            &unit_edge,
+            &linked_unit
+        ));
+
+        let mut wrong_package = dependency(None);
+        wrong_package.pkg.push_str("-other");
+        assert!(!metadata_dependency_matches(
+            &wrong_package,
+            &unit_edge,
+            &linked_unit
+        ));
+    }
 }

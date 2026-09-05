@@ -11,24 +11,35 @@ repository.workspace = true
 default = []
 
 [dependencies]
+ed25519-dalek.workspace = true
+flate2.workspace = true
+git2.workspace = true
 hex.workspace = true
 rust-agent-composition = { version = "0.1.0", path = "../rust-agent-composition", default-features = false }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+tar.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true
 toml.workspace = true
 walkdir.workspace = true
 
 [target.'cfg(any(target_os = "android", target_os = "ios", target_os = "linux", target_os = "macos"))'.dependencies]
-rustix.workspace = true
+rustix = { workspace = true, features = ["event", "mount", "net", "process", "rand", "stdio"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+landlock.workspace = true
+libc.workspace = true
+nix = { workspace = true, features = ["sched"] }
+seccompy.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 renamore.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+trybuild.workspace = true
 
 [lints]
 workspace = true

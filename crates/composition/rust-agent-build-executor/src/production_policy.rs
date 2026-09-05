@@ -45,8 +45,16 @@ pub struct ProductionFetchPolicy {
     pub network_endpoints: Vec<String>,
     #[serde(rename = "credential-helper", default)]
     pub credential_helper: Option<ProductionFileIdentity>,
-    #[serde(rename = "max-redirects")]
-    pub max_redirects: u32,
+    #[serde(rename = "tls-ca-bundle", default)]
+    pub tls_ca_bundle: Option<ProductionFileIdentity>,
+    #[serde(rename = "redirect-policy")]
+    pub redirect_policy: ProductionFetchRedirectPolicy,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ProductionFetchRedirectPolicy {
+    DenyUnlistedOrigin,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -165,7 +173,7 @@ pub struct NormalizedProductionBuildPolicy {
     full_digest: String,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct BuildEnforcementIdentity {
     pub schema: u32,
@@ -234,7 +242,7 @@ pub struct BuildEnforcementContext {
     pub prefix_remap_schema: u32,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct BuildEnforcementToolchain {
     pub cargo: BuildEnforcementExecutable,
@@ -242,7 +250,7 @@ pub struct BuildEnforcementToolchain {
     pub sysroot: BuildEnforcementReadInput,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct BuildEnforcementExecutable {
     pub id: String,
@@ -252,7 +260,7 @@ pub struct BuildEnforcementExecutable {
     pub logical_mount: String,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct BuildEnforcementReadInput {
     pub id: String,
@@ -262,7 +270,7 @@ pub struct BuildEnforcementReadInput {
     pub logical_mount: String,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct BuildEnforcementEnvironment {
     pub id: String,
@@ -274,7 +282,7 @@ pub struct BuildEnforcementEnvironment {
 pub enum ProductionBuildPolicyError {
     #[error("production build policy TOML is invalid: {0}")]
     Toml(#[from] toml::de::Error),
-    #[error("unsupported production build policy schema {0}; expected 1")]
+    #[error("unsupported production build policy schema {0}; expected 2")]
     UnsupportedSchema(u32),
     #[error("invalid production policy id `{0}`")]
     InvalidPolicyId(String),
@@ -284,8 +292,10 @@ pub enum ProductionBuildPolicyError {
     InvalidFetchEndpoint(String),
     #[error("fetch endpoints contain a duplicate canonical origin")]
     DuplicateFetchEndpoint,
-    #[error("schema 1 production fetch policy forbids redirects")]
-    RedirectsUnsupported,
+    #[error("networked fetch endpoints require one exact TLS CA bundle")]
+    MissingFetchTlsCaBundle,
+    #[error("a fetch credential helper requires at least one network endpoint")]
+    CredentialHelperWithoutEndpoint,
     #[error("invalid {kind} logical id `{id}`")]
     InvalidId { kind: &'static str, id: String },
     #[error("duplicate {kind} logical id `{id}`")]
@@ -338,7 +348,7 @@ impl ProductionBuildExecutionPolicy {
     }
 
     pub fn normalize(&self) -> Result<NormalizedProductionBuildPolicy, ProductionBuildPolicyError> {
-        if self.schema != 1 {
+        if self.schema != 2 {
             return Err(ProductionBuildPolicyError::UnsupportedSchema(self.schema));
         }
         validate_id("policy", &self.id)
@@ -443,7 +453,7 @@ impl ProductionBuildExecutionPolicy {
         reject_cross_kind_duplicates(&executable_ids, &read_input_ids, &environment_ids)?;
 
         let full_digest = hex::encode(canonical::domain_hash(
-            b"rust-agent-build-execution-policy-v1\0",
+            b"rust-agent-build-execution-policy-v2\0",
             &policy,
         )?);
         Ok(NormalizedProductionBuildPolicy {
@@ -527,7 +537,7 @@ impl NormalizedProductionBuildPolicy {
         Ok(BuildEnforcementIdentity {
             schema: 1,
             backend: self.policy.backend,
-            backend_semantic_version: 1,
+            backend_semantic_version: 3,
             context: context.clone(),
             toolchain: BuildEnforcementToolchain {
                 cargo: tool_enforcement_identity("cargo", &self.policy.toolchain.cargo),
@@ -535,7 +545,7 @@ impl NormalizedProductionBuildPolicy {
                 sysroot: BuildEnforcementReadInput {
                     id: "rust-sysroot".into(),
                     tree_digest: self.policy.toolchain.sysroot.tree_digest.clone(),
-                    logical_mount: "/rust-agent/toolchain/sysroot".into(),
+                    logical_mount: "/rust-agent/toolchain".into(),
                 },
             },
             executables,
@@ -721,11 +731,18 @@ fn validate_fetch(fetch: &ProductionFetchPolicy) -> Result<(), ProductionBuildPo
             ));
         }
     }
-    if fetch.max_redirects != 0 {
-        return Err(ProductionBuildPolicyError::RedirectsUnsupported);
-    }
     if let Some(helper) = &fetch.credential_helper {
+        if fetch.network_endpoints.is_empty() {
+            return Err(ProductionBuildPolicyError::CredentialHelperWithoutEndpoint);
+        }
         validate_file("fetch-credential-helper", helper)?;
+    }
+    match (&fetch.tls_ca_bundle, fetch.network_endpoints.is_empty()) {
+        (Some(ca), false) => validate_file("fetch-tls-ca-bundle", ca)?,
+        (None, false) | (Some(_), true) => {
+            return Err(ProductionBuildPolicyError::MissingFetchTlsCaBundle);
+        }
+        (None, true) => {}
     }
     Ok(())
 }

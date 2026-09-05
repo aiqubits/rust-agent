@@ -159,9 +159,9 @@ fn rust_toolchain_version_is_pinned_and_synchronized() {
     assert!(ci.contains(
         "cargo fetch --locked --manifest-path \"$(rustc --print sysroot)/lib/rustlib/src/rust/library/Cargo.toml\""
     ));
-    assert!(ci.contains("Verify exact Phase 0/1A acceptance mappings"));
+    assert!(ci.contains("Verify exact Phase 0/1A/1B acceptance mappings"));
     assert!(ci.contains(
-        "phase_zero_and_one_a_acceptance_mappings_are_exact_complete_and_runnable -- --exact"
+        "phase_zero_one_a_and_one_b_acceptance_mappings_are_exact_complete_and_runnable -- --exact"
     ));
     assert!(ci.contains("Build pinned-toolchain custom-target composition"));
     assert!(ci.contains("pinned_toolchain_custom_target_compose_lock_build_end_to_end -- --exact"));
@@ -222,17 +222,18 @@ fn phase_one_a_generated_graph_uses_only_minimal_api_and_fixtures() {
 }
 
 #[test]
-fn phase_zero_and_one_a_acceptance_mappings_are_exact_complete_and_runnable() {
+fn phase_zero_one_a_and_one_b_acceptance_mappings_are_exact_complete_and_runnable() {
     let root = workspace_root();
     let architecture = fs::read_to_string(root.join("ARCHITECTURE.md")).unwrap();
     let invariant_map = fs::read_to_string(root.join("docs/invariant-tests.md")).unwrap();
     let architecture_phases = markdown_section(
         &architecture,
         "### Phase 0 — 独立仓库与 Architecture Contract",
-        "### Phase 1B — Linux Reference Production Build Track",
+        "### Phase 2 — Minimal Runtime Spine",
     );
-    let mapped_phases = markdown_section(&invariant_map, "## Phase 0", "## Phase 1B (in progress)");
-    for prefix in ["P0-AC-", "P1A-AC-"] {
+    let mapped_phases =
+        markdown_section(&invariant_map, "## Phase 0", "## Accepted ADR amendments");
+    for prefix in ["P0-AC-", "P1A-AC-", "P1B-AC-"] {
         let declared = acceptance_ids(architecture_phases, prefix);
         let mapped = acceptance_ids(mapped_phases, prefix);
         assert!(!declared.is_empty(), "no {prefix} criteria are declared");
@@ -321,6 +322,36 @@ fn phase_zero_and_one_a_acceptance_mappings_are_exact_complete_and_runnable() {
         mapped_rows > 50,
         "Phase 0/1A mapping table is unexpectedly empty"
     );
+}
+
+#[test]
+fn phase_one_b_linux_reference_runner_executes_every_real_backend_gate() {
+    let ci = fs::read_to_string(workspace_root().join(".github/workflows/ci.yml")).unwrap();
+    let (_, phase_job) = ci
+        .split_once("  phase-1b-linux-production:\n")
+        .expect("missing Phase 1B CI job");
+    for required in [
+        "name: Phase 1B Linux production gate",
+        "runs-on: ubuntu-24.04",
+        "timeout-minutes: 120",
+        "sudo apt-get install --yes bubblewrap iproute2 openssl python3",
+        "cargo install wasm-bindgen-cli --version 0.2.127 --locked",
+        "cargo build -p rust-agent-cli",
+        "cargo test -p rust-agent-build-executor --test linux_sandbox_launcher writable_root_allows_internal_atomic_rename_but_not_escape -- --ignored --exact --test-threads=1",
+        "cargo test -p rust-agent-build-executor --test linux_namespace_backend -- --ignored --test-threads=1",
+        "cargo test -p rust-agent-build-executor --test production_cargo_fetch -- --ignored --test-threads=1",
+        "RUST_AGENT_CLI_BIN: ${{ github.workspace }}/target/debug/rust-agent",
+    ] {
+        assert!(
+            phase_job.contains(required),
+            "missing Phase 1B CI gate: {required}"
+        );
+    }
+    assert!(
+        phase_job.find("cargo build -p rust-agent-cli")
+            < phase_job.find("--test production_cargo_fetch")
+    );
+    assert!(!phase_job.contains("continue-on-error:"));
 }
 
 fn markdown_section<'a>(input: &'a str, start: &str, end: &str) -> &'a str {

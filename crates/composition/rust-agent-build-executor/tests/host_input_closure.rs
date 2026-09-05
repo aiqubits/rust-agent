@@ -1,18 +1,32 @@
+#[cfg(target_os = "linux")]
+use std::os::unix::fs::PermissionsExt;
+use std::{fs, path::Path};
+
 use rust_agent_build_executor::{
     BuildArtifactSelector, BuildArtifactTarget, BuildEnforcementContext, BuildPanicStrategy,
     CanonicalSnapshotMetadataContract, CargoCompilationKind, CargoCompileMode, CargoCrateKind,
-    CargoDependencyKind, CargoPackageIdentity, CargoPackageSource, CargoTargetEvaluationDomain,
-    CargoUnit, CargoUnitEdge, CargoUnitGraphPlannerIdentity, CargoUnitSelector,
-    DerivedExecutablePolicy, FetchedSourceEvidence, FetchedSourceObservation, FetchedSourcePackage,
-    HostBuildClosureContent, HostBuildClosureItem, HostBuildClosureItemRole, HostBuildClosureStage,
-    HostBuildInputClosure, HostBuildInputClosureError, HostCargoUnitGraph,
-    HostFeaturePolicyClosure, LockedSourceClosure, LockedSourceError,
-    NormalizedProductionBuildPolicy, ProductionAttestationPolicy, ProductionBuildExecutionPolicy,
-    ProductionFetchPolicy, ProductionSandboxBackend, ProductionToolIdentity, ProductionToolchain,
-    ProductionTreeIdentity, SigningHelper, TrustedReviewerPolicy, TrustedSigner,
-    verify_development_host_closure_stage_chain,
+    CargoDependencyKind, CargoFetchCacheError, CargoFetchCacheLayout,
+    CargoFetchCachePackageLocation, CargoFetchDescendantExecution, CargoFetchError, CargoFetchMode,
+    CargoFetchObservation, CargoFetchRequest, CargoPackageIdentity, CargoPackageSource,
+    CargoTargetEvaluationDomain, CargoUnit, CargoUnitEdge, CargoUnitGraphPlannerIdentity,
+    CargoUnitSelector, DerivedExecutablePolicy, FetchedSourceEvidence, FetchedSourceObservation,
+    FetchedSourcePackage, HostBuildClosureContent, HostBuildClosureItem, HostBuildClosureItemRole,
+    HostBuildClosureStage, HostBuildInputClosure, HostBuildInputClosureError, HostCargoUnitGraph,
+    HostFeaturePolicyClosure, LockedSourceClosure, LockedSourceError, NormalizedCargoFetchRequest,
+    NormalizedLockedSourceClosure, NormalizedProductionBuildPolicy, ProductionAttestationPolicy,
+    ProductionBuildExecutionPolicy, ProductionFetchPolicy, ProductionFetchRedirectPolicy,
+    ProductionFileIdentity, ProductionSandboxBackend, ProductionToolIdentity, ProductionToolchain,
+    ProductionTreeIdentity, SigningHelper, SnapshotMaterializationError, TrustedReviewerPolicy,
+    TrustedSigner, ValidatedCargoFetchObservation, materialize_cargo_fetch_cache,
+    open_verified_cargo_fetch_cache, verify_development_host_closure_stage_chain,
+    verify_materialized_cargo_fetch_cache,
 };
-use rust_agent_composition::metadata::BuildRequirements;
+use rust_agent_composition::{
+    CustomTargetSpecRecord,
+    metadata::BuildRequirements,
+    snapshot::{CanonicalSnapshotEntry, CanonicalSnapshotEntryKind, CanonicalSnapshotTree},
+};
+use sha2::{Digest, Sha256};
 
 fn digest(byte: char) -> String {
     byte.to_string().repeat(64)
@@ -20,14 +34,15 @@ fn digest(byte: char) -> String {
 
 fn policy() -> NormalizedProductionBuildPolicy {
     ProductionBuildExecutionPolicy {
-        schema: 1,
+        schema: 2,
         id: "ci-linux-hermetic-v1".into(),
         host: "cfg(target_os = \"linux\")".into(),
         backend: ProductionSandboxBackend::LinuxLandlockSeccomp,
         fetch: ProductionFetchPolicy {
             network_endpoints: vec![],
             credential_helper: None,
-            max_redirects: 0,
+            tls_ca_bundle: None,
+            redirect_policy: ProductionFetchRedirectPolicy::DenyUnlistedOrigin,
         },
         attestation: ProductionAttestationPolicy {
             allowed_executors: vec!["rust-agent-build-host-v1".into()],
@@ -112,6 +127,7 @@ fn host_selector() -> CargoUnitSelector {
         target_name: "build-script-build".into(),
         compilation_kind: CargoCompilationKind::BuildHost,
         compilation_target: "x86_64-unknown-linux-gnu".into(),
+        cargo_target_context: rust_agent_build_executor::CargoUnitTargetContext::CompositionTarget,
         compile_mode: CargoCompileMode::RunCustomBuild,
         profile: "release".into(),
         crate_kind: CargoCrateKind::CustomBuild,
@@ -124,6 +140,7 @@ fn target_selector() -> CargoUnitSelector {
         target_name: "host_fixture".into(),
         compilation_kind: CargoCompilationKind::Target,
         compilation_target: "aarch64-unknown-linux-gnu".into(),
+        cargo_target_context: rust_agent_build_executor::CargoUnitTargetContext::CompositionTarget,
         compile_mode: CargoCompileMode::Build,
         profile: "release".into(),
         crate_kind: CargoCrateKind::Library,
@@ -132,7 +149,7 @@ fn target_selector() -> CargoUnitSelector {
 
 fn unit_graph() -> HostCargoUnitGraph {
     HostCargoUnitGraph {
-        schema: 1,
+        schema: 2,
         planner: CargoUnitGraphPlannerIdentity {
             interface: "cargo-unit-graph-v1".into(),
             cargo_version: "1.97.1".into(),
@@ -317,7 +334,7 @@ fn closure_digest_is_order_independent_and_stage_chain_is_exact() {
     assert_eq!(normalized.items(), reordered.items());
     assert_eq!(
         normalized.digest(),
-        "9af5c47b0442599e419bcd12c8472ca448b545ed0af689b232bdeca5d45ce4bc"
+        "5df542d0b718d3412bb6d7e4b7dc8110c2b10e917f6d9e9d69c52e2cf13e7c4b"
     );
 
     let pre = normalized
@@ -498,6 +515,50 @@ fn required_roles_paths_content_and_custom_specs_are_closed() {
     assert!(matches!(
         missing_custom_spec.normalize(&policy),
         Err(HostBuildInputClosureError::InvalidRoleCardinality {
+            role: HostBuildClosureItemRole::CustomTargetSpec,
+            ..
+        })
+    ));
+
+    let spec_bytes = br#"{"arch":"aarch64","llvm-target":"aarch64-unknown-linux-gnu"}"#;
+    let spec = CustomTargetSpecRecord::from_raw_bytes(
+        &missing_custom_spec.build_context.target,
+        spec_bytes,
+    )
+    .unwrap();
+    let mut custom_target = closure(&policy);
+    custom_target.build_context.custom_target_spec_digest =
+        Some(spec.custom_target_spec_digest.clone());
+    custom_target.items.push(HostBuildClosureItem {
+        role: HostBuildClosureItemRole::CustomTargetSpec,
+        id: "custom-target-spec".into(),
+        logical_path: format!("/rust-agent/closure/host/{}", spec.snapshot_path),
+        metadata_contract: CanonicalSnapshotMetadataContract::ReadOnlyEpochV1,
+        content: HostBuildClosureContent::CustomTargetSpec {
+            digest: spec.custom_target_spec_digest.clone(),
+            bytes_sha256: spec.raw_bytes_sha256.clone(),
+        },
+    });
+    custom_target.build_enforcement_identity_digest = policy
+        .enforcement_identity_digest(
+            &custom_target.build_requirements,
+            &custom_target.build_context,
+        )
+        .unwrap();
+    custom_target.normalize(&policy).unwrap();
+
+    let mut wrong_custom_content = custom_target;
+    wrong_custom_content
+        .items
+        .iter_mut()
+        .find(|item| item.role == HostBuildClosureItemRole::CustomTargetSpec)
+        .unwrap()
+        .content = HostBuildClosureContent::File {
+        sha256: spec.raw_bytes_sha256,
+    };
+    assert!(matches!(
+        wrong_custom_content.normalize(&policy),
+        Err(HostBuildInputClosureError::ItemContentMismatch {
             role: HostBuildClosureItemRole::CustomTargetSpec,
             ..
         })
@@ -895,4 +956,1034 @@ fn locked_source_and_fetch_mutations_fail_closed() {
         FetchedSourceEvidence::from_json(&unknown_evidence),
         Err(LockedSourceError::Json(_))
     ));
+}
+
+fn rustc_fetch_query(arguments: Vec<String>) -> CargoFetchDescendantExecution {
+    CargoFetchDescendantExecution::RustcIdentityQuery {
+        executable: "/rust-agent/toolchain/bin/rustc".into(),
+        arguments,
+        exit_code: 0,
+    }
+}
+
+fn target_information_query(target: Option<&str>) -> Vec<String> {
+    let mut arguments = vec![
+        "-".into(),
+        "--crate-name".into(),
+        "___".into(),
+        "--print=file-names".into(),
+    ];
+    if let Some(target) = target {
+        arguments.extend(["--target".into(), target.into()]);
+    }
+    arguments.extend(
+        [
+            "--crate-type",
+            "bin",
+            "--crate-type",
+            "rlib",
+            "--crate-type",
+            "dylib",
+            "--crate-type",
+            "cdylib",
+            "--crate-type",
+            "staticlib",
+            "--crate-type",
+            "proc-macro",
+            "--print=sysroot",
+            "--print=split-debuginfo",
+            "--print=crate-name",
+            "--print=cfg",
+            "-Wwarnings",
+        ]
+        .map(str::to_owned),
+    );
+    arguments
+}
+
+fn valid_fetch_rustc_queries(
+    request: &NormalizedCargoFetchRequest,
+) -> Vec<CargoFetchDescendantExecution> {
+    let mut queries = vec![
+        rustc_fetch_query(vec!["-vV".into()]),
+        rustc_fetch_query(target_information_query(None)),
+    ];
+    queries.push(rustc_fetch_query(target_information_query(Some(
+        request.cargo_target_input(),
+    ))));
+    queries
+}
+
+#[test]
+fn cargo_fetch_schema_three_binds_network_and_credential_contract() {
+    let cargo_lock = cargo_lock();
+    let locked_sources = LockedSourceClosure::from_cargo_lock(&cargo_lock, &[package()])
+        .unwrap()
+        .normalize()
+        .unwrap();
+    let policy = policy();
+    let mut host = closure(&policy);
+    host.items
+        .iter_mut()
+        .find(|item| item.role == HostBuildClosureItemRole::HostCargoLock)
+        .unwrap()
+        .content = HostBuildClosureContent::File {
+        sha256: locked_sources.cargo_lock_digest().into(),
+    };
+    let host = host.normalize(&policy).unwrap();
+    let request = CargoFetchRequest {
+        schema: 3,
+        mode: CargoFetchMode::Preprovisioned,
+    }
+    .normalize(&policy, &host, &locked_sources)
+    .unwrap();
+    assert_eq!(
+        CargoFetchRequest {
+            schema: 3,
+            mode: CargoFetchMode::Preprovisioned,
+        }
+        .normalize(&policy, &host, &locked_sources)
+        .unwrap(),
+        request
+    );
+
+    assert_eq!(request.mode(), CargoFetchMode::Preprovisioned);
+    assert_eq!(
+        request.build_execution_policy_digest(),
+        policy.full_digest()
+    );
+    assert_eq!(request.host_build_input_closure_digest(), host.digest());
+    assert_eq!(
+        request.locked_source_closure_digest(),
+        locked_sources.digest()
+    );
+    assert_eq!(
+        request.manifest_logical_path(),
+        "/rust-agent/closure/host/Cargo.toml"
+    );
+    assert_eq!(
+        request.cargo_lock_logical_path(),
+        "/rust-agent/closure/host/Cargo.lock"
+    );
+    assert_eq!(
+        request.cargo_config_logical_path(),
+        "/rust-agent/closure/host/.cargo/config.toml"
+    );
+    assert_eq!(
+        request.invocation().arguments,
+        vec![
+            "fetch",
+            "--manifest-path",
+            "/rust-agent/closure/host/Cargo.toml",
+            "--config",
+            "/rust-agent/closure/host/.cargo/config.toml",
+            "--locked",
+            "--offline",
+        ]
+    );
+    assert_eq!(
+        request.invocation().environment.get("CARGO_NET_OFFLINE"),
+        Some(&"true".into())
+    );
+    assert!(request.sandbox().environment_cleared);
+    assert!(request.sandbox().descendants_inherit_sandbox);
+    assert!(request.sandbox().network_endpoints.is_empty());
+    assert_eq!(
+        request.sandbox().writable_mounts,
+        ["/rust-agent/fetch-cache-staging"]
+    );
+
+    let observation = CargoFetchObservation {
+        schema: 3,
+        request_digest: request.digest().into(),
+        sandbox: request.sandbox().clone(),
+        cargo_exit_code: 0,
+        descendant_executions: valid_fetch_rustc_queries(&request),
+        fetched_sources: fetched_evidence(locked_sources.digest()),
+        cache_tree_digest: digest('f'),
+    };
+    let validated = request
+        .validate_observation(&observation, &locked_sources)
+        .unwrap();
+    assert_eq!(validated.request_digest(), request.digest());
+    assert_eq!(validated.cache_tree_digest(), digest('f'));
+    assert_eq!(
+        validated.fetched_sources().packages().len(),
+        locked_sources.packages().len()
+    );
+
+    let mut reordered = observation.clone();
+    reordered.fetched_sources.packages.reverse();
+    assert_eq!(
+        request
+            .validate_observation(&reordered, &locked_sources)
+            .unwrap(),
+        validated
+    );
+
+    let encoded = serde_json::to_string(&observation).unwrap();
+    assert_eq!(
+        CargoFetchObservation::from_json(&encoded).unwrap(),
+        observation
+    );
+    let unknown = encoded.replacen('{', "{\"ambient\":true,", 1);
+    assert!(matches!(
+        CargoFetchObservation::from_json(&unknown),
+        Err(CargoFetchError::Json(_))
+    ));
+}
+
+#[test]
+fn cargo_fetch_rejects_query_argument_target_and_schema_drift() {
+    let cargo_lock = cargo_lock();
+    let locked_sources = LockedSourceClosure::from_cargo_lock(&cargo_lock, &[package()])
+        .unwrap()
+        .normalize()
+        .unwrap();
+    let policy = policy();
+    let mut host = closure(&policy);
+    host.items
+        .iter_mut()
+        .find(|item| item.role == HostBuildClosureItemRole::HostCargoLock)
+        .unwrap()
+        .content = HostBuildClosureContent::File {
+        sha256: locked_sources.cargo_lock_digest().into(),
+    };
+    let host = host.normalize(&policy).unwrap();
+
+    assert!(matches!(
+        CargoFetchRequest {
+            schema: 1,
+            mode: CargoFetchMode::Preprovisioned,
+        }
+        .normalize(&policy, &host, &locked_sources),
+        Err(CargoFetchError::UnsupportedRequestSchema(1))
+    ));
+    assert!(matches!(
+        CargoFetchRequest {
+            schema: 3,
+            mode: CargoFetchMode::Networked,
+        }
+        .normalize(&policy, &host, &locked_sources),
+        Err(CargoFetchError::MissingSourceEndpoint(_))
+    ));
+    let mut rotated_policy = policy.policy().clone();
+    rotated_policy.attestation.allowed_executors = vec!["rotated-executor-v1".into()];
+    let rotated_policy = rotated_policy.normalize().unwrap();
+    assert!(matches!(
+        CargoFetchRequest {
+            schema: 3,
+            mode: CargoFetchMode::Preprovisioned,
+        }
+        .normalize(&rotated_policy, &host, &locked_sources),
+        Err(CargoFetchError::PolicyMismatch)
+    ));
+    let unmatched_host = closure(&policy).normalize(&policy).unwrap();
+    assert!(matches!(
+        CargoFetchRequest {
+            schema: 3,
+            mode: CargoFetchMode::Preprovisioned,
+        }
+        .normalize(&policy, &unmatched_host, &locked_sources),
+        Err(CargoFetchError::LockedSources(
+            LockedSourceError::HostCargoLockMismatch
+        ))
+    ));
+
+    let mut network_policy = policy.policy().clone();
+    network_policy.fetch.network_endpoints = vec![
+        "https://example.invalid:443".into(),
+        "https://github.com:443".into(),
+        "https://static.crates.io:443".into(),
+    ];
+    network_policy.fetch.credential_helper = Some(ProductionFileIdentity {
+        path: "/runner/bin/cargo-credential-helper".into(),
+        sha256: digest('5'),
+    });
+    network_policy.fetch.tls_ca_bundle = Some(ProductionFileIdentity {
+        path: "/runner/tls/ca-bundle.pem".into(),
+        sha256: digest('6'),
+    });
+    let network_policy = network_policy.normalize().unwrap();
+    let mut network_host = closure(&network_policy);
+    network_host
+        .items
+        .iter_mut()
+        .find(|item| item.role == HostBuildClosureItemRole::HostCargoLock)
+        .unwrap()
+        .content = HostBuildClosureContent::File {
+        sha256: locked_sources.cargo_lock_digest().into(),
+    };
+    let network_host = network_host.normalize(&network_policy).unwrap();
+    let network_request = CargoFetchRequest {
+        schema: 3,
+        mode: CargoFetchMode::Networked,
+    }
+    .normalize(&network_policy, &network_host, &locked_sources)
+    .unwrap();
+    assert!(
+        !network_request
+            .invocation()
+            .arguments
+            .contains(&"--offline".into())
+    );
+    assert_eq!(
+        network_request.sandbox().network_endpoints,
+        [
+            "https://example.invalid:443",
+            "https://github.com:443",
+            "https://static.crates.io:443",
+        ]
+    );
+    assert_eq!(
+        network_request
+            .sandbox()
+            .credential_helper
+            .as_ref()
+            .unwrap()
+            .executable,
+        "/rust-agent/fetch-tools/credential-helper"
+    );
+    let mut network_executions = valid_fetch_rustc_queries(&network_request);
+    network_executions.push(CargoFetchDescendantExecution::CredentialHelper {
+        executable: "/rust-agent/fetch-tools/credential-helper".into(),
+        arguments: vec!["--cargo-plugin".into()],
+        endpoint: "https://example.invalid:443".into(),
+        exit_code: 0,
+    });
+    let network_observation = CargoFetchObservation {
+        schema: 3,
+        request_digest: network_request.digest().into(),
+        sandbox: network_request.sandbox().clone(),
+        cargo_exit_code: 0,
+        descendant_executions: network_executions,
+        fetched_sources: fetched_evidence(locked_sources.digest()),
+        cache_tree_digest: digest('f'),
+    };
+    network_request
+        .validate_observation(&network_observation, &locked_sources)
+        .unwrap();
+
+    let request = CargoFetchRequest {
+        schema: 3,
+        mode: CargoFetchMode::Preprovisioned,
+    }
+    .normalize(&policy, &host, &locked_sources)
+    .unwrap();
+    let baseline = CargoFetchObservation {
+        schema: 3,
+        request_digest: request.digest().into(),
+        sandbox: request.sandbox().clone(),
+        cargo_exit_code: 0,
+        descendant_executions: valid_fetch_rustc_queries(&request),
+        fetched_sources: fetched_evidence(locked_sources.digest()),
+        cache_tree_digest: digest('f'),
+    };
+
+    let mut drift = baseline.clone();
+    drift.request_digest = digest('0');
+    assert!(matches!(
+        request.validate_observation(&drift, &locked_sources),
+        Err(CargoFetchError::ObservationRequestMismatch)
+    ));
+    let mut drift = baseline.clone();
+    drift.sandbox.environment_cleared = false;
+    assert!(matches!(
+        request.validate_observation(&drift, &locked_sources),
+        Err(CargoFetchError::SandboxMismatch)
+    ));
+    let mut drift = baseline.clone();
+    drift.cargo_exit_code = 9;
+    assert!(matches!(
+        request.validate_observation(&drift, &locked_sources),
+        Err(CargoFetchError::FetchFailed(9))
+    ));
+    let mut drift = baseline.clone();
+    drift.descendant_executions.clear();
+    assert!(matches!(
+        request.validate_observation(&drift, &locked_sources),
+        Err(CargoFetchError::InvalidDescendantExecution)
+    ));
+    let mut drift = baseline.clone();
+    drift.descendant_executions = vec![CargoFetchDescendantExecution::RustcIdentityQuery {
+        executable: "/rust-agent/toolchain/bin/rustc".into(),
+        arguments: vec!["--crate-name".into(), "attacker".into()],
+        exit_code: 0,
+    }];
+    assert!(matches!(
+        request.validate_observation(&drift, &locked_sources),
+        Err(CargoFetchError::InvalidDescendantExecution)
+    ));
+    let mut drift = baseline.clone();
+    let target_query = drift
+        .descendant_executions
+        .iter_mut()
+        .find_map(|execution| match execution {
+            CargoFetchDescendantExecution::RustcIdentityQuery { arguments, .. }
+                if arguments.iter().any(|argument| argument == "--target") =>
+            {
+                Some(arguments)
+            }
+            _ => None,
+        })
+        .unwrap();
+    *target_query
+        .iter_mut()
+        .find(|argument| argument.as_str() == request.cargo_target_input())
+        .unwrap() = "attacker-target".into();
+    assert!(matches!(
+        request.validate_observation(&drift, &locked_sources),
+        Err(CargoFetchError::InvalidDescendantExecution)
+    ));
+    let mut drift = baseline.clone();
+    drift.schema = 1;
+    assert!(matches!(
+        request.validate_observation(&drift, &locked_sources),
+        Err(CargoFetchError::UnsupportedObservationSchema(1))
+    ));
+    let mut drift = baseline.clone();
+    drift.descendant_executions = vec![CargoFetchDescendantExecution::CredentialHelper {
+        executable: "/rust-agent/fetch-tools/credential-helper".into(),
+        arguments: vec!["--cargo-plugin".into()],
+        endpoint: "https://example.invalid:443".into(),
+        exit_code: 0,
+    }];
+    assert!(matches!(
+        request.validate_observation(&drift, &locked_sources),
+        Err(CargoFetchError::InvalidDescendantExecution)
+    ));
+    let mut drift = baseline.clone();
+    drift.cache_tree_digest = "not-a-digest".into();
+    assert!(matches!(
+        request.validate_observation(&drift, &locked_sources),
+        Err(CargoFetchError::InvalidCacheTreeDigest)
+    ));
+    let mut drift = baseline.clone();
+    drift.fetched_sources.packages.pop();
+    assert!(matches!(
+        request.validate_observation(&drift, &locked_sources),
+        Err(CargoFetchError::LockedSources(
+            LockedSourceError::EvidencePackageSetMismatch
+        ))
+    ));
+
+    let mut boundary = baseline;
+    boundary.descendant_executions = (0..254)
+        .map(|_| CargoFetchDescendantExecution::RustcIdentityQuery {
+            executable: "/rust-agent/toolchain/bin/rustc".into(),
+            arguments: vec!["-vV".into()],
+            exit_code: 0,
+        })
+        .collect();
+    boundary
+        .descendant_executions
+        .extend(valid_fetch_rustc_queries(&request).into_iter().skip(1));
+    assert_eq!(boundary.descendant_executions.len(), 256);
+    request
+        .validate_observation(&boundary, &locked_sources)
+        .unwrap();
+    boundary
+        .descendant_executions
+        .push(CargoFetchDescendantExecution::RustcIdentityQuery {
+            executable: "/rust-agent/toolchain/bin/rustc".into(),
+            arguments: vec!["-vV".into()],
+            exit_code: 0,
+        });
+    assert!(matches!(
+        request.validate_observation(&boundary, &locked_sources),
+        Err(CargoFetchError::InvalidDescendantExecution)
+    ));
+}
+
+fn fetch_cache_fixture() -> (
+    NormalizedCargoFetchRequest,
+    NormalizedLockedSourceClosure,
+    CanonicalSnapshotTree,
+    CargoFetchCacheLayout,
+    FetchedSourceEvidence,
+) {
+    let cargo_lock = cargo_lock();
+    let locked_sources = LockedSourceClosure::from_cargo_lock(&cargo_lock, &[package()])
+        .unwrap()
+        .normalize()
+        .unwrap();
+    let policy = policy();
+    let mut host = closure(&policy);
+    host.items
+        .iter_mut()
+        .find(|item| item.role == HostBuildClosureItemRole::HostCargoLock)
+        .unwrap()
+        .content = HostBuildClosureContent::File {
+        sha256: locked_sources.cargo_lock_digest().into(),
+    };
+    let host = host.normalize(&policy).unwrap();
+    let request = CargoFetchRequest {
+        schema: 3,
+        mode: CargoFetchMode::Preprovisioned,
+    }
+    .normalize(&policy, &host, &locked_sources)
+    .unwrap();
+
+    let registry_source = CanonicalSnapshotTree::from_entries(vec![
+        CanonicalSnapshotEntry::regular_file("Cargo.toml", digest('2'), 12),
+        CanonicalSnapshotEntry::directory("src"),
+        CanonicalSnapshotEntry::regular_file("src/lib.rs", digest('3'), 18),
+    ])
+    .unwrap();
+    let git_source = CanonicalSnapshotTree::from_entries(vec![
+        CanonicalSnapshotEntry::regular_file("Cargo.toml", digest('4'), 14),
+        CanonicalSnapshotEntry::directory("src"),
+        CanonicalSnapshotEntry::regular_file("src/lib.rs", digest('5'), 20),
+    ])
+    .unwrap();
+    let registry_root = "registry/src/github-index/registry-lib-1.2.3";
+    let git_root = "git/checkouts/git-helper/revision";
+    let mut entries = vec![
+        CanonicalSnapshotEntry::directory("registry"),
+        CanonicalSnapshotEntry::directory("registry/cache"),
+        CanonicalSnapshotEntry::directory("registry/cache/github-index"),
+        CanonicalSnapshotEntry::regular_file(
+            "registry/cache/github-index/registry-lib-1.2.3.crate",
+            digest('c'),
+            128,
+        ),
+        CanonicalSnapshotEntry::directory("registry/src"),
+        CanonicalSnapshotEntry::directory("registry/src/github-index"),
+        CanonicalSnapshotEntry::directory(registry_root),
+        CanonicalSnapshotEntry::directory("git"),
+        CanonicalSnapshotEntry::directory("git/checkouts"),
+        CanonicalSnapshotEntry::directory("git/checkouts/git-helper"),
+        CanonicalSnapshotEntry::directory(git_root),
+    ];
+    for entry in registry_source.entries() {
+        let mut entry = entry.clone();
+        entry.path = format!("{registry_root}/{}", entry.path);
+        entries.push(entry);
+    }
+    for entry in git_source.entries() {
+        let mut entry = entry.clone();
+        entry.path = format!("{git_root}/{}", entry.path);
+        entries.push(entry);
+    }
+    let cache_tree = CanonicalSnapshotTree::from_entries(entries).unwrap();
+    let evidence = FetchedSourceEvidence {
+        schema: 1,
+        locked_source_closure_digest: locked_sources.digest().into(),
+        packages: vec![
+            FetchedSourcePackage {
+                package: package(),
+                observation: FetchedSourceObservation::PathSnapshot {
+                    snapshot_tree_digest: digest('a'),
+                },
+            },
+            FetchedSourcePackage {
+                package: CargoPackageIdentity {
+                    name: "git-helper".into(),
+                    version: "0.4.0".into(),
+                    source: CargoPackageSource::Git {
+                        repository: "https://example.invalid/helper?rev=v1".into(),
+                        precise: "1".repeat(40),
+                    },
+                },
+                observation: FetchedSourceObservation::GitCheckout {
+                    precise: "1".repeat(40),
+                    snapshot_tree_digest: git_source.digest().into(),
+                },
+            },
+            FetchedSourcePackage {
+                package: CargoPackageIdentity {
+                    name: "registry-lib".into(),
+                    version: "1.2.3".into(),
+                    source: CargoPackageSource::Registry {
+                        registry: "https://github.com/rust-lang/crates.io-index".into(),
+                        checksum: digest('c'),
+                    },
+                },
+                observation: FetchedSourceObservation::RegistryArchive {
+                    archive_sha256: digest('c'),
+                    snapshot_tree_digest: registry_source.digest().into(),
+                },
+            },
+        ],
+    };
+    let layout = CargoFetchCacheLayout {
+        schema: 1,
+        packages: vec![
+            CargoFetchCachePackageLocation {
+                package: package(),
+                archive_path: None,
+                source_path: None,
+            },
+            CargoFetchCachePackageLocation {
+                package: CargoPackageIdentity {
+                    name: "git-helper".into(),
+                    version: "0.4.0".into(),
+                    source: CargoPackageSource::Git {
+                        repository: "https://example.invalid/helper?rev=v1".into(),
+                        precise: "1".repeat(40),
+                    },
+                },
+                archive_path: None,
+                source_path: Some(git_root.into()),
+            },
+            CargoFetchCachePackageLocation {
+                package: CargoPackageIdentity {
+                    name: "registry-lib".into(),
+                    version: "1.2.3".into(),
+                    source: CargoPackageSource::Registry {
+                        registry: "https://github.com/rust-lang/crates.io-index".into(),
+                        checksum: digest('c'),
+                    },
+                },
+                archive_path: Some("registry/cache/github-index/registry-lib-1.2.3.crate".into()),
+                source_path: Some(registry_root.into()),
+            },
+        ],
+    };
+    (request, locked_sources, cache_tree, layout, evidence)
+}
+
+fn validated_fetch_for_cache(
+    request: &NormalizedCargoFetchRequest,
+    locked_sources: &NormalizedLockedSourceClosure,
+    cache_tree: &CanonicalSnapshotTree,
+    evidence: FetchedSourceEvidence,
+) -> ValidatedCargoFetchObservation {
+    request
+        .validate_observation(
+            &CargoFetchObservation {
+                schema: 3,
+                request_digest: request.digest().into(),
+                sandbox: request.sandbox().clone(),
+                cargo_exit_code: 0,
+                descendant_executions: valid_fetch_rustc_queries(request),
+                fetched_sources: evidence,
+                cache_tree_digest: cache_tree.digest().into(),
+            },
+            locked_sources,
+        )
+        .unwrap()
+}
+
+#[test]
+fn fetch_cache_manifest_rederives_archives_and_source_subtrees() {
+    let (request, locked_sources, cache_tree, layout, evidence) = fetch_cache_fixture();
+    let observation =
+        validated_fetch_for_cache(&request, &locked_sources, &cache_tree, evidence.clone());
+    let manifest = layout.verify(&request, &observation, &cache_tree).unwrap();
+    manifest
+        .verify(&request, &observation, &cache_tree)
+        .unwrap();
+    assert_eq!(manifest.request_digest, request.digest());
+    assert_eq!(manifest.fetch_observation_digest, observation.digest());
+    assert_eq!(manifest.cache_tree_digest, cache_tree.digest());
+
+    let mut reordered = layout;
+    reordered.packages.reverse();
+    assert_eq!(
+        reordered
+            .verify(&request, &observation, &cache_tree)
+            .unwrap(),
+        manifest
+    );
+
+    let encoded = serde_json::to_string(&manifest).unwrap();
+    let decoded = rust_agent_build_executor::CargoFetchCacheManifest::from_json(&encoded).unwrap();
+    decoded.verify(&request, &observation, &cache_tree).unwrap();
+    let unknown = encoded.replacen('{', "{\"ambient\":true,", 1);
+    assert!(matches!(
+        rust_agent_build_executor::CargoFetchCacheManifest::from_json(&unknown),
+        Err(CargoFetchCacheError::Json(_))
+    ));
+}
+
+#[test]
+fn fetch_cache_manifest_rejects_checksum_tree_path_and_projection_drift() {
+    let (request, locked_sources, cache_tree, layout, evidence) = fetch_cache_fixture();
+    let observation =
+        validated_fetch_for_cache(&request, &locked_sources, &cache_tree, evidence.clone());
+
+    let mut missing = layout.clone();
+    missing.packages.pop();
+    assert!(matches!(
+        missing.verify(&request, &observation, &cache_tree),
+        Err(CargoFetchCacheError::PackageSetMismatch)
+    ));
+
+    let mut traversal = layout.clone();
+    traversal.packages[2].archive_path = Some("registry/cache/../escape.crate".into());
+    assert!(matches!(
+        traversal.verify(&request, &observation, &cache_tree),
+        Err(CargoFetchCacheError::InvalidPackageLocation(_))
+    ));
+
+    let mut overlap = layout.clone();
+    overlap.packages[1].source_path = layout.packages[2].source_path.clone();
+    assert!(matches!(
+        overlap.verify(&request, &observation, &cache_tree),
+        Err(CargoFetchCacheError::OverlappingPackageLocation)
+    ));
+
+    let mut archive_entries = cache_tree.entries().to_vec();
+    let archive = archive_entries
+        .iter_mut()
+        .find(|entry| entry.path.ends_with("registry-lib-1.2.3.crate"))
+        .unwrap();
+    archive.kind = CanonicalSnapshotEntryKind::RegularFile {
+        sha256: digest('f'),
+        bytes: 128,
+    };
+    let archive_drift = CanonicalSnapshotTree::from_entries(archive_entries).unwrap();
+    let archive_observation =
+        validated_fetch_for_cache(&request, &locked_sources, &archive_drift, evidence.clone());
+    assert!(matches!(
+        layout.verify(&request, &archive_observation, &archive_drift),
+        Err(CargoFetchCacheError::RegistryArchiveMismatch(_))
+    ));
+
+    let mut source_entries = cache_tree.entries().to_vec();
+    let source = source_entries
+        .iter_mut()
+        .find(|entry| entry.path.ends_with("registry-lib-1.2.3/src/lib.rs"))
+        .unwrap();
+    source.kind = CanonicalSnapshotEntryKind::RegularFile {
+        sha256: digest('f'),
+        bytes: 18,
+    };
+    let source_drift = CanonicalSnapshotTree::from_entries(source_entries).unwrap();
+    let source_observation =
+        validated_fetch_for_cache(&request, &locked_sources, &source_drift, evidence);
+    assert!(matches!(
+        layout.verify(&request, &source_observation, &source_drift),
+        Err(CargoFetchCacheError::SourceTreeMismatch(_))
+    ));
+
+    let mut manifest = layout.verify(&request, &observation, &cache_tree).unwrap();
+    manifest.digest = digest('0');
+    assert!(matches!(
+        manifest.verify(&request, &observation, &cache_tree),
+        Err(CargoFetchCacheError::ManifestMismatch)
+    ));
+}
+
+#[cfg(target_os = "linux")]
+fn real_fetch_cache_fixture(
+    root: &Path,
+) -> (
+    NormalizedCargoFetchRequest,
+    NormalizedLockedSourceClosure,
+    CanonicalSnapshotTree,
+    CargoFetchCacheLayout,
+    FetchedSourceEvidence,
+) {
+    let registry_root = "registry/src/github-index/registry-lib-1.2.3";
+    let archive_path = "registry/cache/github-index/registry-lib-1.2.3.crate";
+    let git_root = "git/checkouts/git-helper/revision";
+    fs::create_dir_all(root.join(format!("{registry_root}/src"))).unwrap();
+    fs::create_dir_all(root.join(format!("{git_root}/src"))).unwrap();
+    fs::create_dir_all(root.join("registry/cache/github-index")).unwrap();
+    let archive = b"registry archive bytes";
+    let registry_manifest = b"[package]\nname='registry-lib'\nversion='1.2.3'\n";
+    let registry_source = b"pub fn registry() {}\n";
+    let git_manifest = b"[package]\nname='git-helper'\nversion='0.4.0'\n";
+    let git_source = b"pub fn git() {}\n";
+    fs::write(root.join(archive_path), archive).unwrap();
+    fs::write(
+        root.join(format!("{registry_root}/Cargo.toml")),
+        registry_manifest,
+    )
+    .unwrap();
+    fs::write(
+        root.join(format!("{registry_root}/src/lib.rs")),
+        registry_source,
+    )
+    .unwrap();
+    fs::write(root.join(format!("{git_root}/Cargo.toml")), git_manifest).unwrap();
+    fs::write(root.join(format!("{git_root}/src/lib.rs")), git_source).unwrap();
+
+    let hash = |bytes: &[u8]| hex::encode(Sha256::digest(bytes));
+    let archive_digest = hash(archive);
+    let registry_tree = CanonicalSnapshotTree::from_entries(vec![
+        CanonicalSnapshotEntry::regular_file(
+            "Cargo.toml",
+            hash(registry_manifest),
+            registry_manifest.len() as u64,
+        ),
+        CanonicalSnapshotEntry::directory("src"),
+        CanonicalSnapshotEntry::regular_file(
+            "src/lib.rs",
+            hash(registry_source),
+            registry_source.len() as u64,
+        ),
+    ])
+    .unwrap();
+    let git_tree = CanonicalSnapshotTree::from_entries(vec![
+        CanonicalSnapshotEntry::regular_file(
+            "Cargo.toml",
+            hash(git_manifest),
+            git_manifest.len() as u64,
+        ),
+        CanonicalSnapshotEntry::directory("src"),
+        CanonicalSnapshotEntry::regular_file(
+            "src/lib.rs",
+            hash(git_source),
+            git_source.len() as u64,
+        ),
+    ])
+    .unwrap();
+    let mut entries = vec![
+        CanonicalSnapshotEntry::directory("registry"),
+        CanonicalSnapshotEntry::directory("registry/cache"),
+        CanonicalSnapshotEntry::directory("registry/cache/github-index"),
+        CanonicalSnapshotEntry::regular_file(archive_path, &archive_digest, archive.len() as u64),
+        CanonicalSnapshotEntry::directory("registry/src"),
+        CanonicalSnapshotEntry::directory("registry/src/github-index"),
+        CanonicalSnapshotEntry::directory(registry_root),
+        CanonicalSnapshotEntry::directory("git"),
+        CanonicalSnapshotEntry::directory("git/checkouts"),
+        CanonicalSnapshotEntry::directory("git/checkouts/git-helper"),
+        CanonicalSnapshotEntry::directory(git_root),
+    ];
+    for entry in registry_tree.entries() {
+        let mut entry = entry.clone();
+        entry.path = format!("{registry_root}/{}", entry.path);
+        entries.push(entry);
+    }
+    for entry in git_tree.entries() {
+        let mut entry = entry.clone();
+        entry.path = format!("{git_root}/{}", entry.path);
+        entries.push(entry);
+    }
+    let cache_tree = CanonicalSnapshotTree::from_entries(entries).unwrap();
+    let lock = format!(
+        "version = 4\n\n[[package]]\nname = \"host-fixture\"\nversion = \"0.1.0\"\n\n[[package]]\nname = \"registry-lib\"\nversion = \"1.2.3\"\nsource = \"registry+https://github.com/rust-lang/crates.io-index\"\nchecksum = \"{archive_digest}\"\n\n[[package]]\nname = \"git-helper\"\nversion = \"0.4.0\"\nsource = \"git+https://example.invalid/helper?rev=v1#{}\"\n",
+        "1".repeat(40)
+    );
+    let locked_sources = LockedSourceClosure::from_cargo_lock(lock.as_bytes(), &[package()])
+        .unwrap()
+        .normalize()
+        .unwrap();
+    let policy = policy();
+    let mut host = closure(&policy);
+    host.items
+        .iter_mut()
+        .find(|item| item.role == HostBuildClosureItemRole::HostCargoLock)
+        .unwrap()
+        .content = HostBuildClosureContent::File {
+        sha256: locked_sources.cargo_lock_digest().into(),
+    };
+    let host = host.normalize(&policy).unwrap();
+    let request = CargoFetchRequest {
+        schema: 3,
+        mode: CargoFetchMode::Preprovisioned,
+    }
+    .normalize(&policy, &host, &locked_sources)
+    .unwrap();
+    let registry_package = CargoPackageIdentity {
+        name: "registry-lib".into(),
+        version: "1.2.3".into(),
+        source: CargoPackageSource::Registry {
+            registry: "https://github.com/rust-lang/crates.io-index".into(),
+            checksum: archive_digest.clone(),
+        },
+    };
+    let git_package = CargoPackageIdentity {
+        name: "git-helper".into(),
+        version: "0.4.0".into(),
+        source: CargoPackageSource::Git {
+            repository: "https://example.invalid/helper?rev=v1".into(),
+            precise: "1".repeat(40),
+        },
+    };
+    let evidence = FetchedSourceEvidence {
+        schema: 1,
+        locked_source_closure_digest: locked_sources.digest().into(),
+        packages: vec![
+            FetchedSourcePackage {
+                package: package(),
+                observation: FetchedSourceObservation::PathSnapshot {
+                    snapshot_tree_digest: digest('a'),
+                },
+            },
+            FetchedSourcePackage {
+                package: registry_package.clone(),
+                observation: FetchedSourceObservation::RegistryArchive {
+                    archive_sha256: archive_digest,
+                    snapshot_tree_digest: registry_tree.digest().into(),
+                },
+            },
+            FetchedSourcePackage {
+                package: git_package.clone(),
+                observation: FetchedSourceObservation::GitCheckout {
+                    precise: "1".repeat(40),
+                    snapshot_tree_digest: git_tree.digest().into(),
+                },
+            },
+        ],
+    };
+    let layout = CargoFetchCacheLayout {
+        schema: 1,
+        packages: vec![
+            CargoFetchCachePackageLocation {
+                package: package(),
+                archive_path: None,
+                source_path: None,
+            },
+            CargoFetchCachePackageLocation {
+                package: registry_package,
+                archive_path: Some(archive_path.into()),
+                source_path: Some(registry_root.into()),
+            },
+            CargoFetchCachePackageLocation {
+                package: git_package,
+                archive_path: None,
+                source_path: Some(git_root.into()),
+            },
+        ],
+    };
+    (request, locked_sources, cache_tree, layout, evidence)
+}
+
+#[cfg(target_os = "linux")]
+fn make_cache_tree_writable(root: &Path) {
+    for entry in walkdir::WalkDir::new(root).contents_first(true) {
+        let entry = entry.unwrap();
+        let mode = if entry.file_type().is_dir() {
+            0o755
+        } else {
+            0o644
+        };
+        fs::set_permissions(entry.path(), fs::Permissions::from_mode(mode)).unwrap();
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn fetch_cache_materialization_is_sealed_reusable_and_mutation_detecting() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let source = temp.path().join("cargo-home-source");
+    let output = temp.path().join("verified-cache");
+    fs::create_dir(&source).unwrap();
+    let (request, locked_sources, cache_tree, layout, evidence) = real_fetch_cache_fixture(&source);
+    let observation = validated_fetch_for_cache(&request, &locked_sources, &cache_tree, evidence);
+
+    let first =
+        materialize_cargo_fetch_cache(&source, &output, &request, &observation, &layout).unwrap();
+    assert!(!first.reused());
+    assert_eq!(first.path(), output);
+    let verified = verify_materialized_cargo_fetch_cache(&output, &request, &observation).unwrap();
+    assert_eq!(verified, *first.manifest());
+    let verified_handle = open_verified_cargo_fetch_cache(&output, &request, &observation).unwrap();
+    assert_eq!(verified_handle.path(), output);
+    assert_eq!(verified_handle.manifest(), first.manifest());
+    verified_handle.verify_unchanged().unwrap();
+
+    let reused =
+        materialize_cargo_fetch_cache(&source, &output, &request, &observation, &layout).unwrap();
+    assert!(reused.reused());
+    assert_eq!(reused.manifest(), first.manifest());
+
+    let cached_source = output.join("registry/src/github-index/registry-lib-1.2.3/src/lib.rs");
+    fs::set_permissions(&cached_source, fs::Permissions::from_mode(0o644)).unwrap();
+    fs::write(&cached_source, b"attacker").unwrap();
+    assert!(verified_handle.verify_unchanged().is_err());
+    assert!(verify_materialized_cargo_fetch_cache(&output, &request, &observation).is_err());
+    assert!(
+        materialize_cargo_fetch_cache(&source, &output, &request, &observation, &layout).is_err()
+    );
+    assert_eq!(fs::read(&cached_source).unwrap(), b"attacker");
+
+    make_cache_tree_writable(&output);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn verified_fetch_cache_handle_rejects_exact_path_replacement() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let source = temp.path().join("cargo-home-source");
+    let output = temp.path().join("verified-cache");
+    let displaced = temp.path().join("displaced-cache");
+    fs::create_dir(&source).unwrap();
+    let (request, locked_sources, cache_tree, layout, evidence) = real_fetch_cache_fixture(&source);
+    let observation = validated_fetch_for_cache(&request, &locked_sources, &cache_tree, evidence);
+
+    materialize_cargo_fetch_cache(&source, &output, &request, &observation, &layout).unwrap();
+    let verified = open_verified_cargo_fetch_cache(&output, &request, &observation).unwrap();
+
+    fs::rename(&output, &displaced).unwrap();
+    let replacement =
+        materialize_cargo_fetch_cache(&source, &output, &request, &observation, &layout).unwrap();
+    assert!(!replacement.reused());
+    verify_materialized_cargo_fetch_cache(&output, &request, &observation).unwrap();
+    assert!(matches!(
+        verified.verify_unchanged(),
+        Err(CargoFetchCacheError::Materialization(
+            SnapshotMaterializationError::SourceChanged(_)
+        ))
+    ));
+
+    make_cache_tree_writable(&output);
+    make_cache_tree_writable(&displaced);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn concurrent_fetch_cache_publication_has_one_winner_and_verified_reuse() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let source = temp.path().join("cargo-home-source");
+    let output = temp.path().join("verified-cache");
+    fs::create_dir(&source).unwrap();
+    let (request, locked_sources, cache_tree, layout, evidence) = real_fetch_cache_fixture(&source);
+    let observation = validated_fetch_for_cache(&request, &locked_sources, &cache_tree, evidence);
+
+    let mut reused = std::thread::scope(|scope| {
+        let first = scope.spawn(|| {
+            materialize_cargo_fetch_cache(&source, &output, &request, &observation, &layout)
+                .unwrap()
+                .reused()
+        });
+        let second = scope.spawn(|| {
+            materialize_cargo_fetch_cache(&source, &output, &request, &observation, &layout)
+                .unwrap()
+                .reused()
+        });
+        vec![first.join().unwrap(), second.join().unwrap()]
+    });
+    reused.sort_unstable();
+    assert_eq!(reused, [false, true]);
+    verify_materialized_cargo_fetch_cache(&output, &request, &observation).unwrap();
+    assert_eq!(fs::read_dir(temp.path()).unwrap().count(), 2);
+
+    make_cache_tree_writable(&output);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn fetch_cache_rejection_leaves_no_publication_or_staging_residue() {
+    use std::os::unix::fs::symlink;
+
+    let temp = tempfile::TempDir::new().unwrap();
+    let source = temp.path().join("cargo-home-source");
+    let output = temp.path().join("verified-cache");
+    fs::create_dir(&source).unwrap();
+    let (request, locked_sources, cache_tree, mut layout, evidence) =
+        real_fetch_cache_fixture(&source);
+    let observation = validated_fetch_for_cache(&request, &locked_sources, &cache_tree, evidence);
+    layout.packages[1].archive_path = Some("registry/cache/../escape.crate".into());
+    assert!(
+        materialize_cargo_fetch_cache(&source, &output, &request, &observation, &layout).is_err()
+    );
+    assert!(!output.exists());
+    assert_eq!(fs::read_dir(temp.path()).unwrap().count(), 1);
+
+    symlink(
+        "Cargo.toml",
+        source.join("registry/src/github-index/registry-lib-1.2.3/redirect"),
+    )
+    .unwrap();
+    assert!(
+        materialize_cargo_fetch_cache(&source, &output, &request, &observation, &layout).is_err()
+    );
+    assert!(!output.exists());
+    assert_eq!(fs::read_dir(temp.path()).unwrap().count(), 1);
 }

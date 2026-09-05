@@ -872,7 +872,9 @@ struct TargetFactsRecordRef<'a> {
     custom_target_spec_digest: Option<&'a str>,
 }
 
-pub(crate) fn validate_target_triple(triple: &str) -> Result<(), TargetError> {
+/// Validates the canonical schema-v1 spelling used for built-in and logical
+/// custom target triples.
+pub fn validate_target_triple(triple: &str) -> Result<(), TargetError> {
     if triple.is_empty()
         || triple.len() > MAX_TARGET_TRIPLE_BYTES
         || !triple.is_ascii()

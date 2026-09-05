@@ -7,12 +7,38 @@
 mod artifact;
 mod cargo_planner;
 mod cargo_unit_graph;
+mod fetch_cache;
+mod fetch_runner;
 mod host_feature;
 mod host_input_closure;
 mod integration;
+#[cfg(target_os = "linux")]
+mod landlock_launcher;
+#[cfg(target_os = "linux")]
+mod linux_sandbox;
 mod locked_sources;
 mod policy;
+mod production_artifact;
+#[cfg(target_os = "linux")]
+mod production_attestation;
+#[cfg(target_os = "linux")]
+mod production_build;
+#[cfg(target_os = "linux")]
+mod production_fetch;
+mod production_inputs;
+#[cfg(target_os = "linux")]
+mod production_integration;
+#[cfg(target_os = "linux")]
+mod production_pipeline;
+#[cfg(target_os = "linux")]
+mod production_planner;
 mod production_policy;
+#[cfg(target_os = "linux")]
+mod production_preflight;
+#[cfg(target_os = "linux")]
+mod production_wasm;
+#[cfg(target_os = "linux")]
+mod seccomp_supervisor;
 mod snapshot_materializer;
 mod topology;
 mod wasm_bundle;
@@ -30,29 +56,57 @@ pub use artifact::{
 pub use cargo_planner::{
     CargoPlannerEdgeSemantic, CargoPlannerEdgeSemantics, CargoPlannerError, CargoPlannerGraphRoot,
     CargoPlannerInvocation, CargoPlannerRequest, CargoUnitGraphNormalizationError,
-    NormalizedCargoPlannerRequest, VerifiedCargoUnitGraphEnvelope, normalize_cargo_unit_graph,
+    NormalizedCargoPlannerRequest, VerifiedCargoUnitGraphEnvelope,
+    derive_cargo_planner_edge_semantics_from_metadata, normalize_cargo_unit_graph,
 };
 pub use cargo_unit_graph::{
     CargoCompilationKind, CargoCompileMode, CargoCrateKind, CargoDependencyKind,
     CargoPackageIdentity, CargoPackageSource, CargoTargetEvaluationDomain, CargoUnit,
     CargoUnitEdge, CargoUnitGraphError, CargoUnitGraphPlannerIdentity, CargoUnitSelector,
-    HostCargoUnitGraph, NormalizedCargoUnit, NormalizedHostCargoUnitGraph,
+    CargoUnitTargetContext, HostCargoUnitGraph, NormalizedCargoUnit, NormalizedHostCargoUnitGraph,
+};
+pub use fetch_cache::{
+    CargoFetchCacheError, CargoFetchCacheLayout, CargoFetchCacheManifest,
+    CargoFetchCachePackageLocation, MaterializedCargoFetchCache, ObservedCargoFetchCache,
+    VerifiedCargoFetchCache, materialize_cargo_fetch_cache, observe_cargo_fetch_cache,
+    open_verified_cargo_fetch_cache, verify_materialized_cargo_fetch_cache,
+};
+pub use fetch_runner::{
+    CargoFetchCredentialHelper, CargoFetchDescendantExecution, CargoFetchError,
+    CargoFetchInvocation, CargoFetchMode, CargoFetchObservation, CargoFetchRequest,
+    CargoFetchSandboxContract, CargoFetchTlsCaBundle, NormalizedCargoFetchRequest,
+    ValidatedCargoFetchObservation,
 };
 pub use host_feature::{
     DevelopmentHostFeatureReceipt, DevelopmentHostFeatureVerification, FeatureAccountingMode,
     FeatureDelta, FeatureSemanticsEvidence, HostFeatureDeltaRecord, HostFeaturePolicyEntry,
     HostFeaturePolicyError, HostFeaturePolicyStageDigests, HostFeatureUnionPolicy,
-    HostFeatureUnitObservation, NormalizedHostFeaturePolicy, ProductBuildContribution,
-    verify_development_host_feature_union,
+    HostFeatureUnitObservation, HostFeatureVerificationReceipt, NormalizedHostFeaturePolicy,
+    ProductBuildContribution, ProductionHostFeatureReceipt, VerifiedProductionHostFeatureReceipt,
+    verify_development_host_feature_union, verify_production_host_feature_union,
 };
 pub use host_input_closure::{
     CanonicalSnapshotMetadataContract, DevelopmentHostClosureStageReceipt, HostBuildClosureContent,
     HostBuildClosureItem, HostBuildClosureItemRole, HostBuildClosureStage, HostBuildInputClosure,
     HostBuildInputClosureError, HostFeaturePolicyClosure, NormalizedHostBuildClosureItem,
-    NormalizedHostBuildInputClosure, verify_development_host_closure_stage_chain,
+    NormalizedHostBuildInputClosure, RustcSettingsRecord, cargo_resolution_record_digest,
+    verify_development_host_closure_stage_chain,
 };
 pub use integration::{
     IntegrationError, emit_integration, verify_integration, verify_integration_topology,
+};
+#[cfg(target_os = "linux")]
+pub use landlock_launcher::{
+    LandlockExecutionPolicy, LandlockLauncherError, LinuxSandboxAnonymousSocketpair,
+    LinuxSandboxNetworkPolicy, LinuxSandboxResolvedEndpoint, apply_landlock_execution_policy,
+};
+#[cfg(target_os = "linux")]
+pub use linux_sandbox::{
+    LinuxSandboxBackendIdentity, LinuxSandboxCapturedExecution, LinuxSandboxCommand,
+    LinuxSandboxEnforcement, LinuxSandboxError, LinuxSandboxExecutionObservation,
+    LinuxSandboxMountIdentity, LinuxSandboxMountKind, LinuxSandboxReadOnlyMount,
+    LinuxSandboxRuntimeIdentity, LinuxSandboxRuntimeSymlink, LinuxSandboxWritableMount,
+    VerifiedLinuxSandboxBackend,
 };
 pub use locked_sources::{
     FetchedSourceEvidence, FetchedSourceObservation, FetchedSourcePackage, LockedSourceClosure,
@@ -62,25 +116,110 @@ pub use policy::{
     BuildEnvironment, BuildExecutable, BuildExecutionPolicy, BuildPolicyError, BuildReadInput,
     VerifiedBuildExecutable,
 };
+pub use production_artifact::{
+    PRODUCTION_BUILD_MANIFEST_FILE, ProductionArtifactError, ProductionArtifactKind,
+    ProductionArtifactRecord, ProductionBuildManifest, ProductionBuildManifestInput,
+    ProductionBuildOptionsIdentity, ProductionCargoInvocationIdentity,
+    ProductionEnforcementResultIdentity, inspect_production_build_manifest,
+    production_artifact_record, write_production_build_manifest,
+};
+#[cfg(target_os = "linux")]
+pub use production_artifact::{
+    ProductionArtifactPublication, ProductionArtifactPublicationPermit,
+    create_production_artifact_staging, materialize_trusted_cargo_artifact,
+    publish_production_artifact,
+};
+#[cfg(target_os = "linux")]
+pub use production_attestation::{
+    LinuxSandboxBackendAttestation, LinuxSandboxRuntimeAttestation,
+    PreparedProductionBuildAttestationPublication, ProductionAttestationError,
+    ProductionBuildAttestation, ProductionBuildAttestationInput, ProductionBuildAttestationPayload,
+    ProductionBuildPolicyAttestation, ProductionCompletionHandle,
+    ProductionCompletionHandlePayload, ProductionExecutableAttestation,
+    ProductionExecutionEvidence, ProductionFetchPolicyAttestation, ProductionFileAttestation,
+    ProductionOperationKind, ProductionReadInputAttestation, ProductionToolAttestation,
+    ProductionToolchainAttestation, ProductionTreeAttestation, ProductionTrustPolicyAttestation,
+    SigningHelperAttestation, TrustedSignerAttestation, VerifiedProductionBuildAttestation,
+    create_production_build_attestation_payload, prepare_production_build_attestation_publication,
+    publish_production_build_attestation, sign_production_build_attestation,
+    verify_production_build_attestation, write_production_build_attestation,
+};
+#[cfg(target_os = "linux")]
+pub use production_build::{
+    TrustedCargoArtifactFile, TrustedCargoBuildError, TrustedCargoBuildResult,
+    execute_trusted_cargo_build,
+};
+#[cfg(target_os = "linux")]
+pub use production_fetch::{
+    TrustedCargoFetchEndpointResolution, TrustedCargoFetchError, TrustedCargoFetchResult,
+    execute_trusted_cargo_fetch, execute_trusted_cargo_fetch_with_endpoint_resolution,
+};
+pub use production_inputs::{
+    ProductionInputFile, ProductionInputFileRole, ProductionInputIdentityError,
+    ProductionInputIdentityObservation, ProductionInputIdentityRequest,
+    ProductionInputPreflightScope, ProductionInputTree, ProductionInputTreeRole,
+    ProductionTargetFactsProbeObservation, ProductionTargetFactsProbeRequest,
+    ProductionVersionProbe, ProductionVersionProbeResult,
+    ValidatedProductionInputIdentityObservation, ValidatedProductionTargetFactsProbeObservation,
+    VerifiedProductionInputs, preflight_production_build_inputs, preflight_production_fetch_inputs,
+};
+#[cfg(target_os = "linux")]
+pub use production_integration::{
+    ProductionClosureItemIdentity, ProductionCompositionBuildEvidence, ProductionIntegrationError,
+    ProductionIntegrationPostInput, ProductionIntegrationPreReceipt, TrustedHostBuildResult,
+    VerifiedProductionIntegrationPostAttestation, create_production_integration_post_payload,
+    create_production_integration_pre_receipt, execute_trusted_build_host,
+    read_production_integration_pre_receipt, verify_production_integration_post_attestation,
+    write_production_integration_post_attestation, write_production_integration_pre_receipt,
+};
+#[cfg(target_os = "linux")]
+pub use production_pipeline::{
+    ProductionBuildPipelineError, ProductionBuildPipelineOptions, ProductionBuildPipelineResult,
+    ProductionCompletionAuthority, ProductionHostBuildPipelineOptions,
+    ProductionHostBuildPipelineResult, ProductionIntegrationPrePipelineOptions,
+    ProductionIntegrationPrePipelineResult, execute_trusted_production_build,
+    execute_trusted_production_host_build, execute_trusted_production_integration_pre,
+    reverify_trusted_production_integration_pre,
+};
+#[cfg(target_os = "linux")]
+pub use production_planner::{
+    TrustedCargoPlannerError, TrustedCargoPlannerResult, execute_trusted_cargo_planner,
+};
 pub use production_policy::{
     BuildArtifactSelector, BuildArtifactTarget, BuildEnforcementContext,
     BuildEnforcementEnvironment, BuildEnforcementExecutable, BuildEnforcementIdentity,
     BuildEnforcementReadInput, BuildEnforcementToolchain, BuildPanicStrategy,
     DerivedExecutablePolicy, NormalizedProductionBuildPolicy, ProductionAttestationPolicy,
     ProductionBuildExecutionPolicy, ProductionBuildPolicyError, ProductionEnvironment,
-    ProductionExecutable, ProductionFetchPolicy, ProductionFileIdentity, ProductionReadInput,
-    ProductionSandboxBackend, ProductionToolIdentity, ProductionToolchain, ProductionTreeIdentity,
-    SigningHelper, TrustedReviewerPolicy, TrustedSigner,
+    ProductionExecutable, ProductionFetchPolicy, ProductionFetchRedirectPolicy,
+    ProductionFileIdentity, ProductionReadInput, ProductionSandboxBackend, ProductionToolIdentity,
+    ProductionToolchain, ProductionTreeIdentity, SigningHelper, TrustedReviewerPolicy,
+    TrustedSigner,
+};
+#[cfg(target_os = "linux")]
+pub use production_preflight::{
+    TrustedProductionPreflightError, TrustedProductionPreflightEvidence,
+    execute_trusted_production_preflight,
+};
+#[cfg(target_os = "linux")]
+pub use production_wasm::{
+    TrustedWasmPostprocessError, TrustedWasmPostprocessResult, execute_trusted_wasm_postprocessor,
 };
 use rust_agent_composition::{
     CargoConfigIsolationError, CompositionManifest, Target, WASM_BINDGEN_CLI_LOGICAL_ID,
     WASM_BINDGEN_PROTOCOL_VERSION, profile::BuildKind, verify_cargo_config_isolation,
     verify_composition, verify_custom_target_snapshot,
 };
+#[cfg(target_os = "linux")]
+pub use seccomp_supervisor::{
+    SeccompExecutedCommand, SeccompExecutionReport, SeccompSupervisorError, run_seccomp_child,
+    supervise_landlock_command,
+};
 pub use snapshot_materializer::{
     HostClosureMountObservation, HostClosureSnapshotManifest, HostClosureSnapshotSource,
     MaterializedHostClosureItem, MaterializedHostClosureSnapshot, SnapshotMaterializationError,
-    materialize_host_closure_snapshot, verify_host_closure_snapshot,
+    VerifiedHostClosureSnapshot, materialize_host_closure_snapshot,
+    open_verified_host_closure_snapshot, verify_host_closure_snapshot,
 };
 use tempfile::TempDir;
 use thiserror::Error;

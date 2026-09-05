@@ -152,6 +152,19 @@ pub(crate) fn write_cyclonedx_sbom(
     cargo_lock: &Path,
     artifacts: &[DevelopmentArtifactRecord],
 ) -> Result<(String, String), ArtifactError> {
+    let files = artifacts
+        .iter()
+        .map(|artifact| (artifact.path.as_str(), artifact.digest.as_str()))
+        .collect::<Vec<_>>();
+    write_cyclonedx_sbom_files(artifact_dir, composition, cargo_lock, &files)
+}
+
+pub(crate) fn write_cyclonedx_sbom_files(
+    artifact_dir: &Path,
+    composition: &CompositionManifest,
+    cargo_lock: &Path,
+    artifacts: &[(&str, &str)],
+) -> Result<(String, String), ArtifactError> {
     #[derive(Deserialize)]
     struct CargoLock {
         package: Vec<LockPackage>,
@@ -185,15 +198,15 @@ pub(crate) fn write_cyclonedx_sbom(
             }),
         });
     }
-    for artifact in artifacts {
+    for (path, digest) in artifacts {
         components.push(CycloneDxComponent {
             component_type: "file".into(),
-            bom_ref: format!("file:{}", artifact.path),
-            name: artifact.path.clone(),
+            bom_ref: format!("file:{path}"),
+            name: (*path).into(),
             version: None,
             hashes: Some(vec![CycloneDxHash {
                 algorithm: "SHA-256".into(),
-                content: artifact.digest.clone(),
+                content: (*digest).into(),
             }]),
         });
     }
@@ -479,6 +492,18 @@ fn verify_sbom_artifacts(
     artifacts: &[DevelopmentArtifactRecord],
     composition_hash: &str,
 ) -> Result<(), ArtifactError> {
+    let files = artifacts
+        .iter()
+        .map(|artifact| (artifact.path.as_str(), artifact.digest.as_str()))
+        .collect::<Vec<_>>();
+    verify_sbom_files(bytes, &files, composition_hash)
+}
+
+pub(crate) fn verify_sbom_files(
+    bytes: &[u8],
+    artifacts: &[(&str, &str)],
+    composition_hash: &str,
+) -> Result<(), ArtifactError> {
     let bom: CycloneDxBom = serde_json::from_slice(bytes)?;
     if bom.bom_format != "CycloneDX" || bom.spec_version != "1.6" || bom.version != 1 {
         return Err(ArtifactError::InvalidSbom(
@@ -500,7 +525,7 @@ fn verify_sbom_artifacts(
     }
     let expected_files: BTreeSet<_> = artifacts
         .iter()
-        .map(|artifact| format!("file:{}", artifact.path))
+        .map(|(path, _)| format!("file:{path}"))
         .collect();
     let actual_files: BTreeSet<_> = bom
         .components
@@ -513,32 +538,29 @@ fn verify_sbom_artifacts(
             "SBOM file component set differs from the artifact set".into(),
         ));
     }
-    for artifact in artifacts {
+    for (path, digest) in artifacts {
         let component = bom
             .components
             .iter()
-            .find(|component| component.bom_ref == format!("file:{}", artifact.path))
-            .ok_or_else(|| {
-                ArtifactError::InvalidSbom(format!("artifact `{}` is missing", artifact.path))
-            })?;
+            .find(|component| component.bom_ref == format!("file:{path}"))
+            .ok_or_else(|| ArtifactError::InvalidSbom(format!("artifact `{path}` is missing")))?;
         if component.component_type != "file"
-            || component.name != artifact.path
+            || component.name != *path
             || component.hashes.as_deref()
                 != Some(&[CycloneDxHash {
                     algorithm: "SHA-256".into(),
-                    content: artifact.digest.clone(),
+                    content: (*digest).into(),
                 }])
         {
             return Err(ArtifactError::InvalidSbom(format!(
-                "artifact `{}` identity mismatch",
-                artifact.path
+                "artifact `{path}` identity mismatch"
             )));
         }
     }
     Ok(())
 }
 
-fn validate_relative_path(value: &str) -> Result<(), ArtifactError> {
+pub(crate) fn validate_relative_path(value: &str) -> Result<(), ArtifactError> {
     let path = Path::new(value);
     if value.is_empty()
         || value.contains('\\')
@@ -554,14 +576,14 @@ fn validate_relative_path(value: &str) -> Result<(), ArtifactError> {
     Ok(())
 }
 
-fn is_digest(value: &str) -> bool {
+pub(crate) fn is_digest(value: &str) -> bool {
     value.len() == 64
         && value
             .bytes()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
-fn is_canonical_id(value: &str) -> bool {
+pub(crate) fn is_canonical_id(value: &str) -> bool {
     let bytes = value.as_bytes();
     !bytes.is_empty()
         && bytes[0].is_ascii_lowercase()
@@ -572,7 +594,7 @@ fn is_canonical_id(value: &str) -> bool {
             .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'-')
 }
 
-fn sha256_hex(bytes: &[u8]) -> String {
+pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
 }
 

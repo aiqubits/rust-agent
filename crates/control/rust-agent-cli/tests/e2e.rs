@@ -61,6 +61,92 @@ fn registry_cache() -> PathBuf {
 }
 
 #[test]
+fn production_cli_modes_fail_closed_before_input_or_output_side_effects() {
+    let binary = PathBuf::from(env!("CARGO_BIN_EXE_rust-agent"));
+    let temp = TempDir::new().unwrap();
+    let missing_composition = temp.path().join("missing-composition");
+
+    let missing_locked = run(
+        &binary,
+        &[
+            "build".into(),
+            "--composition".into(),
+            missing_composition.as_os_str().into(),
+        ],
+    );
+    assert!(!missing_locked.status.success());
+    assert!(
+        String::from_utf8_lossy(&missing_locked.stderr)
+            .contains("production build requires --locked")
+    );
+
+    let mixed_mode = run(
+        &binary,
+        &[
+            "build".into(),
+            "--composition".into(),
+            missing_composition.as_os_str().into(),
+            "--development-build".into(),
+            "--locked".into(),
+        ],
+    );
+    assert!(!mixed_mode.status.success());
+    assert!(
+        String::from_utf8_lossy(&mixed_mode.stderr)
+            .contains("--development-build cannot use production --locked")
+    );
+
+    let incomplete_production = run(
+        &binary,
+        &[
+            "build".into(),
+            "--composition".into(),
+            missing_composition.as_os_str().into(),
+            "--locked".into(),
+        ],
+    );
+    assert!(!incomplete_production.status.success());
+    let stderr = String::from_utf8_lossy(&incomplete_production.stderr);
+    assert!(stderr.contains("production command requires --execution-policy"));
+    assert!(!stderr.contains("cannot resolve"));
+
+    let mixed_integration = run(
+        &binary,
+        &[
+            "verify-integration".into(),
+            "--phase".into(),
+            "pre".into(),
+            "--allow-development".into(),
+        ],
+    );
+    assert!(!mixed_integration.status.success());
+    assert!(
+        String::from_utf8_lossy(&mixed_integration.stderr)
+            .contains("production integration phases cannot use --allow-development")
+    );
+
+    let partial_inspect = run(
+        &binary,
+        &[
+            "inspect".into(),
+            "--artifact-dir".into(),
+            temp.path().join("artifacts").into_os_string(),
+            "--execution-policy".into(),
+            temp.path().join("policy.toml").into_os_string(),
+        ],
+    );
+    assert!(!partial_inspect.status.success());
+    let stderr = String::from_utf8_lossy(&partial_inspect.stderr);
+    assert!(stderr.contains("--attestation"));
+    assert!(stderr.contains("--workload-identity"));
+
+    let missing_build_host_contract = run(&binary, &["build-host".into()]);
+    assert!(!missing_build_host_contract.status.success());
+    assert!(String::from_utf8_lossy(&missing_build_host_contract.stderr).contains("--locked"));
+    assert_eq!(fs::read_dir(temp.path()).unwrap().count(), 0);
+}
+
+#[test]
 fn registry_backed_compose_requires_explicit_cache_end_to_end() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../..")
