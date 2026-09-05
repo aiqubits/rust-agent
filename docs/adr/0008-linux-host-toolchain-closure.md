@@ -45,6 +45,9 @@ and may execute only the fully selected Host linker bundle. The directory is
 discarded after the individual probe, network remains isolated, and the
 execution observation binds the helper and every descendant. Granting the same
 scratch or descendant set to an unrelated executable is forbidden.
+`ProductionInputIdentityRequest` advances to schema 3 and records the closed
+`host-linker` and `host-linker-helper` file roles so old requests cannot acquire
+the broader probe semantics.
 
 The Linux runner places the exact compiler dynamic-library closure beneath
 `/rust-agent/runtime/lib` and copies the exact pinned Host
