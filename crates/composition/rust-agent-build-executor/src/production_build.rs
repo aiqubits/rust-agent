@@ -1391,10 +1391,14 @@ fn observe_units(
             if build_rustc_query_allowed(request, arguments, build_policy.host_linker_selected) {
                 continue;
             }
-            let rustc = RustcInvocation::parse(arguments, build_policy.host_linker_selected)
-                .map_err(|error| {
-                    add_unit_observation_stage(error, "rustc-parse", observation, planned)
-                })?;
+            let rustc = RustcInvocation::parse(
+                arguments,
+                &execution.working_directory,
+                build_policy.host_linker_selected,
+            )
+            .map_err(|error| {
+                add_unit_observation_stage(error, "rustc-parse", observation, planned)
+            })?;
             expected_target_linker_executions = expected_target_linker_executions
                 .checked_add(usize::from(
                     build_policy.target_linker.is_some() && rustc.requires_target_linker(),
@@ -1592,6 +1596,7 @@ struct RustcInvocation {
 impl RustcInvocation {
     fn parse(
         arguments: &[String],
+        working_directory: &str,
         host_linker_selected: bool,
     ) -> Result<Self, TrustedCargoBuildError> {
         let crate_name = option_value(arguments, "--crate-name")
@@ -1615,7 +1620,7 @@ impl RustcInvocation {
         let [source_path] = source_paths.as_slice() else {
             return Err(TrustedCargoBuildError::UnitObservationMismatch);
         };
-        let source_path = normalize_logical_path(source_path)
+        let source_path = resolve_rustc_source_path(source_path, working_directory)
             .ok_or(TrustedCargoBuildError::UnitObservationMismatch)?;
         validate_rustc_build_flags(arguments, target.is_some(), host_linker_selected)?;
         let features = option_values(arguments, "--cfg")
@@ -1675,6 +1680,14 @@ impl RustcInvocation {
                 .crate_types
                 .iter()
                 .any(|crate_type| matches!(crate_type.as_str(), "bin" | "cdylib" | "dylib"))
+    }
+}
+
+fn resolve_rustc_source_path(source_path: &str, working_directory: &str) -> Option<String> {
+    if source_path.starts_with('/') {
+        normalize_logical_path(source_path)
+    } else {
+        normalize_logical_path(&format!("{working_directory}/{source_path}"))
     }
 }
 
@@ -1893,17 +1906,20 @@ mod tests {
     #[test]
     fn host_and_target_rustc_flags_are_scope_exact() {
         let host = rustc_arguments(&[HOST_LINKER_FEATURE_FLAG]);
-        let parsed_host = RustcInvocation::parse(&host, true).unwrap();
+        let parsed_host =
+            RustcInvocation::parse(&host, "/rust-agent/closure/fixture", true).unwrap();
         assert_eq!(parsed_host.target, None);
 
         let target = rustc_arguments(&["--target", "wasm32-unknown-unknown", BUILD_SYSROOT_FLAG]);
-        let parsed_target = RustcInvocation::parse(&target, true).unwrap();
+        let parsed_target =
+            RustcInvocation::parse(&target, "/rust-agent/closure/fixture", true).unwrap();
         assert_eq!(
             parsed_target.target.as_deref(),
             Some("wasm32-unknown-unknown")
         );
 
-        RustcInvocation::parse(&rustc_arguments(&[]), false).unwrap();
+        RustcInvocation::parse(&rustc_arguments(&[]), "/rust-agent/closure/fixture", false)
+            .unwrap();
     }
 
     #[test]
@@ -1928,7 +1944,7 @@ mod tests {
             ]),
         ] {
             assert!(matches!(
-                RustcInvocation::parse(&arguments, true),
+                RustcInvocation::parse(&arguments, "/rust-agent/closure/fixture", true),
                 Err(TrustedCargoBuildError::UnitObservationMismatch)
             ));
         }
@@ -1965,25 +1981,21 @@ mod tests {
             "build_script_build",
             "--crate-type",
             "bin",
-            "/rust-agent/closure/first/../second/build.rs",
+            "build.rs",
             HOST_LINKER_FEATURE_FLAG,
         ]
         .into_iter()
         .map(str::to_owned)
         .collect::<Vec<_>>();
-        let rustc = RustcInvocation::parse(&arguments, true).unwrap();
+        let rustc = RustcInvocation::parse(&arguments, "/rust-agent/closure/second", true).unwrap();
         let matches = selectors
             .iter()
             .filter(|selector| rustc.matches(selector, unit, &graph, &source_paths))
             .collect::<Vec<_>>();
         assert_eq!(matches, vec![&selectors[1]]);
 
-        let mut unknown = arguments.clone();
-        *unknown
-            .iter_mut()
-            .find(|argument| argument.as_str() == "/rust-agent/closure/first/../second/build.rs")
-            .unwrap() = "/rust-agent/closure/unknown/build.rs".into();
-        let unknown = RustcInvocation::parse(&unknown, true).unwrap();
+        let unknown =
+            RustcInvocation::parse(&arguments, "/rust-agent/closure/unknown", true).unwrap();
         assert!(selectors.iter().all(|selector| !unknown.matches(
             selector,
             unit,
@@ -1994,9 +2006,29 @@ mod tests {
         let mut duplicate = arguments;
         duplicate.push("/rust-agent/closure/third/build.rs".into());
         assert!(matches!(
-            RustcInvocation::parse(&duplicate, true),
+            RustcInvocation::parse(&duplicate, "/rust-agent/closure/second", true),
             Err(TrustedCargoBuildError::UnitObservationMismatch)
         ));
+
+        for (source_path, working_directory) in [
+            ("build.rs", "/ambient/closure/second"),
+            ("../../../ambient.rs", "/rust-agent/closure/second"),
+            (
+                "/ambient/closure/second/build.rs",
+                "/rust-agent/closure/second",
+            ),
+        ] {
+            let mut invalid = duplicate.clone();
+            invalid.pop();
+            *invalid
+                .iter_mut()
+                .find(|argument| argument.as_str() == "build.rs")
+                .unwrap() = source_path.into();
+            assert!(matches!(
+                RustcInvocation::parse(&invalid, working_directory, true),
+                Err(TrustedCargoBuildError::UnitObservationMismatch)
+            ));
+        }
     }
 
     #[test]
@@ -2009,15 +2041,19 @@ mod tests {
                 "cdylib",
                 BUILD_SYSROOT_FLAG,
             ]),
+            "/rust-agent/closure/fixture",
             false,
         )
         .unwrap();
         let target_rlib = RustcInvocation::parse(
             &rustc_arguments(&["--target", "wasm32-unknown-unknown", BUILD_SYSROOT_FLAG]),
+            "/rust-agent/closure/fixture",
             false,
         )
         .unwrap();
-        let host_binary = RustcInvocation::parse(&rustc_arguments(&[]), false).unwrap();
+        let host_binary =
+            RustcInvocation::parse(&rustc_arguments(&[]), "/rust-agent/closure/fixture", false)
+                .unwrap();
         assert!(target_cdylib.requires_target_linker());
         assert!(!target_rlib.requires_target_linker());
         assert!(!host_binary.requires_target_linker());
@@ -2107,7 +2143,9 @@ mod tests {
         .into_iter()
         .map(str::to_owned)
         .collect::<Vec<_>>();
-        let parsed = RustcInvocation::parse(&proc_macro, false).unwrap();
+        let parsed =
+            RustcInvocation::parse(&proc_macro, "/rust-agent/closure/fixture-macro", false)
+                .unwrap();
         assert_eq!(
             parsed.externs,
             BTreeMap::from([(
@@ -2118,7 +2156,7 @@ mod tests {
 
         let library = rustc_arguments(&["--extern", "proc_macro"]);
         assert!(matches!(
-            RustcInvocation::parse(&library, false),
+            RustcInvocation::parse(&library, "/rust-agent/closure/fixture", false),
             Err(TrustedCargoBuildError::UnitObservationMismatch)
         ));
     }
