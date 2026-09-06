@@ -26,6 +26,9 @@ const LOGICAL_TEMP: &str = "/rust-agent/tmp";
 const BUILD_SYSROOT_FLAG: &str = "--sysroot=/rust-agent/toolchain";
 const HOST_LINKER_FEATURE_FLAG: &str = "-Clinker-features=-lld";
 const BUILD_TIMEOUT_MILLISECONDS: u64 = 20 * 60 * 1000;
+const MAXIMUM_STDERR_DIAGNOSTIC_BYTES: usize = 32 * 1024;
+const MAXIMUM_STDOUT_DIAGNOSTIC_BYTES: usize = 4 * 1024;
+const MAXIMUM_COMMAND_DIAGNOSTIC_COUNT: usize = 32;
 
 #[derive(Debug)]
 pub struct TrustedCargoBuildResult {
@@ -203,17 +206,25 @@ pub fn execute_trusted_cargo_build(
     let temp_mount = LinuxSandboxWritableMount::open("cargo-temp", temp_root, LOGICAL_TEMP, false)?;
     let execution = backend.run_with_output(&command, mounts, vec![target_mount, temp_mount])?;
     if execution.observation().exit_code != 0 {
+        let executed_commands = &execution.observation().executed_commands;
+        let command_tail = &executed_commands[executed_commands
+            .len()
+            .saturating_sub(MAXIMUM_COMMAND_DIAGNOSTIC_COUNT)..];
         return Err(TrustedCargoBuildError::SandboxFailed {
             exit_code: execution.observation().exit_code,
             diagnostic: format!(
-                "stdout={} stderr={} executions={:?}",
-                String::from_utf8_lossy(execution.stdout()),
-                String::from_utf8_lossy(execution.stderr()),
-                execution.observation().executed_commands,
+                "stderr={} stdout-tail={} execution-count={} executions-tail={command_tail:?}",
+                diagnostic_tail(execution.stderr(), MAXIMUM_STDERR_DIAGNOSTIC_BYTES),
+                diagnostic_tail(execution.stdout(), MAXIMUM_STDOUT_DIAGNOSTIC_BYTES),
+                executed_commands.len(),
             ),
         });
     }
-    let cargo_messages = verify_cargo_messages(execution.stdout(), planned_graph)?;
+    let cargo_messages = verify_cargo_messages(
+        execution.stdout(),
+        planned_graph,
+        &cache.manifest().packages,
+    )?;
     let unit_observation_policy = BuildUnitObservationPolicy {
         executable_digests: enforcement
             .executables
@@ -334,6 +345,7 @@ struct BuildUnitObservationPolicy<'a> {
 fn verify_cargo_messages(
     stdout: &[u8],
     planned: &NormalizedHostCargoUnitGraph,
+    cache_packages: &[crate::CargoFetchCachePackageLocation],
 ) -> Result<CargoMessageObservation, TrustedCargoBuildError> {
     if stdout.is_empty() {
         return Err(TrustedCargoBuildError::InvalidCargoMessages);
@@ -364,12 +376,13 @@ fn verify_cargo_messages(
             "compiler-artifact" => verify_compiler_artifact(
                 object,
                 planned,
+                cache_packages,
                 &mut artifacts,
                 &mut filenames,
                 &mut artifact_files,
                 &mut artifact_executables,
             )?,
-            "compiler-message" => verify_compiler_message(object, planned)?,
+            "compiler-message" => verify_compiler_message(object, planned, cache_packages)?,
             "build-script-executed" => {
                 verify_build_script_message(object, planned, &mut build_scripts)?;
             }
@@ -423,6 +436,7 @@ fn verify_cargo_messages(
 fn verify_compiler_artifact(
     object: &serde_json::Map<String, serde_json::Value>,
     planned: &NormalizedHostCargoUnitGraph,
+    cache_packages: &[crate::CargoFetchCachePackageLocation],
     observed: &mut BTreeSet<crate::CargoUnitSelector>,
     observed_filenames: &mut BTreeSet<String>,
     artifact_files: &mut BTreeMap<String, crate::CargoUnitSelector>,
@@ -445,7 +459,7 @@ fn verify_compiler_artifact(
     if object.get("fresh").and_then(serde_json::Value::as_bool) != Some(false) {
         return Err(TrustedCargoBuildError::InvalidCargoMessages);
     }
-    let selector = match_message_selector(object, planned)?;
+    let (selector, package_root) = match_message_selector(object, planned, cache_packages)?;
     if !observed.insert(selector.clone()) {
         return Err(TrustedCargoBuildError::InvalidCargoMessages);
     }
@@ -494,13 +508,14 @@ fn verify_compiler_artifact(
         }
         _ => return Err(TrustedCargoBuildError::InvalidCargoMessages),
     }
-    verify_message_target(object.get("target"), &selector)?;
+    verify_message_target(object.get("target"), &selector, &package_root)?;
     verify_message_profile(object.get("profile"))
 }
 
 fn verify_compiler_message(
     object: &serde_json::Map<String, serde_json::Value>,
     planned: &NormalizedHostCargoUnitGraph,
+    cache_packages: &[crate::CargoFetchCachePackageLocation],
 ) -> Result<(), TrustedCargoBuildError> {
     require_exact_keys(
         object,
@@ -508,11 +523,6 @@ fn verify_compiler_message(
     )?;
     let package_id = message_text(object, "package_id")?;
     let manifest_path = message_text(object, "manifest_path")?;
-    if !manifest_path.starts_with("/rust-agent/workspace/")
-        || !manifest_path.ends_with("/Cargo.toml")
-    {
-        return Err(TrustedCargoBuildError::InvalidCargoMessages);
-    }
     let target = object
         .get("target")
         .and_then(serde_json::Value::as_object)
@@ -531,7 +541,9 @@ fn verify_compiler_message(
     let [selector] = matches.as_slice() else {
         return Err(TrustedCargoBuildError::InvalidCargoMessages);
     };
-    verify_message_target(object.get("target"), selector)?;
+    let package_root =
+        verified_package_root(package_id, manifest_path, &selector.package, cache_packages)?;
+    verify_message_target(object.get("target"), selector, &package_root)?;
     object
         .get("message")
         .filter(|message| message.is_object())
@@ -606,14 +618,10 @@ fn verify_build_script_message(
 fn match_message_selector(
     object: &serde_json::Map<String, serde_json::Value>,
     planned: &NormalizedHostCargoUnitGraph,
-) -> Result<crate::CargoUnitSelector, TrustedCargoBuildError> {
+    cache_packages: &[crate::CargoFetchCachePackageLocation],
+) -> Result<(crate::CargoUnitSelector, String), TrustedCargoBuildError> {
     let package_id = message_text(object, "package_id")?;
     let manifest_path = message_text(object, "manifest_path")?;
-    if !manifest_path.starts_with("/rust-agent/workspace/")
-        || !manifest_path.ends_with("/Cargo.toml")
-    {
-        return Err(TrustedCargoBuildError::InvalidCargoMessages);
-    }
     let target = object
         .get("target")
         .and_then(serde_json::Value::as_object)
@@ -645,12 +653,15 @@ fn match_message_selector(
     let [selector] = matches.as_slice() else {
         return Err(TrustedCargoBuildError::InvalidCargoMessages);
     };
-    Ok(selector.clone())
+    let package_root =
+        verified_package_root(package_id, manifest_path, &selector.package, cache_packages)?;
+    Ok((selector.clone(), package_root))
 }
 
 fn verify_message_target(
     value: Option<&serde_json::Value>,
     selector: &crate::CargoUnitSelector,
+    package_root: &str,
 ) -> Result<(), TrustedCargoBuildError> {
     let target = value
         .and_then(serde_json::Value::as_object)
@@ -669,7 +680,7 @@ fn verify_message_target(
     if target.keys().any(|key| !allowed.contains(&key.as_str()))
         || target.keys().any(|key| key == "required_features")
         || message_text(target, "name")? != selector.target_name
-        || !message_text(target, "src_path")?.starts_with("/rust-agent/workspace/")
+        || !logical_descendant(message_text(target, "src_path")?, package_root)
         || !matches!(
             message_text(target, "edition")?,
             "2015" | "2018" | "2021" | "2024"
@@ -775,11 +786,121 @@ fn message_text<'a>(
 }
 
 fn package_id_matches(package_id: &str, package: &crate::CargoPackageIdentity) -> bool {
-    let suffix = format!("#{}@{}", package.name, package.version);
-    package_id.ends_with(&suffix)
-        || package_id.ends_with(&format!("#{}", package.version))
-        || package_id == format!("{} {}", package.name, package.version)
-        || package_id.starts_with(&format!("{} {} ", package.name, package.version))
+    let Some((source, fragment)) = package_id.rsplit_once('#') else {
+        return false;
+    };
+    let Some((name, version)) = fragment.rsplit_once('@') else {
+        return false;
+    };
+    if name != package.name || version != package.version {
+        return false;
+    }
+    match &package.source {
+        crate::CargoPackageSource::Registry { registry, .. } => {
+            source == format!("registry+{registry}")
+                || (registry.starts_with("sparse+") && source == registry)
+        }
+        crate::CargoPackageSource::Git { repository, .. } => source == format!("git+{repository}"),
+        crate::CargoPackageSource::Path { .. } => canonical_logical_path(
+            source.strip_prefix("path+file://").unwrap_or_default(),
+            "/rust-agent/closure/",
+        ),
+    }
+}
+
+fn verified_package_root(
+    package_id: &str,
+    manifest_path: &str,
+    package: &crate::CargoPackageIdentity,
+    cache_packages: &[crate::CargoFetchCachePackageLocation],
+) -> Result<String, TrustedCargoBuildError> {
+    if !package_id_matches(package_id, package) || !manifest_path.ends_with("/Cargo.toml") {
+        return Err(TrustedCargoBuildError::InvalidCargoMessages);
+    }
+    let package_root = manifest_path
+        .strip_suffix("/Cargo.toml")
+        .ok_or(TrustedCargoBuildError::InvalidCargoMessages)?;
+    match &package.source {
+        crate::CargoPackageSource::Path { .. } => {
+            let source = package_id
+                .rsplit_once('#')
+                .and_then(|(source, _)| source.strip_prefix("path+file://"))
+                .ok_or(TrustedCargoBuildError::InvalidCargoMessages)?;
+            if package_root != source
+                || !canonical_logical_path(package_root, "/rust-agent/closure/")
+            {
+                return Err(TrustedCargoBuildError::InvalidCargoMessages);
+            }
+        }
+        crate::CargoPackageSource::Registry { .. } | crate::CargoPackageSource::Git { .. } => {
+            let locations = cache_packages
+                .iter()
+                .filter(|location| location.package == *package)
+                .collect::<Vec<_>>();
+            let [location] = locations.as_slice() else {
+                return Err(TrustedCargoBuildError::InvalidCargoMessages);
+            };
+            let source_path = location
+                .source_path
+                .as_deref()
+                .filter(|path| canonical_relative_path(path))
+                .ok_or(TrustedCargoBuildError::InvalidCargoMessages)?;
+            let cache_root = format!("/rust-agent/cargo-home/{source_path}");
+            let valid = match &package.source {
+                crate::CargoPackageSource::Registry { .. } => package_root == cache_root,
+                crate::CargoPackageSource::Git { .. } => {
+                    package_root == cache_root || logical_descendant(package_root, &cache_root)
+                }
+                crate::CargoPackageSource::Path { .. } => false,
+            };
+            if !valid {
+                return Err(TrustedCargoBuildError::InvalidCargoMessages);
+            }
+        }
+    }
+    Ok(package_root.into())
+}
+
+fn canonical_logical_path(path: &str, root: &str) -> bool {
+    path.starts_with(root)
+        && path.len() <= 4096
+        && path.is_ascii()
+        && !path.ends_with('/')
+        && path.split('/').skip(1).all(|component| {
+            !component.is_empty() && component.len() <= 255 && !matches!(component, "." | "..")
+        })
+}
+
+fn canonical_relative_path(path: &str) -> bool {
+    !path.is_empty()
+        && path.len() <= 4096
+        && path.is_ascii()
+        && !path.starts_with('/')
+        && !path.ends_with('/')
+        && path.split('/').all(|component| {
+            !component.is_empty() && component.len() <= 255 && !matches!(component, "." | "..")
+        })
+}
+
+fn logical_descendant(path: &str, root: &str) -> bool {
+    path.strip_prefix(root).is_some_and(|suffix| {
+        suffix.starts_with('/')
+            && canonical_logical_path(path, "/rust-agent/")
+            && !suffix.contains("//")
+    })
+}
+
+fn diagnostic_tail(bytes: &[u8], maximum: usize) -> String {
+    let omitted = bytes.len().saturating_sub(maximum);
+    let tail = &bytes[omitted..];
+    if omitted == 0 {
+        String::from_utf8_lossy(tail).into_owned()
+    } else {
+        format!(
+            "[... {omitted} bytes omitted ...]{}",
+            String::from_utf8_lossy(tail)
+        )
+    }
 }
 
 fn logical_target_path(path: &str) -> bool {
@@ -1227,13 +1348,13 @@ mod tests {
         let graph = graph(false);
         let artifact = json!({
             "reason": "compiler-artifact",
-            "package_id": "path+file:///rust-agent/workspace/fixture#fixture@1.0.0",
-            "manifest_path": "/rust-agent/workspace/fixture/Cargo.toml",
+            "package_id": "path+file:///rust-agent/closure/fixture#fixture@1.0.0",
+            "manifest_path": "/rust-agent/closure/fixture/Cargo.toml",
             "target": {
                 "kind": ["lib"],
                 "crate_types": ["lib"],
                 "name": "fixture",
-                "src_path": "/rust-agent/workspace/fixture/src/lib.rs",
+                "src_path": "/rust-agent/closure/fixture/src/lib.rs",
                 "edition": "2024",
                 "doc": true,
                 "doctest": true,
@@ -1255,7 +1376,41 @@ mod tests {
             artifact.clone(),
             json!({"reason":"build-finished","success":true}),
         ]);
-        verify_cargo_messages(&valid, &graph).unwrap();
+        verify_cargo_messages(&valid, &graph, &[]).unwrap();
+
+        for (field, value) in [
+            ("manifest_path", "/rust-agent/workspace/fixture/Cargo.toml"),
+            ("manifest_path", "/rust-agent/closure/fixture/../Cargo.toml"),
+            ("manifest_path", "/rust-agent/closure/other/Cargo.toml"),
+            (
+                "package_id",
+                "path+file:///rust-agent/closure/other#fixture@1.0.0",
+            ),
+        ] {
+            let mut invalid = artifact.clone();
+            invalid[field] = json!(value);
+            assert!(matches!(
+                verify_cargo_messages(
+                    &messages(&[invalid, json!({"reason":"build-finished","success":true})]),
+                    &graph,
+                    &[],
+                ),
+                Err(TrustedCargoBuildError::InvalidCargoMessages)
+            ));
+        }
+        let mut escaped_source = artifact.clone();
+        escaped_source["target"]["src_path"] = json!("/rust-agent/closure/other/src/lib.rs");
+        assert!(matches!(
+            verify_cargo_messages(
+                &messages(&[
+                    escaped_source,
+                    json!({"reason":"build-finished","success":true})
+                ]),
+                &graph,
+                &[],
+            ),
+            Err(TrustedCargoBuildError::InvalidCargoMessages)
+        ));
 
         let mut unknown = artifact.clone();
         unknown["ambient"] = json!(true);
@@ -1263,6 +1418,7 @@ mod tests {
             verify_cargo_messages(
                 &messages(&[unknown, json!({"reason":"build-finished","success":true})]),
                 &graph,
+                &[],
             ),
             Err(TrustedCargoBuildError::InvalidCargoMessages)
         ));
@@ -1273,6 +1429,7 @@ mod tests {
             verify_cargo_messages(
                 &messages(&[fresh, json!({"reason":"build-finished","success":true})]),
                 &graph,
+                &[],
             ),
             Err(TrustedCargoBuildError::InvalidCargoMessages)
         ));
@@ -1280,6 +1437,7 @@ mod tests {
             verify_cargo_messages(
                 &messages(&[json!({"reason":"build-finished","success":true})]),
                 &graph,
+                &[],
             ),
             Err(TrustedCargoBuildError::InvalidCargoMessages)
         ));
@@ -1291,9 +1449,105 @@ mod tests {
                     json!({"reason":"build-finished","success":true})
                 ]),
                 &graph,
+                &[],
             ),
             Err(TrustedCargoBuildError::InvalidCargoMessages)
         ));
+    }
+
+    #[test]
+    fn cached_cargo_message_sources_match_the_verified_package_location() {
+        let registry = CargoPackageIdentity {
+            name: "cached".into(),
+            version: "1.2.3".into(),
+            source: CargoPackageSource::Registry {
+                registry: "https://github.com/rust-lang/crates.io-index".into(),
+                checksum: "4".repeat(64),
+            },
+        };
+        let registry_location = crate::CargoFetchCachePackageLocation {
+            package: registry.clone(),
+            archive_path: Some("registry/cache/index/cached-1.2.3.crate".into()),
+            source_path: Some("registry/src/index/cached-1.2.3".into()),
+        };
+        let registry_id = "registry+https://github.com/rust-lang/crates.io-index#cached@1.2.3";
+        assert_eq!(
+            verified_package_root(
+                registry_id,
+                "/rust-agent/cargo-home/registry/src/index/cached-1.2.3/Cargo.toml",
+                &registry,
+                std::slice::from_ref(&registry_location),
+            )
+            .unwrap(),
+            "/rust-agent/cargo-home/registry/src/index/cached-1.2.3"
+        );
+
+        let git = CargoPackageIdentity {
+            name: "member".into(),
+            version: "2.0.0".into(),
+            source: CargoPackageSource::Git {
+                repository: "https://example.invalid/repository?rev=0123456".into(),
+                precise: "0".repeat(40),
+            },
+        };
+        let git_location = crate::CargoFetchCachePackageLocation {
+            package: git.clone(),
+            archive_path: None,
+            source_path: Some("git/checkouts/repository/0123456".into()),
+        };
+        let git_id = "git+https://example.invalid/repository?rev=0123456#member@2.0.0";
+        assert_eq!(
+            verified_package_root(
+                git_id,
+                "/rust-agent/cargo-home/git/checkouts/repository/0123456/member/Cargo.toml",
+                &git,
+                std::slice::from_ref(&git_location),
+            )
+            .unwrap(),
+            "/rust-agent/cargo-home/git/checkouts/repository/0123456/member"
+        );
+
+        for (package_id, manifest, locations) in [
+            (
+                registry_id,
+                "/rust-agent/cargo-home/registry/src/index/other-1.2.3/Cargo.toml",
+                std::slice::from_ref(&registry_location),
+            ),
+            (
+                registry_id,
+                "/rust-agent/cargo-home/registry/src/index/cached-1.2.3/../Cargo.toml",
+                std::slice::from_ref(&registry_location),
+            ),
+            (
+                "registry+https://attacker.invalid/index#cached@1.2.3",
+                "/rust-agent/cargo-home/registry/src/index/cached-1.2.3/Cargo.toml",
+                std::slice::from_ref(&registry_location),
+            ),
+        ] {
+            assert!(matches!(
+                verified_package_root(package_id, manifest, &registry, locations),
+                Err(TrustedCargoBuildError::InvalidCargoMessages)
+            ));
+        }
+        assert!(matches!(
+            verified_package_root(
+                git_id,
+                "/rust-agent/cargo-home/git/checkouts/other/0123456/member/Cargo.toml",
+                &git,
+                &[git_location],
+            ),
+            Err(TrustedCargoBuildError::InvalidCargoMessages)
+        ));
+    }
+
+    #[test]
+    fn failed_build_diagnostics_retain_bounded_output_tails() {
+        assert_eq!(diagnostic_tail(b"short", 5), "short");
+        assert_eq!(
+            diagnostic_tail(b"0123456789", 4),
+            "[... 6 bytes omitted ...]6789"
+        );
+        assert_eq!(diagnostic_tail(&[0xff, b'e'], 2), "\u{fffd}e");
     }
 
     #[test]

@@ -244,6 +244,13 @@ No test result above is evidence for Phase 1B deployability or for a Phase 2+ ru
   replacement at the original pathname and in-place content mutation both fail closed rather than
   being followed. The retained descriptor feeds the trusted read-only cache mount used by
   production planning and building;
+- trusted Cargo compiler messages now bind path packages to the exact canonical
+  `path+file:///rust-agent/closure/...` package-id root and registry/git packages to the matching
+  source location in the verified read-only Cargo-cache manifest. Each target source must remain
+  below its package manifest directory; legacy workspace roots, foreign package roots, traversal,
+  duplicate cache identities and source-origin drift fail closed. Failed sandbox diagnostics put a
+  bounded stderr tail first and retain bounded stdout/command tails, so a large JSON message stream
+  cannot hide the actionable failure;
 - the shared closed `CanonicalSnapshotTree` schema sorts before domain-separated deterministic-CBOR
   identity; bounds paths/entries/per-file and aggregate bytes; rejects invalid, duplicate,
   case-fold-colliding or topologically incomplete paths; and fixes file/directory logical metadata
@@ -293,14 +300,13 @@ preprovisioned and authenticated network fetch, the immutable Cargo planner, cro
 scripts/proc macros, exact observed graphs, standalone output, sandboxed pinned wasm-bindgen, and
 Host integration pre/build/post. Completion requires an externally signed one-use handle; its
 append-only attestation is durably published before an opaque permit can atomically expose the
-`deployable=true` artifact, and production inspection rechecks both. GitHub run
-`34024157819` passed Quality, the real Landlock ABI 2 gate and the namespace/descendant escape
-matrix. Its trusted group passed fetch and planner coverage, and the Host link advanced through the
-selected GCC/LTO/linker-script closure into the generated build script. All four build pipelines
-still failed; the first complete Host diagnostic proved that Cargo 1.97.1 inherits the required
-`CARGO_HOME=/rust-agent/cargo-home` driver control into that script, contradicting the fixture's old
-ambient-variable expectation. Accepted ADR 0011 now distinguishes the exact identity-bound Cargo
-driver environment from ambient input and advances the backend semantic version to 5. The
-implementation and focused positive/failure-path regressions now pass locally; a full local
-baseline and a fresh successful Ubuntu 24.04 Phase 1B run remain. The local host's Landlock ABI 1
-still cannot supply the required `Refer` enforcement.
+`deployable=true` artifact, and production inspection rechecks both. GitHub run `34027847808`
+passed Quality, the real Landlock ABI 2 gate, the namespace/descendant escape matrix, every fetch
+fixture and the immutable trusted planner. Its remaining build failures exposed a stale Cargo
+message verifier that still required the removed `/rust-agent/workspace` root even though the
+backend mounts path sources at `/rust-agent/closure` and verified registry/git sources below
+`/rust-agent/cargo-home`; the WASM failure's actionable stderr was additionally hidden behind an
+unbounded JSON stdout diagnostic. The source-identity-bound verifier and bounded diagnostic tails
+now have focused positive, negative, boundary and failure-path coverage; the complete pinned local
+baseline passes. A fresh successful Ubuntu 24.04 Phase 1B run remains. The local host's Landlock ABI
+1 still cannot supply the required `Refer` enforcement.
