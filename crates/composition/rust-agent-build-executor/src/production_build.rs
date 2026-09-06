@@ -375,6 +375,7 @@ fn verify_empty_root(path: &Path) -> Result<(), TrustedCargoBuildError> {
 struct CargoMessageObservation {
     artifact_files: BTreeMap<String, crate::CargoUnitSelector>,
     build_script_executables: BTreeMap<crate::CargoUnitSelector, String>,
+    rustc_source_paths: BTreeMap<crate::CargoUnitSelector, String>,
 }
 
 struct BuildUnitObservationPolicy<'a> {
@@ -413,6 +414,7 @@ fn verify_cargo_messages_in_closure(
     let mut filenames = BTreeSet::new();
     let mut artifact_files = BTreeMap::new();
     let mut artifact_executables = BTreeMap::new();
+    let mut rustc_source_paths = BTreeMap::new();
     let context = CargoMessageVerificationContext {
         planned,
         cache_packages,
@@ -443,6 +445,7 @@ fn verify_cargo_messages_in_closure(
                 &mut filenames,
                 &mut artifact_files,
                 &mut artifact_executables,
+                &mut rustc_source_paths,
             ),
             "compiler-message" => verify_compiler_message(object, &context),
             "build-script-executed" => {
@@ -540,6 +543,7 @@ fn verify_cargo_messages_in_closure(
     Ok(CargoMessageObservation {
         artifact_files,
         build_script_executables,
+        rustc_source_paths,
     })
 }
 
@@ -550,6 +554,7 @@ fn verify_compiler_artifact(
     observed_filenames: &mut BTreeSet<String>,
     artifact_files: &mut BTreeMap<String, crate::CargoUnitSelector>,
     artifact_executables: &mut BTreeMap<crate::CargoUnitSelector, String>,
+    rustc_source_paths: &mut BTreeMap<crate::CargoUnitSelector, String>,
 ) -> Result<(), TrustedCargoBuildError> {
     require_exact_keys(
         object,
@@ -618,6 +623,19 @@ fn verify_compiler_artifact(
         _ => return Err(TrustedCargoBuildError::InvalidCargoMessages),
     }
     verify_message_target(object.get("target"), &selector, &source_roots)?;
+    let source_path = object
+        .get("target")
+        .and_then(serde_json::Value::as_object)
+        .and_then(|target| target.get("src_path"))
+        .and_then(serde_json::Value::as_str)
+        .and_then(normalize_logical_path)
+        .ok_or(TrustedCargoBuildError::InvalidCargoMessages)?;
+    if rustc_source_paths
+        .insert(selector.clone(), source_path)
+        .is_some()
+    {
+        return Err(TrustedCargoBuildError::InvalidCargoMessages);
+    }
     verify_message_profile(object.get("profile"))
 }
 
@@ -1391,7 +1409,9 @@ fn observe_units(
             let matches = planned
                 .nodes()
                 .iter()
-                .filter(|(selector, unit)| rustc.matches(selector, unit, planned))
+                .filter(|(selector, unit)| {
+                    rustc.matches(selector, unit, planned, &cargo_messages.rustc_source_paths)
+                })
                 .map(|(selector, _)| selector.clone())
                 .collect::<Vec<_>>();
             let [selector] = matches.as_slice() else {
@@ -1566,6 +1586,7 @@ struct RustcInvocation {
     target: Option<String>,
     features: BTreeSet<String>,
     externs: BTreeMap<String, String>,
+    source_path: String,
 }
 
 impl RustcInvocation {
@@ -1583,6 +1604,19 @@ impl RustcInvocation {
         if target.is_some() && option_count(arguments, "--target") != 1 {
             return Err(TrustedCargoBuildError::UnitObservationMismatch);
         }
+        let source_paths = arguments
+            .iter()
+            .filter(|argument| {
+                Path::new(argument)
+                    .extension()
+                    .is_some_and(|value| value == "rs")
+            })
+            .collect::<Vec<_>>();
+        let [source_path] = source_paths.as_slice() else {
+            return Err(TrustedCargoBuildError::UnitObservationMismatch);
+        };
+        let source_path = normalize_logical_path(source_path)
+            .ok_or(TrustedCargoBuildError::UnitObservationMismatch)?;
         validate_rustc_build_flags(arguments, target.is_some(), host_linker_selected)?;
         let features = option_values(arguments, "--cfg")
             .into_iter()
@@ -1614,6 +1648,7 @@ impl RustcInvocation {
             target,
             features,
             externs,
+            source_path,
         })
     }
 
@@ -1622,6 +1657,7 @@ impl RustcInvocation {
         selector: &crate::CargoUnitSelector,
         unit: &crate::NormalizedCargoUnit,
         graph: &NormalizedHostCargoUnitGraph,
+        source_paths: &BTreeMap<crate::CargoUnitSelector, String>,
     ) -> bool {
         let expected_target = (selector.compilation_kind == CargoCompilationKind::Target)
             .then(|| graph.composition_target().to_owned());
@@ -1630,6 +1666,7 @@ impl RustcInvocation {
             && self.features == unit.features
             && crate_type_matches(selector.crate_kind, &self.crate_types)
             && selector.compile_mode != CargoCompileMode::RunCustomBuild
+            && source_paths.get(selector) == Some(&self.source_path)
     }
 
     fn requires_target_linker(&self) -> bool {
@@ -1898,6 +1935,71 @@ mod tests {
     }
 
     #[test]
+    fn rustc_source_paths_distinguish_same_named_custom_build_targets() {
+        let mut selectors = [selector("first"), selector("second"), selector("third")];
+        for selector in &mut selectors {
+            selector.target_name = "build-script-build".into();
+            selector.compilation_kind = CargoCompilationKind::BuildHost;
+            selector.compilation_target = "build-host".into();
+            selector.cargo_target_context = crate::CargoUnitTargetContext::BuildHost;
+            selector.crate_kind = CargoCrateKind::CustomBuild;
+        }
+        let source_paths = BTreeMap::from([
+            (
+                selectors[0].clone(),
+                "/rust-agent/closure/first/build.rs".into(),
+            ),
+            (
+                selectors[1].clone(),
+                "/rust-agent/closure/second/build.rs".into(),
+            ),
+            (
+                selectors[2].clone(),
+                "/rust-agent/closure/third/build.rs".into(),
+            ),
+        ]);
+        let graph = graph(false);
+        let unit = graph.nodes().values().next().unwrap();
+        let arguments = [
+            "--crate-name",
+            "build_script_build",
+            "--crate-type",
+            "bin",
+            "/rust-agent/closure/first/../second/build.rs",
+            HOST_LINKER_FEATURE_FLAG,
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+        let rustc = RustcInvocation::parse(&arguments, true).unwrap();
+        let matches = selectors
+            .iter()
+            .filter(|selector| rustc.matches(selector, unit, &graph, &source_paths))
+            .collect::<Vec<_>>();
+        assert_eq!(matches, vec![&selectors[1]]);
+
+        let mut unknown = arguments.clone();
+        *unknown
+            .iter_mut()
+            .find(|argument| argument.as_str() == "/rust-agent/closure/first/../second/build.rs")
+            .unwrap() = "/rust-agent/closure/unknown/build.rs".into();
+        let unknown = RustcInvocation::parse(&unknown, true).unwrap();
+        assert!(selectors.iter().all(|selector| !unknown.matches(
+            selector,
+            unit,
+            &graph,
+            &source_paths
+        )));
+
+        let mut duplicate = arguments;
+        duplicate.push("/rust-agent/closure/third/build.rs".into());
+        assert!(matches!(
+            RustcInvocation::parse(&duplicate, true),
+            Err(TrustedCargoBuildError::UnitObservationMismatch)
+        ));
+    }
+
+    #[test]
     fn target_linker_observation_is_exact() {
         let target_cdylib = RustcInvocation::parse(
             &rustc_arguments(&[
@@ -1996,6 +2098,7 @@ mod tests {
             "fixture_macro",
             "--crate-type",
             "proc-macro",
+            "/rust-agent/closure/fixture-macro/src/lib.rs",
             "--extern",
             "proc_macro",
             "--extern",
@@ -2021,11 +2124,17 @@ mod tests {
     }
 
     fn rustc_arguments(extra: &[&str]) -> Vec<String> {
-        ["--crate-name", "fixture", "--crate-type", "lib"]
-            .into_iter()
-            .chain(extra.iter().copied())
-            .map(str::to_owned)
-            .collect()
+        [
+            "--crate-name",
+            "fixture",
+            "--crate-type",
+            "lib",
+            "/rust-agent/closure/fixture/src/lib.rs",
+        ]
+        .into_iter()
+        .chain(extra.iter().copied())
+        .map(str::to_owned)
+        .collect()
     }
 
     #[test]
@@ -2402,6 +2511,14 @@ mod tests {
         assert_eq!(
             observation.artifact_files[target_file].compilation_kind,
             CargoCompilationKind::Target
+        );
+        assert_eq!(
+            observation.rustc_source_paths[&host_selector],
+            "/rust-agent/closure/fixture/src/lib.rs"
+        );
+        assert_eq!(
+            observation.rustc_source_paths[&target_selector],
+            "/rust-agent/closure/fixture/src/lib.rs"
         );
 
         for invalid_target_files in [
