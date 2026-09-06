@@ -29,7 +29,7 @@ const HOST_LINKER_FEATURE_FLAG: &str = "-Clinker-features=-lld";
 const BUILD_TIMEOUT_MILLISECONDS: u64 = 20 * 60 * 1000;
 const MAXIMUM_STDERR_DIAGNOSTIC_BYTES: usize = 32 * 1024;
 const MAXIMUM_STDOUT_DIAGNOSTIC_BYTES: usize = 4 * 1024;
-const MAXIMUM_VERIFICATION_DIAGNOSTIC_BYTES: usize = 32 * 1024;
+const MAXIMUM_VERIFICATION_DIAGNOSTIC_BYTES: usize = 768;
 const MAXIMUM_COMMAND_DIAGNOSTIC_COUNT: usize = 32;
 
 #[derive(Debug)]
@@ -418,9 +418,10 @@ fn verify_cargo_messages_in_closure(
         cache_packages,
         host_closure,
     };
-    for line in stdout
+    for (message_index, line) in stdout
         .split(|byte| *byte == b'\n')
         .filter(|line| !line.is_empty())
+        .enumerate()
     {
         let value: serde_json::Value = serde_json::from_slice(line)
             .map_err(|_| TrustedCargoBuildError::InvalidCargoMessages)?;
@@ -434,7 +435,7 @@ fn verify_cargo_messages_in_closure(
         if finished {
             return Err(TrustedCargoBuildError::InvalidCargoMessages);
         }
-        match reason {
+        let verification = match reason {
             "compiler-artifact" => verify_compiler_artifact(
                 object,
                 &context,
@@ -442,21 +443,36 @@ fn verify_cargo_messages_in_closure(
                 &mut filenames,
                 &mut artifact_files,
                 &mut artifact_executables,
-            )?,
-            "compiler-message" => {
-                verify_compiler_message(object, &context)?;
-            }
+            ),
+            "compiler-message" => verify_compiler_message(object, &context),
             "build-script-executed" => {
-                verify_build_script_message(object, planned, &mut build_scripts)?;
+                verify_build_script_message(object, planned, &mut build_scripts)
             }
             "build-finished" => {
-                require_exact_keys(object, &["reason", "success"])?;
-                if object.get("success").and_then(serde_json::Value::as_bool) != Some(true) {
-                    return Err(TrustedCargoBuildError::InvalidCargoMessages);
+                let result = require_exact_keys(object, &["reason", "success"]);
+                if result.is_ok()
+                    && object.get("success").and_then(serde_json::Value::as_bool) == Some(true)
+                {
+                    finished = true;
+                    Ok(())
+                } else {
+                    Err(TrustedCargoBuildError::InvalidCargoMessages)
                 }
-                finished = true;
             }
-            _ => return Err(TrustedCargoBuildError::InvalidCargoMessages),
+            _ => Err(TrustedCargoBuildError::InvalidCargoMessages),
+        };
+        if let Err(error) = verification {
+            if host_closure.is_some()
+                && matches!(error, TrustedCargoBuildError::InvalidCargoMessages)
+            {
+                return Err(TrustedCargoBuildError::InvalidCargoMessageOutput {
+                    diagnostic: format!(
+                        "stage=message message-index={message_index} reason={reason} message={}",
+                        diagnostic_head_and_tail(line, MAXIMUM_VERIFICATION_DIAGNOSTIC_BYTES),
+                    ),
+                });
+            }
+            return Err(error);
         }
     }
     let expected_artifacts = planned
@@ -472,6 +488,29 @@ fn verify_cargo_messages_in_closure(
         .cloned()
         .collect::<BTreeSet<_>>();
     if !finished || artifacts != expected_artifacts || build_scripts != expected_build_scripts {
+        if host_closure.is_some() {
+            let missing_artifacts = expected_artifacts
+                .difference(&artifacts)
+                .collect::<Vec<_>>();
+            let unexpected_artifacts = artifacts
+                .difference(&expected_artifacts)
+                .collect::<Vec<_>>();
+            let missing_scripts = expected_build_scripts
+                .difference(&build_scripts)
+                .collect::<Vec<_>>();
+            let unexpected_scripts = build_scripts
+                .difference(&expected_build_scripts)
+                .collect::<Vec<_>>();
+            return Err(TrustedCargoBuildError::InvalidCargoMessageOutput {
+                diagnostic: diagnostic_head_and_tail(
+                    format!(
+                        "stage=stream-coverage finished={finished} missing-artifacts={missing_artifacts:?} unexpected-artifacts={unexpected_artifacts:?} missing-scripts={missing_scripts:?} unexpected-scripts={unexpected_scripts:?}"
+                    )
+                    .as_bytes(),
+                    MAXIMUM_VERIFICATION_DIAGNOSTIC_BYTES,
+                ),
+            });
+        }
         return Err(TrustedCargoBuildError::InvalidCargoMessages);
     }
     let mut build_script_executables = BTreeMap::new();
@@ -486,6 +525,14 @@ fn verify_cargo_messages_in_closure(
             })
             .collect::<Vec<_>>();
         let [(_, executable)] = matches.as_slice() else {
+            if host_closure.is_some() {
+                return Err(TrustedCargoBuildError::InvalidCargoMessageOutput {
+                    diagnostic: format!(
+                        "stage=build-script-executable selector={run_selector:?} matches={}",
+                        matches.len()
+                    ),
+                });
+            }
             return Err(TrustedCargoBuildError::InvalidCargoMessages);
         };
         build_script_executables.insert(run_selector.clone(), (*executable).clone());
@@ -1101,13 +1148,12 @@ fn diagnostic_head_and_tail(bytes: &[u8], maximum: usize) -> String {
 
 fn cargo_message_verification_diagnostic(
     stdout: &[u8],
-    planned: &NormalizedHostCargoUnitGraph,
+    _planned: &NormalizedHostCargoUnitGraph,
 ) -> String {
-    let selectors = planned.nodes().keys().collect::<Vec<_>>();
     format!(
-        "message-bytes={} messages={} planned-selectors={selectors:?}",
+        "stage=stream-envelope message-bytes={} messages-tail={}",
         stdout.len(),
-        diagnostic_head_and_tail(stdout, MAXIMUM_VERIFICATION_DIAGNOSTIC_BYTES),
+        diagnostic_tail(stdout, MAXIMUM_VERIFICATION_DIAGNOSTIC_BYTES),
     )
 }
 
@@ -1115,12 +1161,17 @@ fn unit_observation_diagnostic(
     observation: &LinuxSandboxExecutionObservation,
     planned: &NormalizedHostCargoUnitGraph,
 ) -> String {
-    let commands = format!("{:?}", observation.executed_commands);
-    let selectors = planned.nodes().keys().collect::<Vec<_>>();
+    let mut executable_counts = BTreeMap::<&str, usize>::new();
+    for command in &observation.executed_commands {
+        *executable_counts
+            .entry(command.executable.as_str())
+            .or_default() += 1;
+    }
     format!(
-        "execution-count={} executions={} planned-selectors={selectors:?}",
+        "execution-count={} executable-counts={executable_counts:?} planned-units={} planned-edges={}",
         observation.executed_commands.len(),
-        diagnostic_head_and_tail(commands.as_bytes(), MAXIMUM_VERIFICATION_DIAGNOSTIC_BYTES),
+        planned.nodes().len(),
+        planned.edges().len(),
     )
 }
 
