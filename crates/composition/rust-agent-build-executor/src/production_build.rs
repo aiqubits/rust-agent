@@ -1696,6 +1696,9 @@ fn build_rustc_query_allowed(
     arguments: &[String],
     host_linker_selected: bool,
 ) -> bool {
+    if build_script_rustc_query_allowed(arguments) {
+        return true;
+    }
     if request.allows_rustc_query(arguments) {
         return true;
     }
@@ -1721,6 +1724,10 @@ fn build_rustc_query_allowed(
         without_build_flag.remove(index);
     }
     request.allows_rustc_query(&without_build_flag)
+}
+
+fn build_script_rustc_query_allowed(arguments: &[String]) -> bool {
+    arguments == ["--version"]
 }
 
 fn validate_rustc_build_flags(
@@ -2028,6 +2035,21 @@ mod tests {
                 RustcInvocation::parse(&invalid, working_directory, true),
                 Err(TrustedCargoBuildError::UnitObservationMismatch)
             ));
+        }
+    }
+
+    #[test]
+    fn build_script_rustc_version_query_is_exact_and_read_only() {
+        assert!(build_script_rustc_query_allowed(&["--version".into()]));
+        for rejected in [
+            vec![],
+            vec!["-V".into()],
+            vec!["-vV".into()],
+            vec!["--version".into(), "--verbose".into()],
+            vec!["--version".into(), BUILD_SYSROOT_FLAG.into()],
+            vec!["--version-json".into()],
+        ] {
+            assert!(!build_script_rustc_query_allowed(&rejected));
         }
     }
 
