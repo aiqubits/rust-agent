@@ -1326,7 +1326,7 @@ fn observe_units(
     }
 
     let mut observed_compile_units = BTreeSet::new();
-    let mut observed_build_scripts = BTreeSet::new();
+    let mut observed_build_script_executions = BTreeMap::new();
     let mut expected_target_linker_executions = 0usize;
     let mut observed_target_linker_executions = 0usize;
     for execution in descendants {
@@ -1366,18 +1366,19 @@ fn observe_units(
             .executable
             .starts_with(&format!("{LOGICAL_TARGET}/"))
         {
-            let matches = cargo_messages
+            if !cargo_messages
                 .build_script_executables
-                .iter()
-                .filter(|(_, executable)| executable.as_str() == execution.executable)
-                .map(|(selector, _)| selector.clone())
-                .collect::<Vec<_>>();
-            let [selector] = matches.as_slice() else {
-                return Err(TrustedCargoBuildError::UnitObservationMismatch);
-            };
-            if !observed_build_scripts.insert(selector.clone()) {
+                .values()
+                .any(|executable| executable == &execution.executable)
+            {
                 return Err(TrustedCargoBuildError::UnitObservationMismatch);
             }
+            let count = observed_build_script_executions
+                .entry(execution.executable.clone())
+                .or_insert(0usize);
+            *count = count
+                .checked_add(1)
+                .ok_or(TrustedCargoBuildError::UnitObservationMismatch)?;
         } else if build_policy.target_linker.is_some_and(|(logical, digest)| {
             execution.executable == logical && execution.executable_sha256 == digest
         }) {
@@ -1409,12 +1410,41 @@ fn observe_units(
         expected_target_linker_executions,
         observed_target_linker_executions,
     )?;
-    if observed_compile_units != expected_compile_units
-        || observed_build_scripts != expected_build_scripts
-    {
+    validate_build_script_execution_counts(
+        &expected_build_scripts,
+        &cargo_messages.build_script_executables,
+        &observed_build_script_executions,
+    )?;
+    if observed_compile_units != expected_compile_units {
         return Err(TrustedCargoBuildError::UnitObservationMismatch);
     }
     Ok(())
+}
+
+fn validate_build_script_execution_counts(
+    expected_selectors: &BTreeSet<crate::CargoUnitSelector>,
+    selector_executables: &BTreeMap<crate::CargoUnitSelector, String>,
+    observed_executions: &BTreeMap<String, usize>,
+) -> Result<(), TrustedCargoBuildError> {
+    if selector_executables.keys().collect::<BTreeSet<_>>()
+        != expected_selectors.iter().collect::<BTreeSet<_>>()
+    {
+        return Err(TrustedCargoBuildError::UnitObservationMismatch);
+    }
+    let mut expected_executions = BTreeMap::new();
+    for executable in selector_executables.values() {
+        let count = expected_executions
+            .entry(executable.clone())
+            .or_insert(0usize);
+        *count = count
+            .checked_add(1)
+            .ok_or(TrustedCargoBuildError::UnitObservationMismatch)?;
+    }
+    if &expected_executions == observed_executions {
+        Ok(())
+    } else {
+        Err(TrustedCargoBuildError::UnitObservationMismatch)
+    }
 }
 
 fn validate_target_linker_execution_count(
@@ -1791,6 +1821,67 @@ mod tests {
         for (expected, observed) in [(1, 0), (0, 1), (1, 2)] {
             assert!(matches!(
                 validate_target_linker_execution_count(expected, observed),
+                Err(TrustedCargoBuildError::UnitObservationMismatch)
+            ));
+        }
+    }
+
+    #[test]
+    fn build_script_execution_counts_preserve_shared_host_and_target_contexts() {
+        let mut host_selector = selector("fixture");
+        host_selector.compilation_kind = CargoCompilationKind::BuildHost;
+        host_selector.compilation_target = "build-host".into();
+        host_selector.cargo_target_context = crate::CargoUnitTargetContext::BuildHost;
+        host_selector.compile_mode = CargoCompileMode::RunCustomBuild;
+        host_selector.crate_kind = CargoCrateKind::CustomBuild;
+        let mut target_selector = host_selector.clone();
+        target_selector.cargo_target_context = crate::CargoUnitTargetContext::CompositionTarget;
+        let expected_selectors = BTreeSet::from([host_selector.clone(), target_selector.clone()]);
+        let shared_executable = "/rust-agent/target/release/build/fixture/build-script-build";
+        let selector_executables = BTreeMap::from([
+            (host_selector.clone(), shared_executable.into()),
+            (target_selector.clone(), shared_executable.into()),
+        ]);
+
+        validate_build_script_execution_counts(
+            &expected_selectors,
+            &selector_executables,
+            &BTreeMap::from([(shared_executable.into(), 2)]),
+        )
+        .unwrap();
+
+        for invalid_observations in [
+            BTreeMap::new(),
+            BTreeMap::from([(shared_executable.into(), 1)]),
+            BTreeMap::from([(shared_executable.into(), 3)]),
+            BTreeMap::from([(
+                "/rust-agent/target/release/build/other/build-script-build".into(),
+                2,
+            )]),
+        ] {
+            assert!(matches!(
+                validate_build_script_execution_counts(
+                    &expected_selectors,
+                    &selector_executables,
+                    &invalid_observations,
+                ),
+                Err(TrustedCargoBuildError::UnitObservationMismatch)
+            ));
+        }
+
+        for invalid_mapping in [
+            BTreeMap::from([(host_selector, shared_executable.into())]),
+            BTreeMap::from([
+                (target_selector.clone(), shared_executable.into()),
+                (selector("unplanned"), shared_executable.into()),
+            ]),
+        ] {
+            assert!(matches!(
+                validate_build_script_execution_counts(
+                    &expected_selectors,
+                    &invalid_mapping,
+                    &BTreeMap::from([(shared_executable.into(), 2)]),
+                ),
                 Err(TrustedCargoBuildError::UnitObservationMismatch)
             ));
         }
