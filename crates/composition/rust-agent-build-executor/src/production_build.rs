@@ -645,20 +645,29 @@ fn verify_compiler_message(
                 && selector.target_name == target_name
                 && package_id_matches(package_id, &selector.package)
         })
-        .cloned()
         .collect::<Vec<_>>();
-    let [selector] = matches.as_slice() else {
+    if matches.is_empty() {
         return Err(TrustedCargoBuildError::InvalidCargoMessages);
-    };
-    let package_root = verified_package_root(
-        package_id,
-        manifest_path,
-        &selector.package,
-        context.cache_packages,
-    )?;
-    let source_roots =
-        verified_package_source_roots(&package_root, &selector.package, context.host_closure)?;
-    verify_message_target(object.get("target"), selector, &source_roots)?;
+    }
+    let matches_planned_target = matches.iter().any(|selector| {
+        let Ok(package_root) = verified_package_root(
+            package_id,
+            manifest_path,
+            &selector.package,
+            context.cache_packages,
+        ) else {
+            return false;
+        };
+        let Ok(source_roots) =
+            verified_package_source_roots(&package_root, &selector.package, context.host_closure)
+        else {
+            return false;
+        };
+        verify_message_target(object.get("target"), selector, &source_roots).is_ok()
+    });
+    if !matches_planned_target {
+        return Err(TrustedCargoBuildError::InvalidCargoMessages);
+    }
     object
         .get("message")
         .filter(|message| message.is_object())
@@ -762,6 +771,7 @@ fn match_message_selector(
                 && selector.target_name == target_name
                 && package_id_matches(package_id, &selector.package)
                 && unit.features == features
+                && message_artifact_paths_match_selector(object, selector)
         })
         .map(|(selector, _)| selector.clone())
         .collect::<Vec<_>>();
@@ -777,6 +787,45 @@ fn match_message_selector(
     let source_roots =
         verified_package_source_roots(&package_root, &selector.package, context.host_closure)?;
     Ok((selector.clone(), source_roots))
+}
+
+fn message_artifact_paths_match_selector(
+    object: &serde_json::Map<String, serde_json::Value>,
+    selector: &crate::CargoUnitSelector,
+) -> bool {
+    let Some(filenames) = object
+        .get("filenames")
+        .and_then(serde_json::Value::as_array)
+        .filter(|filenames| !filenames.is_empty() && filenames.len() <= 64)
+    else {
+        return false;
+    };
+    let profile = if selector.profile == "dev" {
+        "debug"
+    } else {
+        &selector.profile
+    };
+    if !canonical_path_component(profile) {
+        return false;
+    }
+    let root = match selector.compilation_kind {
+        CargoCompilationKind::BuildHost => format!("{LOGICAL_TARGET}/{profile}"),
+        CargoCompilationKind::Target => {
+            let Some(target) = Path::new(&selector.compilation_target)
+                .file_stem()
+                .and_then(|target| target.to_str())
+                .filter(|target| canonical_path_component(target))
+            else {
+                return false;
+            };
+            format!("{LOGICAL_TARGET}/{target}/{profile}")
+        }
+    };
+    filenames.iter().all(|filename| {
+        filename
+            .as_str()
+            .is_some_and(|filename| logical_descendant(filename, &root))
+    })
 }
 
 fn verify_message_target(
@@ -804,7 +853,7 @@ fn verify_message_target(
         || message_text(target, "name")? != selector.target_name
         || !source_roots
             .iter()
-            .any(|root| logical_descendant(source_path, root))
+            .any(|root| normalized_logical_descendant(source_path, root))
         || !matches!(
             message_text(target, "edition")?,
             "2015" | "2018" | "2021" | "2024"
@@ -1117,6 +1166,45 @@ fn logical_descendant(path: &str, root: &str) -> bool {
             && canonical_logical_path(path, "/rust-agent/")
             && !suffix.contains("//")
     })
+}
+
+fn normalized_logical_descendant(path: &str, root: &str) -> bool {
+    let Some(path) = normalize_logical_path(path) else {
+        return false;
+    };
+    path.strip_prefix(root)
+        .is_some_and(|suffix| suffix.starts_with('/'))
+}
+
+fn normalize_logical_path(path: &str) -> Option<String> {
+    if !path.starts_with("/rust-agent/")
+        || path.len() > 4096
+        || !path.is_ascii()
+        || path.ends_with('/')
+    {
+        return None;
+    }
+    let mut components = Vec::new();
+    for component in path.split('/').skip(1) {
+        match component {
+            ".." if components.len() > 1 => {
+                components.pop();
+            }
+            "" | "." | ".." => return None,
+            component if component.len() <= 255 => components.push(component),
+            _ => return None,
+        }
+    }
+    (components.first() == Some(&"rust-agent") && components.len() > 1)
+        .then(|| format!("/{}", components.join("/")))
+}
+
+fn canonical_path_component(component: &str) -> bool {
+    !component.is_empty()
+        && component.len() <= 255
+        && component.is_ascii()
+        && !matches!(component, "." | "..")
+        && !component.contains('/')
 }
 
 fn diagnostic_tail(bytes: &[u8], maximum: usize) -> String {
@@ -1805,6 +1893,14 @@ mod tests {
             ],
         )
         .unwrap();
+        let mut sibling_source = split_target.clone();
+        sibling_source["src_path"] = json!("/rust-agent/closure/host/../trees/fixture/src/lib.rs");
+        verify_message_target(
+            Some(&sibling_source),
+            graph.nodes().keys().next().unwrap(),
+            &["/rust-agent/closure/trees/fixture".into()],
+        )
+        .unwrap();
         assert!(matches!(
             verify_message_target(
                 Some(&split_target),
@@ -1813,6 +1909,21 @@ mod tests {
             ),
             Err(TrustedCargoBuildError::InvalidCargoMessages)
         ));
+        for escaped in [
+            "/rust-agent/closure/host/../../outside/src/lib.rs",
+            "/rust-agent/closure/host/../trees/other/src/lib.rs",
+            "/rust-agent/closure/host/./../trees/fixture/src/lib.rs",
+        ] {
+            sibling_source["src_path"] = json!(escaped);
+            assert!(matches!(
+                verify_message_target(
+                    Some(&sibling_source),
+                    graph.nodes().keys().next().unwrap(),
+                    &["/rust-agent/closure/trees/fixture".into()],
+                ),
+                Err(TrustedCargoBuildError::InvalidCargoMessages)
+            ));
+        }
 
         for (field, value) in [
             ("manifest_path", "/rust-agent/workspace/fixture/Cargo.toml"),
@@ -1978,6 +2089,117 @@ mod tests {
             ),
             Err(TrustedCargoBuildError::InvalidCargoMessages)
         ));
+    }
+
+    #[test]
+    fn cargo_artifact_paths_distinguish_identical_host_and_target_units() {
+        let target_selector = selector("fixture");
+        let mut host_selector = target_selector.clone();
+        host_selector.compilation_kind = CargoCompilationKind::BuildHost;
+        host_selector.compilation_target = "build-host".into();
+        host_selector.cargo_target_context = crate::CargoUnitTargetContext::BuildHost;
+        let graph = HostCargoUnitGraph {
+            schema: 2,
+            planner: CargoUnitGraphPlannerIdentity {
+                interface: "cargo-unit-graph-v1".into(),
+                cargo_version: "1.97.1".into(),
+                cargo_digest: "1".repeat(64),
+                rustc_version: "1.97.1".into(),
+                rustc_digest: "2".repeat(64),
+            },
+            build_triple: "build-host".into(),
+            composition_target: "test-target".into(),
+            profile: "debug".into(),
+            nodes: [&host_selector, &target_selector]
+                .into_iter()
+                .map(|selector| CargoUnit {
+                    selector: selector.clone(),
+                    features: vec![],
+                    build_script: false,
+                    proc_macro: false,
+                })
+                .collect(),
+            edges: vec![],
+        }
+        .normalize()
+        .unwrap();
+        let target = json!({
+            "kind": ["lib"],
+            "crate_types": ["lib"],
+            "name": "fixture",
+            "src_path": "/rust-agent/closure/fixture/src/lib.rs",
+            "edition": "2024",
+            "doc": true,
+            "doctest": true,
+            "test": true
+        });
+        let artifact = |filename: &str| {
+            json!({
+                "reason": "compiler-artifact",
+                "package_id": "path+file:///rust-agent/closure/fixture#fixture@1.0.0",
+                "manifest_path": "/rust-agent/closure/fixture/Cargo.toml",
+                "target": target,
+                "profile": {
+                    "opt_level": "0",
+                    "debuginfo": 2,
+                    "debug_assertions": true,
+                    "overflow_checks": true,
+                    "test": false
+                },
+                "features": [],
+                "filenames": [filename],
+                "executable": null,
+                "fresh": false
+            })
+        };
+        let compiler_message = json!({
+            "reason": "compiler-message",
+            "package_id": "path+file:///rust-agent/closure/fixture#fixture@1.0.0",
+            "manifest_path": "/rust-agent/closure/fixture/Cargo.toml",
+            "target": target,
+            "message": {}
+        });
+        let host_file = "/rust-agent/target/debug/deps/libfixture-host.rlib";
+        let target_file = "/rust-agent/target/test-target/debug/deps/libfixture-target.rlib";
+        let observation = verify_cargo_messages(
+            &messages(&[
+                compiler_message,
+                artifact(host_file),
+                artifact(target_file),
+                json!({"reason":"build-finished","success":true}),
+            ]),
+            &graph,
+            &[],
+        )
+        .unwrap();
+        assert_eq!(
+            observation.artifact_files[host_file].compilation_kind,
+            CargoCompilationKind::BuildHost
+        );
+        assert_eq!(
+            observation.artifact_files[target_file].compilation_kind,
+            CargoCompilationKind::Target
+        );
+
+        for invalid_target_files in [
+            vec!["/rust-agent/target/other-target/debug/deps/libfixture.rlib"],
+            vec![host_file, target_file],
+        ] {
+            let mut invalid_target = artifact(target_file);
+            invalid_target["filenames"] = json!(invalid_target_files);
+            assert!(matches!(
+                verify_cargo_messages(
+                    &messages(&[
+                        artifact(host_file),
+                        invalid_target,
+                        json!({"reason":"build-finished","success":true}),
+                    ]),
+                    &graph,
+                    &[],
+                ),
+                Err(TrustedCargoBuildError::InvalidCargoMessages)
+            ));
+        }
     }
 
     #[test]
