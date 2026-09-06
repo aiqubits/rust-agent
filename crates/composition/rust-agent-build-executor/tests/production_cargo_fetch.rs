@@ -49,7 +49,8 @@ use rust_agent_build_executor::{
     write_production_integration_post_attestation,
 };
 use rust_agent_composition::{
-    CompositionManifest, Environment, Target, WASM_BINDGEN_CLI_LOGICAL_ID, canonical,
+    CompositionManifest, Environment, Target, WASM_BINDGEN_CLI_LOGICAL_ID,
+    WASM_BINDGEN_FUTURES_VERSION, WASM_BINDGEN_PROTOCOL_VERSION, canonical,
     manifest::CargoResolutionRecord,
     metadata::BuildRequirements,
     profile::BuildKind,
@@ -299,6 +300,45 @@ fn production_standalone_pipeline_is_signed_and_reverified() {
 }
 
 #[test]
+fn wasm_pipeline_fixture_lock_carries_the_exact_generated_protocol_pair() {
+    let lock = String::from_utf8(cargo_lock_bytes(false, true, true, "unused")).unwrap();
+    let value: toml::Value = toml::from_str(&lock).unwrap();
+    let packages = value["package"].as_array().unwrap();
+    for (name, version) in [
+        ("wasm-bindgen", WASM_BINDGEN_PROTOCOL_VERSION),
+        ("wasm-bindgen-macro", WASM_BINDGEN_PROTOCOL_VERSION),
+        ("wasm-bindgen-macro-support", WASM_BINDGEN_PROTOCOL_VERSION),
+        ("wasm-bindgen-shared", WASM_BINDGEN_PROTOCOL_VERSION),
+        ("wasm-bindgen-futures", WASM_BINDGEN_FUTURES_VERSION),
+    ] {
+        assert_eq!(
+            packages
+                .iter()
+                .filter(|package| package["name"].as_str() == Some(name))
+                .map(|package| package["version"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            [version]
+        );
+    }
+    let generated_dependencies = packages
+        .iter()
+        .find(|package| package["name"].as_str() == Some("generated-agent"))
+        .unwrap()["dependencies"]
+        .as_array()
+        .unwrap();
+    assert!(
+        generated_dependencies
+            .iter()
+            .any(|value| value.as_str() == Some("wasm-bindgen"))
+    );
+    assert!(
+        generated_dependencies
+            .iter()
+            .any(|value| value.as_str() == Some("wasm-bindgen-futures"))
+    );
+}
+
+#[test]
 #[ignore = "requires the pinned wasm-bindgen CLI, wasm32 target, and Linux Landlock ABI 2 runner"]
 fn production_wasm_pipeline_sandboxes_and_attests_the_complete_bundle() {
     run_fetch_fixture(FetchFixtureMode::WasmPipeline);
@@ -384,9 +424,11 @@ fn run_fetch_fixture(mode: FetchFixtureMode) {
             ""
         };
         let wasm_dependency = if mode == FetchFixtureMode::WasmPipeline {
-            "wasm-bindgen = { version = \"=0.2.127\", default-features = false, features = [\"std\"] }\n"
+            format!(
+                "wasm-bindgen = {{ version = \"={WASM_BINDGEN_PROTOCOL_VERSION}\", default-features = false, features = [\"std\"] }}\nwasm-bindgen-futures = {{ version = \"={WASM_BINDGEN_FUTURES_VERSION}\", default-features = false, features = [\"std\"] }}\n"
+            )
         } else {
-            ""
+            String::new()
         };
         fs::write(
             generated_package.join("Cargo.toml"),
@@ -429,7 +471,7 @@ fn main() {
         };
         fs::write(generated_package.join("build.rs"), build_script).unwrap();
         let generated_source = if mode == FetchFixtureMode::WasmPipeline {
-            "use wasm_bindgen::prelude::*;\nmacro_helper::marker!();\n#[wasm_bindgen]\n#[cfg(rust_agent_build_script)]\npub fn generated() -> bool { shared_helper::TARGET_FEATURE && !shared_helper::HOST_FEATURE }\n"
+            "use wasm_bindgen::prelude::*;\nmacro_helper::marker!();\n#[wasm_bindgen]\n#[cfg(rust_agent_build_script)]\npub fn generated() -> bool { wasm_bindgen_futures::spawn_local(async {}); shared_helper::TARGET_FEATURE && !shared_helper::HOST_FEATURE }\n"
         } else {
             "macro_helper::marker!();\n#[cfg(rust_agent_build_script)]\npub fn generated() -> bool { shared_helper::TARGET_FEATURE && !shared_helper::HOST_FEATURE }\n"
         };
@@ -2030,7 +2072,7 @@ fn cargo_lock_bytes(
     };
     let generated_dependencies = if cross_compile {
         let wasm_dependency = if wasm_bindgen {
-            " \"wasm-bindgen\",\n"
+            " \"wasm-bindgen\",\n \"wasm-bindgen-futures\",\n"
         } else {
             ""
         };
@@ -2058,10 +2100,51 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
 
 [[package]]
+name = "futures-core"
+version = "0.3.34"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "92d699e522242e69e3003b94ecc1f960f3a5e015aa7c5d7486e65ad01dd94f5e"
+
+[[package]]
+name = "futures-task"
+version = "0.3.34"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cd417de3d1d015fc3bfd2b1ea46dfc7bab72ef86f1cc7cc9c78e728b34a6d1fd"
+
+[[package]]
+name = "futures-util"
+version = "0.3.34"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0d50a92467f8ba5dd6e3ee5d4bd04d73ab2e4e1c44474a0674821dfce14b79bc"
+dependencies = [
+ "futures-core",
+ "futures-task",
+ "pin-project-lite",
+ "slab",
+]
+
+[[package]]
+name = "js-sys"
+version = "0.3.104"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0e0c1080212aad755ea003d18543e8768dd432c48819efd73a7bf1e39b7a5a3a"
+dependencies = [
+ "cfg-if",
+ "futures-util",
+ "wasm-bindgen",
+]
+
+[[package]]
 name = "once_cell"
 version = "1.21.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
+
+[[package]]
+name = "pin-project-lite"
+version = "0.2.17"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 
 [[package]]
 name = "proc-macro2"
@@ -2086,6 +2169,12 @@ name = "rustversion"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
+
+[[package]]
+name = "slab"
+version = "0.4.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0c790de23124f9ab44544d7ac05d60440adc586479ce501c1d6d7da3cd8c9cf5"
 
 [[package]]
 name = "syn"
@@ -2115,6 +2204,16 @@ dependencies = [
  "rustversion",
  "wasm-bindgen-macro",
  "wasm-bindgen-shared",
+]
+
+[[package]]
+name = "wasm-bindgen-futures"
+version = "0.4.77"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6b7777d5cc23d0e91404e53ce2d5e8ec7acae3026b16233dba62cd3246457950"
+dependencies = [
+ "js-sys",
+ "wasm-bindgen",
 ]
 
 [[package]]

@@ -305,13 +305,14 @@ preprovisioned and authenticated network fetch, the immutable Cargo planner, cro
 scripts/proc macros, exact observed graphs, standalone output, sandboxed pinned wasm-bindgen, and
 Host integration pre/build/post. Completion requires an externally signed one-use handle; its
 append-only attestation is durably published before an opaque permit can atomically expose the
-`deployable=true` artifact, and production inspection rechecks both. GitHub run `34055118763`
+`deployable=true` artifact, and production inspection rechecks both. GitHub run `34057431315`
 passed Quality, the real Landlock ABI 2 gate, the namespace/descendant escape matrix, every fetch
 fixture, the immutable trusted planner, the cross-compiled observer, standalone pipeline and Host
-integration pipeline. Its only failing fixture isolated Cargo's renamed `rustversion_compat`
-build-dependency: the verified edge sidecar retained that alias but `HostCargoUnitGraph` discarded it
-and the rustc observer guessed the target name `rustversion`. The graph now retains and digest-binds
-the exact extern-crate name and the observer verifies the same alias plus artifact identity; focused
-positive, drift and invalid-input regressions and the complete executor test suite pass locally. A
-fresh successful Ubuntu 24.04 Phase 1B run remains. The local host's Landlock ABI 1 still cannot
-supply the required `Refer` enforcement.
+integration pipeline. It confirmed the exact extern-alias graph fix and advanced the WASM fixture
+through its full trusted Cargo build before rejecting its protocol lock: the fixture required
+`wasm-bindgen-futures` during postprocessing without declaring the generated composition's pinned
+`wasm-bindgen-futures` dependency. The fixture now matches the generator's exact
+`wasm-bindgen`/`wasm-bindgen-futures` pair and complete locked transitive source closure. Protocol
+regressions cover success plus version, missing-package and duplicate-package drift. A fresh
+successful Ubuntu 24.04 Phase 1B run remains. The local host's Landlock ABI 1 still cannot supply the
+required `Refer` enforcement.

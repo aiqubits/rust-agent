@@ -202,22 +202,43 @@ mod tests {
     }
 
     #[test]
-    fn protocol_lock_rejects_crate_cli_drift() {
+    fn protocol_lock_requires_each_exact_unique_crate_version() {
         let temp = TempDir::new().unwrap();
         let lock = temp.path().join("Cargo.lock");
-        let mut input = String::new();
-        for (name, version) in [
-            ("wasm-bindgen", "0.2.126"),
+        let entries = [
+            ("wasm-bindgen", WASM_BINDGEN_PROTOCOL_VERSION),
             ("wasm-bindgen-macro", WASM_BINDGEN_PROTOCOL_VERSION),
             ("wasm-bindgen-macro-support", WASM_BINDGEN_PROTOCOL_VERSION),
             ("wasm-bindgen-shared", WASM_BINDGEN_PROTOCOL_VERSION),
             ("wasm-bindgen-futures", WASM_BINDGEN_FUTURES_VERSION),
-        ] {
-            input.push_str(&format!(
-                "[[package]]\nname = \"{name}\"\nversion = \"{version}\"\n\n"
-            ));
-        }
-        fs::write(&lock, input).unwrap();
+        ];
+        let encode = |entries: &[(&str, &str)]| {
+            let mut input = String::new();
+            for (name, version) in entries {
+                input.push_str(&format!(
+                    "[[package]]\nname = \"{name}\"\nversion = \"{version}\"\n\n"
+                ));
+            }
+            input
+        };
+
+        let exact = encode(&entries);
+        fs::write(&lock, &exact).unwrap();
+        verify_protocol_lock(&lock).unwrap();
+
+        fs::write(
+            &lock,
+            exact.replacen(WASM_BINDGEN_PROTOCOL_VERSION, "0.2.126", 1),
+        )
+        .unwrap();
+        assert!(verify_protocol_lock(&lock).is_err());
+
+        fs::write(&lock, encode(&entries[..entries.len() - 1])).unwrap();
+        assert!(verify_protocol_lock(&lock).is_err());
+
+        let mut duplicate = exact;
+        duplicate.push_str(&encode(&entries[..1]));
+        fs::write(&lock, duplicate).unwrap();
         assert!(verify_protocol_lock(&lock).is_err());
     }
 }
