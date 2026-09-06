@@ -189,7 +189,7 @@ impl FetchFixtureMode {
 }
 
 #[test]
-fn host_linker_support_files_follow_the_logical_driver_install_root() {
+fn host_linker_support_files_follow_logical_install_and_compiler_paths() {
     let linker = find_executable("cc");
     let host_install = compiler_install_directory(&linker, None);
     let logical_install = compiler_install_directory(&linker, Some(LOGICAL_HOST_LINKER));
@@ -209,11 +209,29 @@ fn host_linker_support_files_follow_the_logical_driver_install_root() {
         sha256_file(&relocated_plugin),
         sha256_file(&compiler_program_file(&linker, "liblto_plugin.so"))
     );
+    let staged_compiler_path = output.path().join("compiler-path");
+    let linker_dry_run =
+        compiler_linker_dry_run_with_identity(&linker, LOGICAL_HOST_LINKER, &staged_compiler_path);
+    assert!(
+        linker_dry_run.contains(
+            staged_compiler_path
+                .join("liblto_plugin.so")
+                .to_str()
+                .unwrap()
+        )
+    );
     assert_eq!(
         compiler_install_runtime_symlink(output.path()),
         Some(LinuxSandboxRuntimeSymlink {
             target: "/rust-agent/runtime/rust-agent/lib".into(),
             link: "/rust-agent/lib".into(),
+        })
+    );
+    assert_eq!(
+        compiler_path_runtime_symlink(output.path()),
+        Some(LinuxSandboxRuntimeSymlink {
+            target: "/rust-agent/runtime/compiler-path/liblto_plugin.so".into(),
+            link: "/rust-agent/tools/liblto_plugin.so".into(),
         })
     );
 }
@@ -2926,6 +2944,7 @@ fn copy_dynamic_runtime(
         link: "/dev/null".into(),
     });
     symlinks.extend(compiler_install_runtime_symlink(output));
+    symlinks.extend(compiler_path_runtime_symlink(output));
     symlinks.sort();
     (symlinks, loaders)
 }
@@ -2937,6 +2956,16 @@ fn compiler_install_runtime_symlink(output: &Path) -> Option<LinuxSandboxRuntime
         .then(|| LinuxSandboxRuntimeSymlink {
             target: "/rust-agent/runtime/rust-agent/lib".into(),
             link: "/rust-agent/lib".into(),
+        })
+}
+
+fn compiler_path_runtime_symlink(output: &Path) -> Option<LinuxSandboxRuntimeSymlink> {
+    output
+        .join("compiler-path/liblto_plugin.so")
+        .is_file()
+        .then(|| LinuxSandboxRuntimeSymlink {
+            target: "/rust-agent/runtime/compiler-path/liblto_plugin.so".into(),
+            link: "/rust-agent/tools/liblto_plugin.so".into(),
         })
 }
 
@@ -3024,6 +3053,9 @@ fn copy_compiler_support_files(host_linker: &Path, output: &Path) {
         if let Ok(relative) = logical.strip_prefix(&host_install) {
             destinations.insert(logical_install.join(relative));
         }
+        if name == "liblto_plugin.so" {
+            destinations.insert(PathBuf::from("/compiler-path/liblto_plugin.so"));
+        }
         for destination in destinations {
             let destination = output.join(destination.strip_prefix(Path::new("/")).unwrap());
             fs::create_dir_all(destination.parent().unwrap()).unwrap();
@@ -3108,6 +3140,20 @@ fn compiler_program_file(compiler: &Path, name: &str) -> PathBuf {
         "compiler did not resolve required file `{name}` to an absolute file"
     );
     path.canonicalize().unwrap()
+}
+fn compiler_linker_dry_run_with_identity(
+    compiler: &Path,
+    arg0: &str,
+    compiler_path: &Path,
+) -> String {
+    let output = Command::new(compiler)
+        .arg0(arg0)
+        .env("COMPILER_PATH", compiler_path)
+        .args(["-fuse-linker-plugin", "-###", "-x", "c", "/dev/null"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    String::from_utf8(output.stderr).unwrap()
 }
 fn first_line(path: &Path, arguments: &[&str]) -> String {
     let output = Command::new(path).args(arguments).output().unwrap();
