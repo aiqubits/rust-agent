@@ -17,8 +17,10 @@ use crate::{
 const LOGICAL_CARGO: &str = "/rust-agent/toolchain/bin/cargo";
 const LOGICAL_RUSTC: &str = "/rust-agent/toolchain/bin/rustc";
 const LOGICAL_TARGET_DIR: &str = "/rust-agent/target";
+const BUILD_SYSROOT_FLAG: &str = "--sysroot=/rust-agent/toolchain";
 const PLANNER_TIMEOUT_MILLISECONDS: u64 = 2 * 60 * 1000;
 const CHANNEL_OVERRIDE: &str = "__CARGO_TEST_CHANNEL_OVERRIDE_DO_NOT_USE_THIS";
+const HOST_LINKER_FEATURE_FLAG: &str = "-Clinker-features=-lld";
 
 #[derive(Debug)]
 pub struct TrustedCargoPlannerResult {
@@ -316,10 +318,50 @@ fn valid_rustc_query(
     let Some(arguments) = execution.arguments.strip_prefix(&[LOGICAL_RUSTC.into()]) else {
         return false;
     };
+    let host_linker_selected = request_invokes_host_linker(request);
     execution.executable == LOGICAL_RUSTC
         && execution.executable_sha256 == rustc_digest
         && execution.working_directory == request.invocation().working_directory
-        && request.allows_rustc_query(arguments)
+        && planner_rustc_query_allowed(request, arguments, host_linker_selected)
+}
+
+fn planner_rustc_query_allowed(
+    request: &NormalizedCargoPlannerRequest,
+    arguments: &[String],
+    host_linker_selected: bool,
+) -> bool {
+    normalize_configured_rustc_query(arguments, host_linker_selected)
+        .is_some_and(|arguments| request.allows_rustc_query(&arguments))
+}
+
+fn normalize_configured_rustc_query(
+    arguments: &[String],
+    host_linker_selected: bool,
+) -> Option<Vec<String>> {
+    if arguments == ["-vV"] {
+        return Some(arguments.to_vec());
+    }
+    if arguments.iter().any(|argument| argument == "-vV") {
+        return None;
+    }
+    let is_target = option_value(arguments, "--target").is_some();
+    validate_rustc_query(arguments, is_target, host_linker_selected).ok()?;
+    let expected_flag = if is_target {
+        Some(BUILD_SYSROOT_FLAG)
+    } else if host_linker_selected {
+        Some(HOST_LINKER_FEATURE_FLAG)
+    } else {
+        None
+    };
+    let mut normalized_arguments = arguments.to_vec();
+    if let Some(expected_flag) = expected_flag {
+        let index = normalized_arguments
+            .iter()
+            .position(|argument| argument == expected_flag)
+            .expect("validated query contains its required scoped flag");
+        normalized_arguments.remove(index);
+    }
+    Some(normalized_arguments)
 }
 
 fn input_digest(
@@ -333,4 +375,159 @@ fn input_digest(
         .find(|file| file.role == role)
         .map(|file| file.sha256.as_str())
         .ok_or(TrustedCargoPlannerError::InputMismatch)
+}
+
+fn validate_rustc_query(
+    arguments: &[String],
+    is_target: bool,
+    host_linker_selected: bool,
+) -> Result<(), TrustedCargoPlannerError> {
+    let sysroot_count = arguments
+        .iter()
+        .filter(|argument| argument.as_str() == BUILD_SYSROOT_FLAG)
+        .count();
+    let alternate_sysroot = arguments.windows(2).any(|pair| pair[0] == "--sysroot")
+        || arguments.iter().any(|argument| {
+            argument.starts_with("--sysroot=") && argument.as_str() != BUILD_SYSROOT_FLAG
+        });
+    let host_linker_feature_count = arguments
+        .iter()
+        .filter(|argument| argument.as_str() == HOST_LINKER_FEATURE_FLAG)
+        .count();
+    let alternate_linker_feature = arguments.iter().any(|argument| {
+        argument.starts_with("-Clinker-features") && argument.as_str() != HOST_LINKER_FEATURE_FLAG
+    }) || arguments
+        .windows(2)
+        .any(|pair| pair[0] == "-C" && pair[1].starts_with("linker-features"));
+    let expected_host_linker_feature_count = usize::from(!is_target && host_linker_selected);
+    let expected_sysroot_count = usize::from(is_target);
+    if alternate_sysroot
+        || alternate_linker_feature
+        || sysroot_count != expected_sysroot_count
+        || host_linker_feature_count != expected_host_linker_feature_count
+    {
+        Err(TrustedCargoPlannerError::InvalidExecutionTrace)
+    } else {
+        Ok(())
+    }
+}
+
+fn request_invokes_host_linker(request: &NormalizedCargoPlannerRequest) -> bool {
+    let expected = format!(
+        "host.{}.rustflags=[\"{}\"]",
+        request.build_triple(),
+        HOST_LINKER_FEATURE_FLAG
+    );
+    request
+        .invocation()
+        .arguments
+        .windows(2)
+        .any(|value| value[0] == "--config" && value[1].as_str() == expected)
+}
+
+fn option_value<'a>(arguments: &'a [String], name: &str) -> Option<&'a str> {
+    let prefix = format!("{name}=");
+    let mut index = 0;
+    while index < arguments.len() {
+        if arguments[index] == name {
+            if let Some(value) = arguments.get(index + 1) {
+                return Some(value);
+            }
+            index += 2;
+        } else if let Some(value) = arguments[index].strip_prefix(&prefix) {
+            return Some(value);
+        } else {
+            index += 1;
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::fetch_runner::cargo_target_information_query;
+
+    use super::*;
+
+    const TARGET: &str = "aarch64-unknown-linux-gnu";
+
+    #[test]
+    fn configured_rustc_queries_are_normalized_with_scope_exact_flags() {
+        assert_eq!(
+            normalize_configured_rustc_query(&["-vV".into()], true),
+            Some(vec!["-vV".into()])
+        );
+
+        let host_query = cargo_target_information_query(None);
+        assert_eq!(
+            normalize_configured_rustc_query(&host_query, false),
+            Some(host_query.clone())
+        );
+        let mut configured_host_query = host_query.clone();
+        let host_flag_index = configured_host_query
+            .iter()
+            .position(|argument| argument == "--crate-type")
+            .unwrap();
+        configured_host_query.insert(host_flag_index, HOST_LINKER_FEATURE_FLAG.into());
+        assert_eq!(
+            normalize_configured_rustc_query(&configured_host_query, true),
+            Some(host_query)
+        );
+
+        let target_query = cargo_target_information_query(Some(TARGET));
+        let mut configured_target_query = target_query.clone();
+        let target_flag_index = configured_target_query
+            .iter()
+            .position(|argument| argument == "--target")
+            .unwrap();
+        configured_target_query.insert(target_flag_index, BUILD_SYSROOT_FLAG.into());
+        assert_eq!(
+            normalize_configured_rustc_query(&configured_target_query, true),
+            Some(target_query)
+        );
+    }
+
+    #[test]
+    fn configured_rustc_queries_reject_missing_cross_kind_duplicate_and_alternate_flags() {
+        let host_query = cargo_target_information_query(None);
+        let target_query = cargo_target_information_query(Some(TARGET));
+        let invalid_queries = [
+            host_query.clone(),
+            with_flags(&host_query, &[BUILD_SYSROOT_FLAG]),
+            with_flags(
+                &host_query,
+                &[HOST_LINKER_FEATURE_FLAG, HOST_LINKER_FEATURE_FLAG],
+            ),
+            with_flags(&host_query, &["-Clinker-features=+lld"]),
+            with_flags(&host_query, &["-C", "linker-features=-lld"]),
+            target_query.clone(),
+            with_flags(
+                &target_query,
+                &[HOST_LINKER_FEATURE_FLAG, BUILD_SYSROOT_FLAG],
+            ),
+            with_flags(&target_query, &[BUILD_SYSROOT_FLAG, BUILD_SYSROOT_FLAG]),
+            with_flags(&target_query, &["--sysroot=/ambient/toolchain"]),
+            with_flags(&target_query, &["--sysroot", "/rust-agent/toolchain"]),
+            vec!["-vV".into(), HOST_LINKER_FEATURE_FLAG.into()],
+        ];
+
+        for arguments in invalid_queries {
+            assert_eq!(normalize_configured_rustc_query(&arguments, true), None);
+        }
+        assert_eq!(
+            normalize_configured_rustc_query(
+                &with_flags(&host_query, &[HOST_LINKER_FEATURE_FLAG]),
+                false,
+            ),
+            None
+        );
+    }
+
+    fn with_flags(arguments: &[String], flags: &[&str]) -> Vec<String> {
+        arguments
+            .iter()
+            .cloned()
+            .chain(flags.iter().map(|flag| (*flag).into()))
+            .collect()
+    }
 }
