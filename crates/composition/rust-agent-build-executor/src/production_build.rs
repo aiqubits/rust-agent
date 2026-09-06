@@ -9,14 +9,15 @@ use thiserror::Error;
 
 use crate::{
     CargoCompilationKind, CargoCompileMode, CargoCrateKind, CargoPlannerError, CargoUnitGraphError,
-    LinuxSandboxAnonymousSocketpair, LinuxSandboxCommand, LinuxSandboxError,
-    LinuxSandboxExecutionObservation, LinuxSandboxNetworkPolicy, LinuxSandboxReadOnlyMount,
-    LinuxSandboxWritableMount, NormalizedCargoPlannerRequest, NormalizedHostBuildInputClosure,
-    NormalizedHostCargoUnitGraph, NormalizedProductionBuildPolicy, ProductionBuildPolicyError,
-    ProductionCargoInvocationIdentity, ProductionInputFileRole, ProductionInputIdentityError,
-    ProductionInputPreflightScope, VerifiedCargoFetchCache, VerifiedHostClosureSnapshot,
-    VerifiedLinuxSandboxBackend, VerifiedProductionInputs,
-    production_policy::cargo_driver_environment, snapshot_materializer::AnchoredFileIdentity,
+    HostBuildClosureContent, HostBuildClosureItemRole, LinuxSandboxAnonymousSocketpair,
+    LinuxSandboxCommand, LinuxSandboxError, LinuxSandboxExecutionObservation,
+    LinuxSandboxNetworkPolicy, LinuxSandboxReadOnlyMount, LinuxSandboxWritableMount,
+    NormalizedCargoPlannerRequest, NormalizedHostBuildInputClosure, NormalizedHostCargoUnitGraph,
+    NormalizedProductionBuildPolicy, ProductionBuildPolicyError, ProductionCargoInvocationIdentity,
+    ProductionInputFileRole, ProductionInputIdentityError, ProductionInputPreflightScope,
+    VerifiedCargoFetchCache, VerifiedHostClosureSnapshot, VerifiedLinuxSandboxBackend,
+    VerifiedProductionInputs, production_policy::cargo_driver_environment,
+    snapshot_materializer::AnchoredFileIdentity,
 };
 
 const LOGICAL_CARGO: &str = "/rust-agent/toolchain/bin/cargo";
@@ -28,6 +29,7 @@ const HOST_LINKER_FEATURE_FLAG: &str = "-Clinker-features=-lld";
 const BUILD_TIMEOUT_MILLISECONDS: u64 = 20 * 60 * 1000;
 const MAXIMUM_STDERR_DIAGNOSTIC_BYTES: usize = 32 * 1024;
 const MAXIMUM_STDOUT_DIAGNOSTIC_BYTES: usize = 4 * 1024;
+const MAXIMUM_VERIFICATION_DIAGNOSTIC_BYTES: usize = 32 * 1024;
 const MAXIMUM_COMMAND_DIAGNOSTIC_COUNT: usize = 32;
 
 #[derive(Debug)]
@@ -56,8 +58,14 @@ pub enum TrustedCargoBuildError {
     SandboxFailed { exit_code: i32, diagnostic: String },
     #[error("trusted Cargo build command trace does not exactly cover the planned units")]
     UnitObservationMismatch,
+    #[error(
+        "trusted Cargo build command trace does not exactly cover the planned units: {diagnostic}"
+    )]
+    UnitObservationOutput { diagnostic: String },
     #[error("trusted Cargo build emitted malformed or incomplete JSON messages")]
     InvalidCargoMessages,
+    #[error("trusted Cargo build emitted malformed or incomplete JSON messages: {diagnostic}")]
+    InvalidCargoMessageOutput { diagnostic: String },
     #[error("trusted Cargo build sandbox failed: {0}")]
     Sandbox(#[from] LinuxSandboxError),
     #[error("trusted Cargo build production input verification failed: {0}")]
@@ -226,11 +234,23 @@ pub fn execute_trusted_cargo_build(
             ),
         });
     }
-    let cargo_messages = verify_cargo_messages(
+    let cargo_messages = verify_cargo_messages_in_closure(
         execution.stdout(),
         planned_graph,
         &cache.manifest().packages,
-    )?;
+        Some(host_closure),
+    )
+    .map_err(|error| match error {
+        TrustedCargoBuildError::InvalidCargoMessages => {
+            TrustedCargoBuildError::InvalidCargoMessageOutput {
+                diagnostic: cargo_message_verification_diagnostic(
+                    execution.stdout(),
+                    planned_graph,
+                ),
+            }
+        }
+        other => other,
+    })?;
     let unit_observation_policy = BuildUnitObservationPolicy {
         executable_digests: enforcement
             .executables
@@ -253,7 +273,15 @@ pub fn execute_trusted_cargo_build(
         &arguments,
         &unit_observation_policy,
         &cargo_messages,
-    )?;
+    )
+    .map_err(|error| match error {
+        TrustedCargoBuildError::UnitObservationMismatch => {
+            TrustedCargoBuildError::UnitObservationOutput {
+                diagnostic: unit_observation_diagnostic(execution.observation(), planned_graph),
+            }
+        }
+        other => other,
+    })?;
     verify_inputs(
         policy,
         request,
@@ -355,10 +383,26 @@ struct BuildUnitObservationPolicy<'a> {
     target_linker: Option<(&'a str, &'a str)>,
 }
 
+struct CargoMessageVerificationContext<'a> {
+    planned: &'a NormalizedHostCargoUnitGraph,
+    cache_packages: &'a [crate::CargoFetchCachePackageLocation],
+    host_closure: Option<&'a NormalizedHostBuildInputClosure>,
+}
+
+#[cfg(test)]
 fn verify_cargo_messages(
     stdout: &[u8],
     planned: &NormalizedHostCargoUnitGraph,
     cache_packages: &[crate::CargoFetchCachePackageLocation],
+) -> Result<CargoMessageObservation, TrustedCargoBuildError> {
+    verify_cargo_messages_in_closure(stdout, planned, cache_packages, None)
+}
+
+fn verify_cargo_messages_in_closure(
+    stdout: &[u8],
+    planned: &NormalizedHostCargoUnitGraph,
+    cache_packages: &[crate::CargoFetchCachePackageLocation],
+    host_closure: Option<&NormalizedHostBuildInputClosure>,
 ) -> Result<CargoMessageObservation, TrustedCargoBuildError> {
     if stdout.is_empty() {
         return Err(TrustedCargoBuildError::InvalidCargoMessages);
@@ -369,6 +413,11 @@ fn verify_cargo_messages(
     let mut filenames = BTreeSet::new();
     let mut artifact_files = BTreeMap::new();
     let mut artifact_executables = BTreeMap::new();
+    let context = CargoMessageVerificationContext {
+        planned,
+        cache_packages,
+        host_closure,
+    };
     for line in stdout
         .split(|byte| *byte == b'\n')
         .filter(|line| !line.is_empty())
@@ -388,14 +437,15 @@ fn verify_cargo_messages(
         match reason {
             "compiler-artifact" => verify_compiler_artifact(
                 object,
-                planned,
-                cache_packages,
+                &context,
                 &mut artifacts,
                 &mut filenames,
                 &mut artifact_files,
                 &mut artifact_executables,
             )?,
-            "compiler-message" => verify_compiler_message(object, planned, cache_packages)?,
+            "compiler-message" => {
+                verify_compiler_message(object, &context)?;
+            }
             "build-script-executed" => {
                 verify_build_script_message(object, planned, &mut build_scripts)?;
             }
@@ -448,8 +498,7 @@ fn verify_cargo_messages(
 
 fn verify_compiler_artifact(
     object: &serde_json::Map<String, serde_json::Value>,
-    planned: &NormalizedHostCargoUnitGraph,
-    cache_packages: &[crate::CargoFetchCachePackageLocation],
+    context: &CargoMessageVerificationContext<'_>,
     observed: &mut BTreeSet<crate::CargoUnitSelector>,
     observed_filenames: &mut BTreeSet<String>,
     artifact_files: &mut BTreeMap<String, crate::CargoUnitSelector>,
@@ -472,7 +521,7 @@ fn verify_compiler_artifact(
     if object.get("fresh").and_then(serde_json::Value::as_bool) != Some(false) {
         return Err(TrustedCargoBuildError::InvalidCargoMessages);
     }
-    let (selector, package_root) = match_message_selector(object, planned, cache_packages)?;
+    let (selector, source_roots) = match_message_selector(object, context)?;
     if !observed.insert(selector.clone()) {
         return Err(TrustedCargoBuildError::InvalidCargoMessages);
     }
@@ -521,14 +570,13 @@ fn verify_compiler_artifact(
         }
         _ => return Err(TrustedCargoBuildError::InvalidCargoMessages),
     }
-    verify_message_target(object.get("target"), &selector, &package_root)?;
+    verify_message_target(object.get("target"), &selector, &source_roots)?;
     verify_message_profile(object.get("profile"))
 }
 
 fn verify_compiler_message(
     object: &serde_json::Map<String, serde_json::Value>,
-    planned: &NormalizedHostCargoUnitGraph,
-    cache_packages: &[crate::CargoFetchCachePackageLocation],
+    context: &CargoMessageVerificationContext<'_>,
 ) -> Result<(), TrustedCargoBuildError> {
     require_exact_keys(
         object,
@@ -541,7 +589,8 @@ fn verify_compiler_message(
         .and_then(serde_json::Value::as_object)
         .ok_or(TrustedCargoBuildError::InvalidCargoMessages)?;
     let target_name = message_text(target, "name")?;
-    let matches = planned
+    let matches = context
+        .planned
         .nodes()
         .keys()
         .filter(|selector| {
@@ -554,9 +603,15 @@ fn verify_compiler_message(
     let [selector] = matches.as_slice() else {
         return Err(TrustedCargoBuildError::InvalidCargoMessages);
     };
-    let package_root =
-        verified_package_root(package_id, manifest_path, &selector.package, cache_packages)?;
-    verify_message_target(object.get("target"), selector, &package_root)?;
+    let package_root = verified_package_root(
+        package_id,
+        manifest_path,
+        &selector.package,
+        context.cache_packages,
+    )?;
+    let source_roots =
+        verified_package_source_roots(&package_root, &selector.package, context.host_closure)?;
+    verify_message_target(object.get("target"), selector, &source_roots)?;
     object
         .get("message")
         .filter(|message| message.is_object())
@@ -630,9 +685,8 @@ fn verify_build_script_message(
 
 fn match_message_selector(
     object: &serde_json::Map<String, serde_json::Value>,
-    planned: &NormalizedHostCargoUnitGraph,
-    cache_packages: &[crate::CargoFetchCachePackageLocation],
-) -> Result<(crate::CargoUnitSelector, String), TrustedCargoBuildError> {
+    context: &CargoMessageVerificationContext<'_>,
+) -> Result<(crate::CargoUnitSelector, Vec<String>), TrustedCargoBuildError> {
     let package_id = message_text(object, "package_id")?;
     let manifest_path = message_text(object, "manifest_path")?;
     let target = object
@@ -652,7 +706,8 @@ fn match_message_selector(
                 .ok_or(TrustedCargoBuildError::InvalidCargoMessages)
         })
         .collect::<Result<BTreeSet<_>, _>>()?;
-    let matches = planned
+    let matches = context
+        .planned
         .nodes()
         .iter()
         .filter(|(selector, unit)| {
@@ -666,15 +721,21 @@ fn match_message_selector(
     let [selector] = matches.as_slice() else {
         return Err(TrustedCargoBuildError::InvalidCargoMessages);
     };
-    let package_root =
-        verified_package_root(package_id, manifest_path, &selector.package, cache_packages)?;
-    Ok((selector.clone(), package_root))
+    let package_root = verified_package_root(
+        package_id,
+        manifest_path,
+        &selector.package,
+        context.cache_packages,
+    )?;
+    let source_roots =
+        verified_package_source_roots(&package_root, &selector.package, context.host_closure)?;
+    Ok((selector.clone(), source_roots))
 }
 
 fn verify_message_target(
     value: Option<&serde_json::Value>,
     selector: &crate::CargoUnitSelector,
-    package_root: &str,
+    source_roots: &[String],
 ) -> Result<(), TrustedCargoBuildError> {
     let target = value
         .and_then(serde_json::Value::as_object)
@@ -690,10 +751,13 @@ fn verify_message_target(
         "test",
         "required-features",
     ];
+    let source_path = message_text(target, "src_path")?;
     if target.keys().any(|key| !allowed.contains(&key.as_str()))
         || target.keys().any(|key| key == "required_features")
         || message_text(target, "name")? != selector.target_name
-        || !logical_descendant(message_text(target, "src_path")?, package_root)
+        || !source_roots
+            .iter()
+            .any(|root| logical_descendant(source_path, root))
         || !matches!(
             message_text(target, "edition")?,
             "2015" | "2018" | "2021" | "2024"
@@ -707,17 +771,66 @@ fn verify_message_target(
     {
         return Err(TrustedCargoBuildError::InvalidCargoMessages);
     }
-    let expected_kind = match selector.crate_kind {
-        CargoCrateKind::Library => "lib",
-        CargoCrateKind::ProcMacro => "proc-macro",
-        CargoCrateKind::Binary => "bin",
-        CargoCrateKind::Example => "example",
-        CargoCrateKind::Test => "test",
-        CargoCrateKind::Bench => "bench",
-        CargoCrateKind::CustomBuild => "custom-build",
+    let kinds = bounded_string_set(target.get("kind"), 16)?;
+    let crate_types = bounded_string_set(target.get("crate_types"), 16)?;
+    let library_type =
+        |value: &&str| matches!(*value, "lib" | "rlib" | "dylib" | "cdylib" | "staticlib");
+    let valid = match selector.crate_kind {
+        CargoCrateKind::Library => kinds == crate_types && kinds.iter().all(library_type),
+        CargoCrateKind::ProcMacro => {
+            kinds == BTreeSet::from(["proc-macro"]) && crate_types == BTreeSet::from(["proc-macro"])
+        }
+        CargoCrateKind::Binary => {
+            kinds == BTreeSet::from(["bin"]) && crate_types == BTreeSet::from(["bin"])
+        }
+        CargoCrateKind::Example => {
+            kinds == BTreeSet::from(["example"])
+                && crate_types.iter().all(|value| {
+                    matches!(
+                        *value,
+                        "bin" | "lib" | "rlib" | "dylib" | "cdylib" | "staticlib"
+                    )
+                })
+        }
+        CargoCrateKind::Test => {
+            kinds == BTreeSet::from(["test"]) && crate_types == BTreeSet::from(["bin"])
+        }
+        CargoCrateKind::Bench => {
+            kinds == BTreeSet::from(["bench"]) && crate_types == BTreeSet::from(["bin"])
+        }
+        CargoCrateKind::CustomBuild => {
+            kinds == BTreeSet::from(["custom-build"]) && crate_types == BTreeSet::from(["bin"])
+        }
     };
-    require_bounded_strings(target.get("kind"), 16, |kind| kind == expected_kind)?;
-    require_bounded_strings(target.get("crate_types"), 16, |_| true)
+    if valid {
+        Ok(())
+    } else {
+        Err(TrustedCargoBuildError::InvalidCargoMessages)
+    }
+}
+
+fn bounded_string_set(
+    value: Option<&serde_json::Value>,
+    maximum: usize,
+) -> Result<BTreeSet<&str>, TrustedCargoBuildError> {
+    let values = value
+        .and_then(serde_json::Value::as_array)
+        .filter(|values| !values.is_empty() && values.len() <= maximum)
+        .ok_or(TrustedCargoBuildError::InvalidCargoMessages)?;
+    let result = values
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .filter(|value| !value.is_empty())
+                .ok_or(TrustedCargoBuildError::InvalidCargoMessages)
+        })
+        .collect::<Result<BTreeSet<_>, _>>()?;
+    if result.len() == values.len() {
+        Ok(result)
+    } else {
+        Err(TrustedCargoBuildError::InvalidCargoMessages)
+    }
 }
 
 fn verify_message_profile(value: Option<&serde_json::Value>) -> Result<(), TrustedCargoBuildError> {
@@ -884,6 +997,52 @@ fn verified_package_root(
     Ok(package_root.into())
 }
 
+fn verified_package_source_roots(
+    package_root: &str,
+    package: &crate::CargoPackageIdentity,
+    host_closure: Option<&NormalizedHostBuildInputClosure>,
+) -> Result<Vec<String>, TrustedCargoBuildError> {
+    let mut roots = BTreeSet::from([package_root.to_owned()]);
+    let crate::CargoPackageSource::Path { tree_digest } = &package.source else {
+        return Ok(roots.into_iter().collect());
+    };
+    let Some(host_closure) = host_closure else {
+        return Ok(roots.into_iter().collect());
+    };
+    if !extend_verified_closure_tree_roots(&mut roots, tree_digest, host_closure.items())? {
+        return Err(TrustedCargoBuildError::InvalidCargoMessages);
+    }
+    Ok(roots.into_iter().collect())
+}
+
+fn extend_verified_closure_tree_roots(
+    roots: &mut BTreeSet<String>,
+    tree_digest: &str,
+    items: &[crate::NormalizedHostBuildClosureItem],
+) -> Result<bool, TrustedCargoBuildError> {
+    let mut matched_tree = false;
+    for item in items {
+        if matches!(
+            item.role,
+            HostBuildClosureItemRole::HostPackageTree
+                | HostBuildClosureItemRole::PathPackageTree
+                | HostBuildClosureItemRole::EmittedCompositionTree
+        ) && matches!(
+            &item.content,
+            HostBuildClosureContent::SnapshotTree {
+                tree_digest: item_digest
+            } if item_digest == tree_digest
+        ) {
+            if !canonical_logical_path(&item.logical_path, "/rust-agent/closure/") {
+                return Err(TrustedCargoBuildError::InvalidCargoMessages);
+            }
+            matched_tree = true;
+            roots.insert(item.logical_path.clone());
+        }
+    }
+    Ok(matched_tree)
+}
+
 fn canonical_logical_path(path: &str, root: &str) -> bool {
     path.starts_with(root)
         && path.len() <= 4096
@@ -924,6 +1083,45 @@ fn diagnostic_tail(bytes: &[u8], maximum: usize) -> String {
             String::from_utf8_lossy(tail)
         )
     }
+}
+
+fn diagnostic_head_and_tail(bytes: &[u8], maximum: usize) -> String {
+    if bytes.len() <= maximum {
+        return String::from_utf8_lossy(bytes).into_owned();
+    }
+    let head_len = maximum / 2;
+    let tail_len = maximum - head_len;
+    format!(
+        "{}[... {} bytes omitted ...]{}",
+        String::from_utf8_lossy(&bytes[..head_len]),
+        bytes.len() - maximum,
+        String::from_utf8_lossy(&bytes[bytes.len() - tail_len..]),
+    )
+}
+
+fn cargo_message_verification_diagnostic(
+    stdout: &[u8],
+    planned: &NormalizedHostCargoUnitGraph,
+) -> String {
+    let selectors = planned.nodes().keys().collect::<Vec<_>>();
+    format!(
+        "message-bytes={} messages={} planned-selectors={selectors:?}",
+        stdout.len(),
+        diagnostic_head_and_tail(stdout, MAXIMUM_VERIFICATION_DIAGNOSTIC_BYTES),
+    )
+}
+
+fn unit_observation_diagnostic(
+    observation: &LinuxSandboxExecutionObservation,
+    planned: &NormalizedHostCargoUnitGraph,
+) -> String {
+    let commands = format!("{:?}", observation.executed_commands);
+    let selectors = planned.nodes().keys().collect::<Vec<_>>();
+    format!(
+        "execution-count={} executions={} planned-selectors={selectors:?}",
+        observation.executed_commands.len(),
+        diagnostic_head_and_tail(commands.as_bytes(), MAXIMUM_VERIFICATION_DIAGNOSTIC_BYTES),
+    )
 }
 
 fn logical_target_path(path: &str) -> bool {
@@ -1095,6 +1293,10 @@ impl RustcInvocation {
             .collect();
         let mut externs = BTreeMap::new();
         for value in option_values(arguments, "--extern") {
+            if value == "proc_macro" && crate_types.len() == 1 && crate_types.contains("proc-macro")
+            {
+                continue;
+            }
             let Some((name, path)) = value.split_once('=') else {
                 return Err(TrustedCargoBuildError::UnitObservationMismatch);
             };
@@ -1425,6 +1627,37 @@ mod tests {
         }
     }
 
+    #[test]
+    fn proc_macro_sysroot_extern_is_not_a_cargo_dependency_edge() {
+        let proc_macro = [
+            "--crate-name",
+            "fixture_macro",
+            "--crate-type",
+            "proc-macro",
+            "--extern",
+            "proc_macro",
+            "--extern",
+            "dependency=/rust-agent/target/release/libdependency.rlib",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+        let parsed = RustcInvocation::parse(&proc_macro, false).unwrap();
+        assert_eq!(
+            parsed.externs,
+            BTreeMap::from([(
+                "dependency".into(),
+                "/rust-agent/target/release/libdependency.rlib".into(),
+            )])
+        );
+
+        let library = rustc_arguments(&["--extern", "proc_macro"]);
+        assert!(matches!(
+            RustcInvocation::parse(&library, false),
+            Err(TrustedCargoBuildError::UnitObservationMismatch)
+        ));
+    }
+
     fn rustc_arguments(extra: &[&str]) -> Vec<String> {
         ["--crate-name", "fixture", "--crate-type", "lib"]
             .into_iter()
@@ -1479,6 +1712,56 @@ mod tests {
             &[],
         )
         .unwrap();
+
+        let mut cdylib = artifact.clone();
+        cdylib["target"]["kind"] = json!(["cdylib"]);
+        cdylib["target"]["crate_types"] = json!(["cdylib"]);
+        cdylib["filenames"] = json!(["/rust-agent/target/test-target/debug/fixture.wasm"]);
+        verify_cargo_messages(
+            &messages(&[cdylib, json!({"reason":"build-finished","success":true})]),
+            &graph,
+            &[],
+        )
+        .unwrap();
+
+        for (kind, crate_types) in [
+            (json!(["cdylib"]), json!(["rlib"])),
+            (json!(["plugin"]), json!(["plugin"])),
+            (json!(["lib", "lib"]), json!(["lib", "lib"])),
+        ] {
+            let mut invalid = artifact.clone();
+            invalid["target"]["kind"] = kind;
+            invalid["target"]["crate_types"] = crate_types;
+            assert!(matches!(
+                verify_cargo_messages(
+                    &messages(&[invalid, json!({"reason":"build-finished","success":true})]),
+                    &graph,
+                    &[],
+                ),
+                Err(TrustedCargoBuildError::InvalidCargoMessages)
+            ));
+        }
+
+        let mut split_source = artifact.clone();
+        split_source["target"]["src_path"] = json!("/rust-agent/closure/trees/fixture/src/lib.rs");
+        let split_target = split_source["target"].clone();
+        verify_message_target(
+            Some(&split_target),
+            graph.nodes().keys().next().unwrap(),
+            &[
+                "/rust-agent/closure/host".into(),
+                "/rust-agent/closure/trees/fixture".into(),
+            ],
+        )
+        .unwrap();
+        assert!(matches!(
+            verify_message_target(
+                Some(&split_target),
+                graph.nodes().keys().next().unwrap(),
+                &["/rust-agent/closure/host".into()],
+            ),
+            Err(TrustedCargoBuildError::InvalidCargoMessages)
+        ));
 
         for (field, value) in [
             ("manifest_path", "/rust-agent/workspace/fixture/Cargo.toml"),
@@ -1647,6 +1930,55 @@ mod tests {
     }
 
     #[test]
+    fn path_package_source_roots_are_bound_to_the_matching_closure_tree_digest() {
+        let tree_digest = "7".repeat(64);
+        let items = vec![
+            crate::NormalizedHostBuildClosureItem {
+                role: HostBuildClosureItemRole::HostPackageTree,
+                id: "host-tree".into(),
+                logical_path: "/rust-agent/closure/trees/host-fixture".into(),
+                metadata_contract: crate::CanonicalSnapshotMetadataContract::ReadOnlyEpochV1,
+                content: HostBuildClosureContent::SnapshotTree {
+                    tree_digest: tree_digest.clone(),
+                },
+                digest: "8".repeat(64),
+            },
+            crate::NormalizedHostBuildClosureItem {
+                role: HostBuildClosureItemRole::PathPackageTree,
+                id: "other-tree".into(),
+                logical_path: "/rust-agent/closure/trees/other".into(),
+                metadata_contract: crate::CanonicalSnapshotMetadataContract::ReadOnlyEpochV1,
+                content: HostBuildClosureContent::SnapshotTree {
+                    tree_digest: "9".repeat(64),
+                },
+                digest: "a".repeat(64),
+            },
+        ];
+        let mut roots = BTreeSet::from(["/rust-agent/closure/host".into()]);
+        assert!(extend_verified_closure_tree_roots(&mut roots, &tree_digest, &items).unwrap());
+        assert_eq!(
+            roots,
+            BTreeSet::from([
+                "/rust-agent/closure/host".into(),
+                "/rust-agent/closure/trees/host-fixture".into(),
+            ])
+        );
+
+        let mut unmatched = BTreeSet::new();
+        assert!(
+            !extend_verified_closure_tree_roots(&mut unmatched, &"b".repeat(64), &items).unwrap()
+        );
+        assert!(unmatched.is_empty());
+
+        let mut escaped = items.clone();
+        escaped[0].logical_path = "/rust-agent/closure/trees/../escape".into();
+        assert!(matches!(
+            extend_verified_closure_tree_roots(&mut BTreeSet::new(), &tree_digest, &escaped),
+            Err(TrustedCargoBuildError::InvalidCargoMessages)
+        ));
+    }
+
+    #[test]
     fn failed_build_diagnostics_retain_bounded_output_tails() {
         assert_eq!(diagnostic_tail(b"short", 5), "short");
         assert_eq!(
@@ -1654,6 +1986,10 @@ mod tests {
             "[... 6 bytes omitted ...]6789"
         );
         assert_eq!(diagnostic_tail(&[0xff, b'e'], 2), "\u{fffd}e");
+        assert_eq!(
+            diagnostic_head_and_tail(b"0123456789", 6),
+            "012[... 4 bytes omitted ...]789"
+        );
     }
 
     #[test]
