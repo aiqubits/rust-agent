@@ -7,7 +7,7 @@ represented in `docs/invariant-tests.md` and all applicable gates pass.
 |---|---|---|
 | 0 — repository and contract | Complete | Rust/Cargo 1.97.1 synchronization, workspace/deny/ADR gates, effect-free core/runtime contracts, checked lifecycle identities, closed target-fact/custom-target records, globally bounded catalog owners and symbolic per-target support analysis, resource-namespace bootstrap contracts, Host/runtime metadata, canonical Host Cargo unit-graph schemas and privacy fixtures are implemented. Production composition discovers schema-owned Capability/Component/runtime/Host and direct-root build-requirement metadata from workspace package manifests through bounded, timed, offline, isolated `cargo metadata`; package/path ownership is derived from the exact workspace-member result, unknown/mixed/spoofed metadata and default-feature drift fail closed, and a real discovery round-trip is checked against the test-only catalog fixture. All 12 Phase 0 acceptance criteria have exact non-wildcard mappings, and the mapping/CI gate passes. |
 | 1A — generated graph proof | Complete | The development-only generator/resolver/build path, path-free compose rustc executable/version/full-sysroot provenance, canonical target-fact and custom-spec snapshots with rustc/Cargo before/after drift checks, schema-owned Cargo package-metadata discovery, bounded/shared target-support analysis, direct-serde-bounded metadata/profile/trust/diagnostic/composition/security/Cargo-source collections, an identity-bound normalized catalog/trust-policy/evidence-byte/root-requirement generator-input commitment with resolver/attribution/generated-source/source-closure rederivation, selected-evidence snapshot verification, conservative aggregate App handoff, generated namespaced host APIs and required-field HostBindings builders, shared-host Config-field type/identity sealing with a real two-App same-identity/no-reopen external Host fixture, committed-built-in-fact Cargo target-dependency rewriting with transitive active path-package snapshots, composition-wide source entry/byte preflight before copy or hash, checked canonical resolution/manifests, exact Cargo.lock source projection, Cargo-config ancestor rejection, source snapshots, real graph presence/absence, integration verification, topology fixtures, target matrix and WASM packaging are implemented. A checked-in custom target now completes compose, lockfile generation and locked offline development build with the real pinned Rust/Cargo 1.97.1 toolchain. All 10 Phase 1A acceptance criteria have exact non-wildcard mappings, and every applicable local gate passes. Phase 1A artifacts remain `deployable=false`; immutable production mounted-view enforcement remains a Phase 1B gate. |
-| 1B — Linux production build | Implementation complete; runner revalidation pending | All 12 acceptance criteria remain mapped. The production graph and observer now retain exact Cargo extern-crate aliases in addition to the Host/Target, linker and inherited Cargo-driver contracts from ADRs 0009–0012. Focused tests and the real cross planner pass locally. A fresh successful Ubuntu 24.04 production gate is still required before the phase or any artifact is called deployable. |
+| 1B — Linux production build | Complete | All 12 acceptance criteria have exact non-wildcard mappings. GitHub run `34059521196` at commit `2dd4a21` passed the 20-step Quality job and the 15-step Ubuntu 24.04 Phase 1B Linux production job. The latter passed the real Landlock ABI 2 and namespace escape gates and all nine serial trusted fetch/planner/build, standalone, Host integration and pinned-WASM production fixtures, including signed `deployable=true` publication and inspection. |
 | 2 — minimal runtime spine | Not started | The Phase 1A gate has passed; implementation must provide real minimal runtime behavior and must not be represented by empty product crates. |
 | 3 — tool execution plane | Not started | The Phase 1A contract is stable; no Phase 3 implementation has started. |
 | 4 — local execution providers | Not started | Real-target security regressions required. |
@@ -300,19 +300,19 @@ No test result above is evidence for Phase 1B deployability or for a Phase 2+ ru
 - the closed mount-observation verifier binds the snapshot manifest digest, logical mount root,
   read-only claim and exact canonical entries, and rejects schema, context, entry or digest drift.
 
-The trusted executor composes the remaining contracts end to end. Real ignored fixtures exercise
+The trusted executor composes the contracts end to end. Real ignored fixtures exercise
 preprovisioned and authenticated network fetch, the immutable Cargo planner, cross-compiled build
 scripts/proc macros, exact observed graphs, standalone output, sandboxed pinned wasm-bindgen, and
 Host integration pre/build/post. Completion requires an externally signed one-use handle; its
 append-only attestation is durably published before an opaque permit can atomically expose the
-`deployable=true` artifact, and production inspection rechecks both. GitHub run `34057431315`
-passed Quality, the real Landlock ABI 2 gate, the namespace/descendant escape matrix, every fetch
-fixture, the immutable trusted planner, the cross-compiled observer, standalone pipeline and Host
-integration pipeline. It confirmed the exact extern-alias graph fix and advanced the WASM fixture
-through its full trusted Cargo build before rejecting its protocol lock: the fixture required
-`wasm-bindgen-futures` during postprocessing without declaring the generated composition's pinned
-`wasm-bindgen-futures` dependency. The fixture now matches the generator's exact
-`wasm-bindgen`/`wasm-bindgen-futures` pair and complete locked transitive source closure. Protocol
-regressions cover success plus version, missing-package and duplicate-package drift. A fresh
-successful Ubuntu 24.04 Phase 1B run remains. The local host's Landlock ABI 1 still cannot supply the
-required `Refer` enforcement.
+`deployable=true` artifact, and production inspection rechecks both. GitHub run `34059521196` at
+commit `2dd4a21` is the closing runner evidence: Quality job `101557424424` completed all 20 steps
+successfully, and Ubuntu 24.04 Phase 1B job `101557424347` completed all 15 steps successfully. The
+production job passed real Landlock ABI 2 rename enforcement, the namespace/descendant escape
+matrix, and the serial `production_cargo_fetch` command that executes all nine real ignored
+fixtures: authenticated and preprovisioned fetch, immutable planning, cross-target observation,
+standalone publication, Host integration and the exact pinned
+`wasm-bindgen`/`wasm-bindgen-futures` WASM pipeline. Together with the exact 12-item acceptance map,
+this closes Phase 1B. The local host's Landlock ABI 1 cannot supply `Refer` enforcement, so the
+matching Ubuntu runner remains the authoritative real-target evidence rather than a skipped local
+claim.
