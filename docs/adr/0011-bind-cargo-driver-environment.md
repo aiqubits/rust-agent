@@ -79,5 +79,6 @@ cannot be accepted as version 5 evidence.
 - `cargo_planner::tests::schema_four_binds_host_only_linker_configuration`
 - `production_build::tests::cargo_build_retains_the_request_bound_channel_override`
 - `production_policy::host_linker_bundle_is_closed_selected_and_path_free`
+- `production_artifact::production_manifest_recomputes_identity_and_accounts_for_the_closed_artifact_tree`
 - `production_cargo_fetch::trusted_build_observer_covers_cross_compiled_build_and_proc_macro_units`
 - `production_cargo_fetch::production_host_pre_build_post_pipeline_is_signed_and_reverified`

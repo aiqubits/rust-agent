@@ -198,6 +198,8 @@ pub struct BuildEnforcementIdentity {
     #[serde(rename = "read-inputs")]
     pub read_inputs: Vec<BuildEnforcementReadInput>,
     pub environment: Vec<BuildEnforcementEnvironment>,
+    #[serde(rename = "cargo-driver-environment")]
+    pub cargo_driver_environment: BTreeMap<String, String>,
     #[serde(rename = "derived-executable")]
     pub derived_executable: DerivedExecutablePolicy,
     #[serde(rename = "deterministic-environment")]
@@ -589,10 +591,11 @@ impl NormalizedProductionBuildPolicy {
                 value: item.value.clone(),
             })
             .collect();
+        let host_linker_selected = selected_host_linker.is_some();
         Ok(BuildEnforcementIdentity {
             schema: 2,
             backend: self.policy.backend,
-            backend_semantic_version: 4,
+            backend_semantic_version: 5,
             context: context.clone(),
             toolchain: BuildEnforcementToolchain {
                 cargo: tool_enforcement_identity("cargo", &self.policy.toolchain.cargo),
@@ -607,6 +610,7 @@ impl NormalizedProductionBuildPolicy {
             host_linker,
             read_inputs,
             environment,
+            cargo_driver_environment: cargo_driver_environment(host_linker_selected, true),
             derived_executable: self.policy.derived_executable.clone(),
             deterministic_environment: [
                 ("LANG".into(), "C.UTF-8".into()),
@@ -682,6 +686,39 @@ impl NormalizedProductionBuildPolicy {
             _ => Err(ProductionBuildPolicyError::PartialHostLinkerSelection),
         }
     }
+}
+
+pub(crate) fn cargo_driver_environment(
+    host_linker_selected: bool,
+    build_invocation: bool,
+) -> BTreeMap<String, String> {
+    let mut environment = BTreeMap::from([
+        (
+            "__CARGO_TEST_CHANNEL_OVERRIDE_DO_NOT_USE_THIS".into(),
+            "nightly".into(),
+        ),
+        ("CARGO_CACHE_RUSTC_INFO".into(), "0".into()),
+        ("CARGO_HOME".into(), "/rust-agent/cargo-home".into()),
+        ("CARGO_INCREMENTAL".into(), "0".into()),
+        ("CARGO_NET_OFFLINE".into(), "true".into()),
+        ("CARGO_TARGET_DIR".into(), "/rust-agent/target".into()),
+        ("LANG".into(), "C.UTF-8".into()),
+        ("LC_ALL".into(), "C.UTF-8".into()),
+        ("PATH".into(), "/rust-agent/toolchain/bin".into()),
+        ("RUSTC".into(), "/rust-agent/toolchain/bin/rustc".into()),
+        ("SOURCE_DATE_EPOCH".into(), "0".into()),
+    ]);
+    if host_linker_selected {
+        environment.insert("COMPILER_PATH".into(), "/rust-agent/tools".into());
+    }
+    if build_invocation {
+        environment.insert(
+            "CARGO_ENCODED_RUSTFLAGS".into(),
+            "--sysroot=/rust-agent/toolchain".into(),
+        );
+        environment.insert("TMPDIR".into(), "/rust-agent/tmp".into());
+    }
+    environment
 }
 
 impl BuildEnforcementIdentity {

@@ -96,7 +96,7 @@ fn production_manifest_recomputes_identity_and_accounts_for_the_closed_artifact_
     let enforcement = BuildEnforcementIdentity {
         schema: 2,
         backend: ProductionSandboxBackend::LinuxLandlockSeccomp,
-        backend_semantic_version: 4,
+        backend_semantic_version: 5,
         context,
         toolchain: BuildEnforcementToolchain {
             cargo: executable("cargo", 3),
@@ -111,6 +111,27 @@ fn production_manifest_recomputes_identity_and_accounts_for_the_closed_artifact_
         host_linker: None,
         read_inputs: vec![],
         environment: Vec::<BuildEnforcementEnvironment>::new(),
+        cargo_driver_environment: BTreeMap::from([
+            (
+                "__CARGO_TEST_CHANNEL_OVERRIDE_DO_NOT_USE_THIS".into(),
+                "nightly".into(),
+            ),
+            ("CARGO_CACHE_RUSTC_INFO".into(), "0".into()),
+            (
+                "CARGO_ENCODED_RUSTFLAGS".into(),
+                "--sysroot=/rust-agent/toolchain".into(),
+            ),
+            ("CARGO_HOME".into(), "/rust-agent/cargo-home".into()),
+            ("CARGO_INCREMENTAL".into(), "0".into()),
+            ("CARGO_NET_OFFLINE".into(), "true".into()),
+            ("CARGO_TARGET_DIR".into(), "/rust-agent/target".into()),
+            ("LANG".into(), "C.UTF-8".into()),
+            ("LC_ALL".into(), "C.UTF-8".into()),
+            ("PATH".into(), "/rust-agent/toolchain/bin".into()),
+            ("RUSTC".into(), "/rust-agent/toolchain/bin/rustc".into()),
+            ("SOURCE_DATE_EPOCH".into(), "0".into()),
+            ("TMPDIR".into(), "/rust-agent/tmp".into()),
+        ]),
         derived_executable: DerivedExecutablePolicy {
             roots: vec!["/rust-agent/target".into()],
             inherit_sandbox: true,
@@ -122,6 +143,7 @@ fn production_manifest_recomputes_identity_and_accounts_for_the_closed_artifact_
         ]),
     };
     let graph_digest = digest(10);
+    let cargo_environment = enforcement.cargo_driver_environment.clone();
     let input = ProductionBuildManifestInput {
         composition: generated.manifest.clone(),
         build_requirements: generated.manifest.build_requirements.clone(),
@@ -153,7 +175,7 @@ fn production_manifest_recomputes_identity_and_accounts_for_the_closed_artifact_
         cargo_invocation: ProductionCargoInvocationIdentity {
             schema: 1,
             arguments: vec!["build".into(), "--locked".into(), "--offline".into()],
-            environment: BTreeMap::new(),
+            environment: cargo_environment,
             working_directory: "/rust-agent/workspace".into(),
         },
         entry_artifact: artifact.path.clone(),
@@ -183,6 +205,19 @@ fn production_manifest_recomputes_identity_and_accounts_for_the_closed_artifact_
     assert!(!serialized.contains("trusted-signers"));
     assert!(!serialized.contains("host-build-input-closure-digest"));
     assert!(!serialized.contains("sandbox-observation-digest"));
+
+    let mut driver_drift = manifest.clone();
+    driver_drift
+        .build_enforcement_identity
+        .cargo_driver_environment
+        .insert("HOME".into(), "/ambient/home".into());
+    assert!(driver_drift.finalize_digests().is_err());
+    let mut invocation_drift = manifest.clone();
+    invocation_drift
+        .cargo_invocation
+        .environment
+        .remove("CARGO_HOME");
+    assert!(invocation_drift.finalize_digests().is_err());
 
     fs::write(artifact_dir.join("libagent.rlib"), b"tampered").unwrap();
     assert!(manifest.verify(&artifact_dir, false, None, None).is_err());

@@ -278,7 +278,7 @@ fn normalization_is_order_independent_and_schema_digest_is_frozen() {
         normalized
             .enforcement_identity_digest(&requirements(), &context())
             .unwrap(),
-        "b5e39569c2c3a4f11e4ffd1f88979ca4873ca1b680fca788f2fc0d938e693661"
+        "704633b7a186ca41deea2b916536bf9862ec1ce400a7157977ec394277a4a14c"
     );
 }
 
@@ -333,7 +333,22 @@ fn host_linker_bundle_is_closed_selected_and_path_free() {
         .enforcement_identity(&requirements, &context())
         .unwrap();
     let host_linker = identity.host_linker.unwrap();
-    assert_eq!(identity.backend_semantic_version, 4);
+    assert_eq!(identity.backend_semantic_version, 5);
+    assert_eq!(
+        identity
+            .cargo_driver_environment
+            .get("CARGO_HOME")
+            .map(String::as_str),
+        Some("/rust-agent/cargo-home")
+    );
+    assert_eq!(
+        identity
+            .cargo_driver_environment
+            .get("COMPILER_PATH")
+            .map(String::as_str),
+        Some("/rust-agent/tools")
+    );
+    assert!(!identity.cargo_driver_environment.contains_key("HOME"));
     assert_eq!(
         host_linker.cargo_config,
         "host.x86_64-unknown-linux-gnu.linker=\"/rust-agent/tools/target-linker\""

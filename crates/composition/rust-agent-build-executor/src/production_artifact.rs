@@ -26,6 +26,7 @@ use crate::{
         is_canonical_id, is_digest, sha256_hex, validate_relative_path, verify_sbom_files,
         write_cyclonedx_sbom_files,
     },
+    production_policy::cargo_driver_environment,
 };
 
 #[cfg(target_os = "linux")]
@@ -709,6 +710,25 @@ impl ProductionBuildManifest {
         }
         self.build_options.validate()?;
         self.cargo_invocation.validate()?;
+        let host_linker_selected = self.build_enforcement_identity.host_linker.is_some();
+        let expected_driver_environment = cargo_driver_environment(host_linker_selected, true);
+        let mut expected_invocation_environment = expected_driver_environment.clone();
+        for selected in &self.build_enforcement_identity.environment {
+            if expected_invocation_environment
+                .insert(selected.variable.clone(), selected.value.clone())
+                .is_some()
+            {
+                return invalid("selected environment collides with the Cargo driver environment");
+            }
+        }
+        if self.build_enforcement_identity.schema != 2
+            || self.build_enforcement_identity.backend_semantic_version != 5
+            || self.build_enforcement_identity.cargo_driver_environment
+                != expected_driver_environment
+            || self.cargo_invocation.environment != expected_invocation_environment
+        {
+            return invalid("Cargo driver or invocation environment is not exact");
+        }
         self.enforcement_result.validate()?;
         if self.sbom_file != "rust-agent-sbom.cdx.json"
             || !is_digest(&self.sbom_digest)

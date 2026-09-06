@@ -335,7 +335,7 @@ fn closure_digest_is_order_independent_and_stage_chain_is_exact() {
     assert_eq!(normalized.items(), reordered.items());
     assert_eq!(
         normalized.digest(),
-        "2689a1d3a63674d743a54f8876a5acea09fe06452d5d4ab756a02b82fabc7072"
+        "04a979c8f742fb981b0ce9a90cb92310f56cd68251dc1a9fbb253d5418d1a5e3"
     );
 
     let pre = normalized

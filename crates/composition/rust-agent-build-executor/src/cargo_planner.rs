@@ -11,6 +11,7 @@ use crate::{
     BuildArtifactSelector, BuildArtifactTarget, BuildPanicStrategy, CargoUnitGraphPlannerIdentity,
     HostBuildClosureItemRole, NormalizedHostBuildInputClosure, NormalizedProductionBuildPolicy,
     ProductionBuildPolicyError, fetch_runner::cargo_target_information_query,
+    production_policy::cargo_driver_environment,
 };
 
 mod normalization;
@@ -20,9 +21,7 @@ pub use normalization::{
     derive_cargo_planner_edge_semantics_from_metadata, normalize_cargo_unit_graph,
 };
 
-const LOGICAL_RUSTC: &str = "/rust-agent/toolchain/bin/rustc";
-const LOGICAL_CARGO_HOME: &str = "/rust-agent/cargo-home";
-const LOGICAL_TARGET_DIR: &str = "/rust-agent/target";
+#[cfg(test)]
 const CARGO_CHANNEL_OVERRIDE: &str = "__CARGO_TEST_CHANNEL_OVERRIDE_DO_NOT_USE_THIS";
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -304,22 +303,7 @@ impl CargoPlannerRequest {
             "-Z".into(),
             "unstable-options".into(),
         ]);
-        let mut environment = BTreeMap::from([
-            (CARGO_CHANNEL_OVERRIDE.into(), "nightly".into()),
-            ("CARGO_CACHE_RUSTC_INFO".into(), "0".into()),
-            ("CARGO_HOME".into(), LOGICAL_CARGO_HOME.into()),
-            ("CARGO_INCREMENTAL".into(), "0".into()),
-            ("CARGO_NET_OFFLINE".into(), "true".into()),
-            ("CARGO_TARGET_DIR".into(), LOGICAL_TARGET_DIR.into()),
-            ("LANG".into(), "C.UTF-8".into()),
-            ("LC_ALL".into(), "C.UTF-8".into()),
-            ("PATH".into(), "/rust-agent/toolchain/bin".into()),
-            ("RUSTC".into(), LOGICAL_RUSTC.into()),
-            ("SOURCE_DATE_EPOCH".into(), "0".into()),
-        ]);
-        if selected_host_linker.is_some() {
-            environment.insert("COMPILER_PATH".into(), "/rust-agent/tools".into());
-        }
+        let environment = cargo_driver_environment(selected_host_linker.is_some(), false);
         let working_directory = manifest_parent(&manifest_logical_path)?.into();
         let invocation = CargoPlannerInvocation {
             executable: PathBuf::from("/rust-agent/toolchain/bin/cargo"),
@@ -435,14 +419,13 @@ impl NormalizedCargoPlannerRequest {
             b"rust-agent-cargo-unit-graph-planner-request-v4\0",
             &projection,
         )?);
+        let host_linker_selected =
+            self.invocation.arguments.iter().any(|argument| {
+                argument.starts_with(&format!("host.{}.linker=", self.build_triple))
+            });
         if digest != self.digest
             || self.invocation.executable != Path::new("/rust-agent/toolchain/bin/cargo")
-            || self
-                .invocation
-                .environment
-                .get(CARGO_CHANNEL_OVERRIDE)
-                .map(String::as_str)
-                != Some("nightly")
+            || self.invocation.environment != cargo_driver_environment(host_linker_selected, false)
         {
             return Err(CargoPlannerError::RequestDigestMismatch);
         }
@@ -1451,8 +1434,12 @@ mod tests {
             Some("/rust-agent/tools")
         );
         assert_eq!(
+            final_request.invocation().environment,
+            cargo_driver_environment(true, false)
+        );
+        assert_eq!(
             final_request.digest(),
-            "66a8329397fbb4e7699a4b2d58137f8e2a216ebfd7d9e1eb234fbfb143a49cc3"
+            "3c136647cab7ae4e041d4106397a21e2e309fe27a53eb19c20cad8987bc4d447"
         );
 
         let standalone = CargoPlannerRequest {
@@ -1500,6 +1487,10 @@ mod tests {
                 .environment
                 .contains_key("COMPILER_PATH")
         );
+        assert_eq!(
+            unselected.invocation().environment,
+            cargo_driver_environment(false, false)
+        );
     }
 
     #[test]
@@ -1539,7 +1530,7 @@ mod tests {
         assert_eq!(verified.root_count(), 1);
         assert_eq!(
             verified.digest(),
-            "6d4c4eb79b2523ab93e257dd2c79fc77c962aeb10729dc0bd93e6bd1c79f6b8f"
+            "e41fe7f5d240fe9a6dc53b84243aee0bff0db8ca084c6db6bcfbc22a3c2d56c9"
         );
 
         assert!(matches!(
@@ -2168,6 +2159,30 @@ mod tests {
             request.verify_output(0, &encoded, b""),
             Err(CargoPlannerError::RequestDigestMismatch)
         ));
+
+        for mutate in [
+            |environment: &mut BTreeMap<String, String>| {
+                environment.remove("CARGO_HOME");
+            },
+            |environment: &mut BTreeMap<String, String>| {
+                environment.insert("CARGO_HOME".into(), "/ambient/cargo-home".into());
+            },
+            |environment: &mut BTreeMap<String, String>| {
+                environment.insert("HOME".into(), "/ambient/home".into());
+            },
+        ] {
+            let mut request = CargoPlannerRequest {
+                schema: 4,
+                root: CargoPlannerGraphRoot::FinalHost,
+            }
+            .normalize(&policy, &closure(&policy))
+            .unwrap();
+            mutate(&mut request.invocation.environment);
+            assert!(matches!(
+                request.verify_output(0, &encoded, b""),
+                Err(CargoPlannerError::RequestDigestMismatch)
+            ));
+        }
 
         let mut request = CargoPlannerRequest {
             schema: 4,

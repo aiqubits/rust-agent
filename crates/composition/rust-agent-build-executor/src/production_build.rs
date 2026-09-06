@@ -16,14 +16,13 @@ use crate::{
     ProductionCargoInvocationIdentity, ProductionInputFileRole, ProductionInputIdentityError,
     ProductionInputPreflightScope, VerifiedCargoFetchCache, VerifiedHostClosureSnapshot,
     VerifiedLinuxSandboxBackend, VerifiedProductionInputs,
-    snapshot_materializer::AnchoredFileIdentity,
+    production_policy::cargo_driver_environment, snapshot_materializer::AnchoredFileIdentity,
 };
 
 const LOGICAL_CARGO: &str = "/rust-agent/toolchain/bin/cargo";
 const LOGICAL_RUSTC: &str = "/rust-agent/toolchain/bin/rustc";
 const LOGICAL_TARGET: &str = "/rust-agent/target";
 const LOGICAL_TEMP: &str = "/rust-agent/tmp";
-const CHANNEL_OVERRIDE: &str = "__CARGO_TEST_CHANNEL_OVERRIDE_DO_NOT_USE_THIS";
 const BUILD_SYSROOT_FLAG: &str = "--sysroot=/rust-agent/toolchain";
 const HOST_LINKER_FEATURE_FLAG: &str = "-Clinker-features=-lld";
 const BUILD_TIMEOUT_MILLISECONDS: u64 = 20 * 60 * 1000;
@@ -268,18 +267,11 @@ pub fn execute_trusted_cargo_build(
 fn production_build_environment(
     planner_environment: &BTreeMap<String, String>,
 ) -> Result<BTreeMap<String, String>, TrustedCargoBuildError> {
-    let mut environment = planner_environment.clone();
-    if environment.get(CHANNEL_OVERRIDE).map(String::as_str) != Some("nightly")
-        || environment
-            .insert("CARGO_ENCODED_RUSTFLAGS".into(), BUILD_SYSROOT_FLAG.into())
-            .is_some()
-        || environment
-            .insert("TMPDIR".into(), LOGICAL_TEMP.into())
-            .is_some()
-    {
+    let host_linker_selected = planner_environment.contains_key("COMPILER_PATH");
+    if planner_environment != &cargo_driver_environment(host_linker_selected, false) {
         return Err(TrustedCargoBuildError::InputMismatch);
     }
-    Ok(environment)
+    Ok(cargo_driver_environment(host_linker_selected, true))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1136,8 +1128,8 @@ mod tests {
 
     #[test]
     fn cargo_build_retains_the_request_bound_channel_override() {
-        let planner_environment =
-            BTreeMap::from([(CHANNEL_OVERRIDE.to_owned(), "nightly".to_owned())]);
+        const CHANNEL_OVERRIDE: &str = "__CARGO_TEST_CHANNEL_OVERRIDE_DO_NOT_USE_THIS";
+        let planner_environment = cargo_driver_environment(true, false);
         let environment = production_build_environment(&planner_environment).unwrap();
 
         assert_eq!(
@@ -1154,14 +1146,22 @@ mod tests {
             environment.get("TMPDIR").map(String::as_str),
             Some(LOGICAL_TEMP)
         );
+        assert_eq!(environment, cargo_driver_environment(true, true));
 
+        let mut changed = planner_environment.clone();
+        changed.insert("CARGO_HOME".into(), "/ambient/cargo-home".into());
+        let mut missing = planner_environment.clone();
+        missing.remove("CARGO_TARGET_DIR");
+        let mut extra = planner_environment.clone();
+        extra.insert("HOME".into(), "/ambient/home".into());
+        let mut preexisting_build_value = planner_environment.clone();
+        preexisting_build_value.insert("CARGO_ENCODED_RUSTFLAGS".into(), "ambient".into());
         for invalid_environment in [
             BTreeMap::new(),
-            BTreeMap::from([(CHANNEL_OVERRIDE.to_owned(), "stable".to_owned())]),
-            BTreeMap::from([
-                (CHANNEL_OVERRIDE.to_owned(), "nightly".to_owned()),
-                ("CARGO_ENCODED_RUSTFLAGS".to_owned(), "ambient".to_owned()),
-            ]),
+            changed,
+            missing,
+            extra,
+            preexisting_build_value,
         ] {
             assert!(matches!(
                 production_build_environment(&invalid_environment),

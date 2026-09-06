@@ -423,6 +423,7 @@ fn main() {
     let enforcement = policy
         .enforcement_identity(&generated.manifest.build_requirements, &context)
         .unwrap();
+    let cargo_environment = enforcement.cargo_driver_environment.clone();
 
     let artifact_parent = temp.path().join("artifacts");
     fs::create_dir(&artifact_parent).unwrap();
@@ -473,7 +474,7 @@ fn main() {
             cargo_invocation: ProductionCargoInvocationIdentity {
                 schema: 1,
                 arguments: vec!["build".into(), "--locked".into(), "--offline".into()],
-                environment: BTreeMap::new(),
+                environment: cargo_environment,
                 working_directory: "/rust-agent/workspace".into(),
             },
             entry_artifact: artifact.path.clone(),

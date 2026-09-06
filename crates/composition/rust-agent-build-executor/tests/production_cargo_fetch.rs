@@ -401,7 +401,8 @@ fn main() {
     assert!(!shared_helper::TARGET_FEATURE);
     assert_eq!(fs::read("/rust-agent/inputs/fixture-sdk/input.txt").unwrap(), b"declared-sdk\n");
     assert_eq!(std::env::var("PHASE_1B_FIXTURE_CHANNEL").unwrap(), "attested");
-    for variable in ["HOME", "CARGO_HOME", "HTTP_PROXY", "HTTPS_PROXY", "AWS_SECRET_ACCESS_KEY"] {
+    assert_eq!(std::env::var("CARGO_HOME").unwrap(), "/rust-agent/cargo-home");
+    for variable in ["HOME", "HTTP_PROXY", "HTTPS_PROXY", "AWS_SECRET_ACCESS_KEY"] {
         assert!(std::env::var_os(variable).is_none(), "ambient {variable} leaked");
     }
     assert!(fs::read("/etc/passwd").is_err());
@@ -423,7 +424,7 @@ fn main() {
 }
 "#
         } else {
-            "fn main() { assert!(shared_helper::HOST_FEATURE); assert!(!shared_helper::TARGET_FEATURE); assert_eq!(std::env::var(\"COMPILER_PATH\").unwrap(), \"/rust-agent/tools\"); println!(\"cargo:rustc-check-cfg=cfg(rust_agent_build_script)\"); println!(\"cargo:rustc-cfg=rust_agent_build_script\"); }\n"
+            "fn main() { assert!(shared_helper::HOST_FEATURE); assert!(!shared_helper::TARGET_FEATURE); assert_eq!(std::env::var(\"CARGO_HOME\").unwrap(), \"/rust-agent/cargo-home\"); assert!(std::env::var_os(\"HOME\").is_none()); assert_eq!(std::env::var(\"COMPILER_PATH\").unwrap(), \"/rust-agent/tools\"); println!(\"cargo:rustc-check-cfg=cfg(rust_agent_build_script)\"); println!(\"cargo:rustc-cfg=rust_agent_build_script\"); }\n"
         };
         fs::write(generated_package.join("build.rs"), build_script).unwrap();
         let generated_source = if mode == FetchFixtureMode::WasmPipeline {
@@ -2705,6 +2706,7 @@ fn create_fixture_composition_build(
     let enforcement = policy
         .enforcement_identity(&BuildRequirements::default(), &context)
         .unwrap();
+    let cargo_environment = enforcement.cargo_driver_environment.clone();
     let graph_digest = closure.standalone_unit_graph().digest().to_owned();
     let cargo_messages_digest = "d1".repeat(32);
     let manifest = write_production_build_manifest(
@@ -2741,7 +2743,7 @@ fn create_fixture_composition_build(
             cargo_invocation: ProductionCargoInvocationIdentity {
                 schema: 1,
                 arguments: vec!["build".into(), "--locked".into(), "--offline".into()],
-                environment: BTreeMap::new(),
+                environment: cargo_environment,
                 working_directory: "/rust-agent/closure/trees/generated-agent".into(),
             },
             entry_artifact: artifact.path.clone(),
