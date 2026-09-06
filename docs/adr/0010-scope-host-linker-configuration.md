@@ -48,9 +48,12 @@ host-config
 These arguments precede the planner-only `--unit-graph -Z unstable-options`
 suffix. The build derives its invocation by replacing only that suffix with the
 existing build-only arguments, so planning and execution share the exact Host
-configuration. No checked-in, ancestor or ambient Cargo configuration may
-provide or override these settings. `COMPILER_PATH` remains the fixed
-`/rust-agent/tools` value when the bundle is selected.
+configuration. Because the pinned stable Cargo still gates that Host
+configuration behind its channel checks, the build retains the exact
+request-bound `__CARGO_TEST_CHANNEL_OVERRIDE_DO_NOT_USE_THIS=nightly` value; it
+may not inherit, remove or replace that value. No checked-in, ancestor or ambient
+Cargo configuration may provide or override these settings. `COMPILER_PATH`
+remains the fixed `/rust-agent/tools` value when the bundle is selected.
 
 The build-owned `CARGO_ENCODED_RUSTFLAGS` remains exactly
 `--sysroot=/rust-agent/toolchain` for composition Target units and never carries
@@ -92,6 +95,7 @@ supervised rustc observations bind the remaining Host configuration arguments.
 
 - `cargo_planner::tests::schema_four_binds_host_only_linker_configuration`
 - `cargo_planner::tests::schema_three_is_rejected_after_host_config_scoping`
+- `production_build::tests::cargo_build_retains_the_request_bound_channel_override`
 - `production_build::tests::host_and_target_rustc_flags_are_scope_exact`
 - `production_build::tests::rustc_observation_rejects_cross_kind_linker_flags`
 - `production_policy::host_linker_bundle_is_closed_selected_and_path_free`

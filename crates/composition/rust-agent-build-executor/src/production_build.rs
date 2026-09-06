@@ -152,17 +152,7 @@ pub fn execute_trusted_cargo_build(
         host_closure.build_requirements(),
         host_closure.build_context(),
     )?;
-    let mut environment = request.invocation().environment.clone();
-    environment.remove(CHANNEL_OVERRIDE);
-    if environment
-        .insert("CARGO_ENCODED_RUSTFLAGS".into(), BUILD_SYSROOT_FLAG.into())
-        .is_some()
-        || environment
-            .insert("TMPDIR".into(), LOGICAL_TEMP.into())
-            .is_some()
-    {
-        return Err(TrustedCargoBuildError::InputMismatch);
-    }
+    let mut environment = production_build_environment(&request.invocation().environment)?;
     for selected in &enforcement.environment {
         if environment
             .insert(selected.variable.clone(), selected.value.clone())
@@ -273,6 +263,23 @@ pub fn execute_trusted_cargo_build(
         artifact_files,
         cargo_invocation,
     })
+}
+
+fn production_build_environment(
+    planner_environment: &BTreeMap<String, String>,
+) -> Result<BTreeMap<String, String>, TrustedCargoBuildError> {
+    let mut environment = planner_environment.clone();
+    if environment.get(CHANNEL_OVERRIDE).map(String::as_str) != Some("nightly")
+        || environment
+            .insert("CARGO_ENCODED_RUSTFLAGS".into(), BUILD_SYSROOT_FLAG.into())
+            .is_some()
+        || environment
+            .insert("TMPDIR".into(), LOGICAL_TEMP.into())
+            .is_some()
+    {
+        return Err(TrustedCargoBuildError::InputMismatch);
+    }
+    Ok(environment)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1126,6 +1133,42 @@ mod tests {
         CargoUnit, CargoUnitEdge, CargoUnitGraphPlannerIdentity, CargoUnitSelector,
         HostCargoUnitGraph,
     };
+
+    #[test]
+    fn cargo_build_retains_the_request_bound_channel_override() {
+        let planner_environment =
+            BTreeMap::from([(CHANNEL_OVERRIDE.to_owned(), "nightly".to_owned())]);
+        let environment = production_build_environment(&planner_environment).unwrap();
+
+        assert_eq!(
+            environment.get(CHANNEL_OVERRIDE).map(String::as_str),
+            Some("nightly")
+        );
+        assert_eq!(
+            environment
+                .get("CARGO_ENCODED_RUSTFLAGS")
+                .map(String::as_str),
+            Some(BUILD_SYSROOT_FLAG)
+        );
+        assert_eq!(
+            environment.get("TMPDIR").map(String::as_str),
+            Some(LOGICAL_TEMP)
+        );
+
+        for invalid_environment in [
+            BTreeMap::new(),
+            BTreeMap::from([(CHANNEL_OVERRIDE.to_owned(), "stable".to_owned())]),
+            BTreeMap::from([
+                (CHANNEL_OVERRIDE.to_owned(), "nightly".to_owned()),
+                ("CARGO_ENCODED_RUSTFLAGS".to_owned(), "ambient".to_owned()),
+            ]),
+        ] {
+            assert!(matches!(
+                production_build_environment(&invalid_environment),
+                Err(TrustedCargoBuildError::InputMismatch)
+            ));
+        }
+    }
 
     #[test]
     fn host_and_target_rustc_flags_are_scope_exact() {
