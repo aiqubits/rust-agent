@@ -63,6 +63,8 @@ use walkdir::WalkDir;
 const TEST_CREDENTIAL: &str = "phase-1b-fixture-token";
 const LOGICAL_HOST_LINKER: &str = "/rust-agent/tools/host-linker";
 const LOGICAL_COMPILER_PATH: &str = "/rust-agent/tools";
+const MAX_LINKER_SCRIPT_BYTES: u64 = 64 * 1024;
+const MAX_LINKER_SCRIPT_FILES: usize = 64;
 
 struct FixtureSigning {
     key: SigningKey,
@@ -234,6 +236,19 @@ fn host_linker_support_files_follow_logical_install_and_compiler_paths() {
             link: "/rust-agent/tools/liblto_plugin.so".into(),
         })
     );
+    let libm_script = compiler_program_file(&linker, "libm.so");
+    let libm_dependencies = linker_script_dependencies(&libm_script);
+    assert!(!libm_dependencies.is_empty());
+    for dependency in libm_dependencies {
+        assert!(
+            output
+                .path()
+                .join(dependency.strip_prefix(Path::new("/")).unwrap())
+                .is_file(),
+            "linker-script dependency was not projected at {}",
+            dependency.display()
+        );
+    }
 }
 
 #[test]
@@ -3061,7 +3076,64 @@ fn copy_compiler_support_files(host_linker: &Path, output: &Path) {
             fs::create_dir_all(destination.parent().unwrap()).unwrap();
             fs::copy(&source, destination).unwrap();
         }
+        copy_linker_script_dependencies(printed, output);
     }
+}
+
+fn copy_linker_script_dependencies(root: &Path, output: &Path) {
+    let mut pending = BTreeSet::from([normalize_absolute_path(root)]);
+    let mut visited = BTreeSet::new();
+    while let Some(path) = pending.pop_first() {
+        assert!(
+            visited.len() < MAX_LINKER_SCRIPT_FILES,
+            "compiler linker-script dependency closure is too large"
+        );
+        if !visited.insert(path.clone()) {
+            continue;
+        }
+        for dependency in linker_script_dependencies(&path) {
+            let source = dependency.canonicalize().unwrap();
+            let destination = output.join(dependency.strip_prefix(Path::new("/")).unwrap());
+            fs::create_dir_all(destination.parent().unwrap()).unwrap();
+            fs::copy(source, destination).unwrap();
+            pending.insert(dependency);
+        }
+    }
+}
+
+fn linker_script_dependencies(path: &Path) -> BTreeSet<PathBuf> {
+    let metadata = fs::metadata(path).unwrap();
+    if metadata.len() > MAX_LINKER_SCRIPT_BYTES {
+        return BTreeSet::new();
+    }
+    let bytes = fs::read(path).unwrap();
+    let Ok(script) = std::str::from_utf8(&bytes) else {
+        return BTreeSet::new();
+    };
+    if !script.contains("GROUP") && !script.contains("INPUT") {
+        return BTreeSet::new();
+    }
+    script
+        .split(|character: char| {
+            character.is_ascii_whitespace() || matches!(character, '(' | ')' | ',' | ';')
+        })
+        .filter(|token| {
+            token.starts_with('/')
+                && token
+                    .as_bytes()
+                    .get(1)
+                    .is_some_and(u8::is_ascii_alphanumeric)
+        })
+        .map(PathBuf::from)
+        .map(|dependency| {
+            assert!(
+                dependency.is_file(),
+                "linker script references missing absolute dependency {}",
+                dependency.display()
+            );
+            normalize_absolute_path(&dependency)
+        })
+        .collect()
 }
 
 fn compiler_install_directory(compiler: &Path, arg0: Option<&str>) -> PathBuf {

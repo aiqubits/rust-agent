@@ -60,10 +60,13 @@ root using the exact sandbox-logical linker `argv[0]`; this includes the LTO
 plugin searched under the fixed `COMPILER_PATH`. The same digest-bound plugin is
 also projected at `/rust-agent/tools/liblto_plugin.so`, so GCC versions that
 resolve `-fuse-linker-plugin` directly through `COMPILER_PATH` do not fall back
-to the Host. Copying only the original Host install path is insufficient.
-Target-compiled units retain the explicit `/rust-agent/toolchain` sysroot. All
-copied files participate in the runtime-tree digest; undeclared Host files
-remain invisible.
+to the Host. GNU linker scripts are read with fixed byte/file-count bounds and
+their absolute `GROUP`/`INPUT` dependencies are copied at those exact logical
+paths; a missing referenced file fails fixture construction instead of relying
+on merged `/usr` Host layout. Copying only the original Host install path is
+insufficient. Target-compiled units retain the explicit `/rust-agent/toolchain`
+sysroot. All copied files participate in the runtime-tree digest; undeclared
+Host files remain invisible.
 
 ## Consequences
 
