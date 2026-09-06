@@ -789,8 +789,18 @@ fn package_id_matches(package_id: &str, package: &crate::CargoPackageIdentity) -
     let Some((source, fragment)) = package_id.rsplit_once('#') else {
         return false;
     };
-    let Some((name, version)) = fragment.rsplit_once('@') else {
-        return false;
+    let (name, version) = if let Some((name, version)) = fragment.rsplit_once('@') {
+        (name, version)
+    } else {
+        let source_without_query = source.split_once('?').map_or(source, |(url, _)| url);
+        let Some(name) = source_without_query
+            .trim_end_matches('/')
+            .rsplit('/')
+            .next()
+        else {
+            return false;
+        };
+        (name, fragment)
     };
     if name != package.name || version != package.version {
         return false;
@@ -1348,7 +1358,7 @@ mod tests {
         let graph = graph(false);
         let artifact = json!({
             "reason": "compiler-artifact",
-            "package_id": "path+file:///rust-agent/closure/fixture#fixture@1.0.0",
+            "package_id": "path+file:///rust-agent/closure/fixture#1.0.0",
             "manifest_path": "/rust-agent/closure/fixture/Cargo.toml",
             "target": {
                 "kind": ["lib"],
@@ -1377,6 +1387,18 @@ mod tests {
             json!({"reason":"build-finished","success":true}),
         ]);
         verify_cargo_messages(&valid, &graph, &[]).unwrap();
+        let mut explicit_name = artifact.clone();
+        explicit_name["package_id"] =
+            json!("path+file:///rust-agent/closure/fixture#fixture@1.0.0");
+        verify_cargo_messages(
+            &messages(&[
+                explicit_name,
+                json!({"reason":"build-finished","success":true}),
+            ]),
+            &graph,
+            &[],
+        )
+        .unwrap();
 
         for (field, value) in [
             ("manifest_path", "/rust-agent/workspace/fixture/Cargo.toml"),
@@ -1385,6 +1407,10 @@ mod tests {
             (
                 "package_id",
                 "path+file:///rust-agent/closure/other#fixture@1.0.0",
+            ),
+            (
+                "package_id",
+                "path+file:///rust-agent/closure/fixture#2.0.0",
             ),
         ] {
             let mut invalid = artifact.clone();

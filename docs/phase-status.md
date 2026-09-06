@@ -300,13 +300,14 @@ preprovisioned and authenticated network fetch, the immutable Cargo planner, cro
 scripts/proc macros, exact observed graphs, standalone output, sandboxed pinned wasm-bindgen, and
 Host integration pre/build/post. Completion requires an externally signed one-use handle; its
 append-only attestation is durably published before an opaque permit can atomically expose the
-`deployable=true` artifact, and production inspection rechecks both. GitHub run `34027847808`
+`deployable=true` artifact, and production inspection rechecks both. GitHub run `34030238776`
 passed Quality, the real Landlock ABI 2 gate, the namespace/descendant escape matrix, every fetch
-fixture and the immutable trusted planner. Its remaining build failures exposed a stale Cargo
-message verifier that still required the removed `/rust-agent/workspace` root even though the
-backend mounts path sources at `/rust-agent/closure` and verified registry/git sources below
-`/rust-agent/cargo-home`; the WASM failure's actionable stderr was additionally hidden behind an
-unbounded JSON stdout diagnostic. The source-identity-bound verifier and bounded diagnostic tails
-now have focused positive, negative, boundary and failure-path coverage; the complete pinned local
-baseline passes. A fresh successful Ubuntu 24.04 Phase 1B run remains. The local host's Landlock ABI
-1 still cannot supply the required `Refer` enforcement.
+fixture and the immutable trusted planner. Its bounded diagnostics then exposed two remaining
+compatibility boundaries: Cargo 1.97.1 uses the already-planned `#<version>` package-id form when a
+path package name equals its source-directory basename, and the WASM target link attempts to execute
+the pinned sysroot's `rust-lld`, which the closed executable policy correctly rejects until the
+explicit target-linker contract required by ADR 0009 exists. The message verifier now accepts both
+canonical Cargo 1.97.1 path package-id forms while retaining exact source-root matching. Accepted
+ADR 0012 now defines the target-exact, separately descriptor-mounted/probed linker identity without
+making the sysroot executable; its implementation and a fresh successful Ubuntu 24.04 Phase 1B run
+remain. The local host's Landlock ABI 1 still cannot supply the required `Refer` enforcement.

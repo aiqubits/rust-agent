@@ -7144,7 +7144,7 @@ Canonical interaction tests必须证明后续model-visible answer只能来自con
 - build script 及 descendant 的 network 连接失败；
 - 未 allowlist executable、wrapper、dynamic-loader escape 失败；
 - ambient flags、proxy、credential 和非 allowlisted environment 不可见；
-- declared toolchain/SDK/linker/code generator 可正常构建 fixture；
+- declared toolchain/SDK/linker/code generator 可正常构建 fixture；Target linker必须是target-exact、独立descriptor-mounted/probed的可执行文件角色，不能把完整Rust sysroot变成可执行来源，observer必须使其执行次数与产生链接输出的Target rustc unit完全一致；
 - environment requirement 只按 kebab-case role id 命中 exact `[[environment]] id → variable → value`；unknown/duplicate id、duplicate/invalid variable、reserved baseline/secret/proxy variable、ambient value substitution 全部在 build.rs 前拒绝，未 selected policy entry 不可见且 PATH/LANG/LC_ALL/SOURCE_DATE_EPOCH 始终使用 schema baseline；
 - path-package fixture 的 build.rs 读取 mode/mtime/uid/inode 等 metadata 时只能观察 canonical snapshot view；pre 后修改 live source 的 chmod/mtime 不能改变 mounted closure 或 build behavior，修改 closure snapshot 的任一 bytes/metadata 则必须在 Cargo 前或产物接受前因 tree digest/view mismatch 失败；
 - `BuildEnforcementIdentity` 中任一 logical input/content/version/environment/enforcement semantic 变化，或 normalized enforcement-result identity projection 变化都会改变 build-output digest；仅把相同 tool/input 移到另一 canonical Host path，或改变完整 policy 的 allowed executor/reviewer/signer/signing-helper trust mapping、enforcement evidence digest、signature、nonce、timestamp 或 transparency proof，不改变 build-output identity，但 full policy/attestation/envelope 必须按本次配置重新验证并作为新的 append-only attestation 保存，不能改写/碰撞原 artifact directory、build manifest 或 SBOM；
@@ -7376,6 +7376,7 @@ Phase 1B 在 Phase 1A 接口稳定后开始，可以与 Phase 2/3 runtime spine 
 - toolchain/SDK/read-input/executable identity；
 - target-fact/custom-spec preflight reproduction与 canonical Cargo config enforcement；
 - schema-selected Host linker execution关闭 implicit self-contained LLD并只执行 digest-bound helper；
+- schema-selected Target linker按exact target独立于non-executable sysroot完成descriptor identity、probe、Cargo config与实际link-unit observation；
 - pinned wasm-bindgen executable、sandboxed post-link output collection与 bundle attestation；
 - outer signer/enforcement attestation protocol；
 - `build-host`、production `verify-integration --phase pre/post`；
@@ -7895,7 +7896,10 @@ I38  every production build is executed under a versioned BuildExecutionPolicy;
      an atomic, digest-bound executable/helper closure with schema-owned Cargo Host
      config, compiler path and exact Host-only rustc flag disabling implicit
      self-contained LLD, while Target rustflags carry only the explicit target sysroot;
-     the observed compilation-kind flag counts and helper executions must match that selection and the
+     a required Target linker is selected by exact target, descriptor-mounted and probed as one
+     executable independently from the non-executable Rust sysroot, and is referenced only by
+     schema-owned Target Cargo config; the observed compilation-kind flag counts, Host helpers
+     and link-producing Target-unit linker executions must match those selections, and the
      backend semantic version must change when these execution semantics change; the
      full normalized policy and enforcement evidence remain signed attestation inputs,
      while only their path-free enforcement/result semantic projections participate in
@@ -8071,7 +8075,8 @@ I66  build-output identity hashes the path-free BuildEnforcementIdentity, semant
      enforcement-result projection and canonical build-manifest digest; the signed
      attestation binds composition/output/manifest identities. Full runner mappings and
      trust remain evidence, so path/trust rotation does not rename identical output, while
-     changed logical input, selected Host linker closure, enforcement semantics or
+     changed logical input, selected Host linker closure, target-exact Target linker,
+     enforcement semantics or
      manifest security fields always does.
 
 I67  SessionObserver delivery uses one owner-scoped dispatcher with bounded batch/byte
@@ -8200,7 +8205,7 @@ I81  native TLS belongs to NetworkConnector. A one-use handshake grant authorize
 - `host-cli` 只匹配 Linux/macOS/Windows desktop target，第一版仅 Linux tier为 Production；iOS/Android/其它 native target的 bin composition在 Cargo前返回 Host boundary `UnsupportedTarget`，移动端只能使用经过产品验证的 library Host集成。
 - library composition 通过 emitted source、唯一 Host alias、pre/post integration receipt 和 product executor attestation 进入独立 Host Cargo graph；不同的现有 emitted tree 只允许 offline `--replace`，online rollout 使用新 versioned directory，不宣称跨平台原子替换非空目录。
 - library Host pre/build/post分别固定 standalone/final/observed schema-2 `HostCargoUnitGraph`；cross-compile的 build-host build-script/proc-macro unit、Host编译但分别服务于build-host/composition-target context的build-script execution和 composition-target artifact unit按各自 target facts与 exact feature set审计，package级 `cargo metadata --filter-platform`不能替代 unit证据。
-- production build 的完整 policy、sandbox backend、concrete input/executable/environment-role runner mapping 与 attestation 可复验，path-free `BuildEnforcementIdentity` 与 canonical `build-manifest-digest` 可独立重算并进入 build-output identity；attestation 同时绑定 composition/output/manifest digest，development artifact 不可发布。
+- production build 的完整 policy、sandbox backend、concrete input/executable/environment-role runner mapping 与 attestation 可复验；Host linker closure与target-exact Target linker是分离的path-free identity，后者只能通过独立descriptor mount和schema-owned Cargo target config执行，完整sysroot保持non-executable；`BuildEnforcementIdentity` 与 canonical `build-manifest-digest` 可独立重算并进入 build-output identity；attestation 同时绑定 composition/output/manifest digest，development artifact 不可发布。
 - Phase 1A development runner 与 Phase 1B Linux production runner 的 artifact/attestation 明确分轨；没有通过 escape suite 的 Host 不能生成 `deployable=true`。
 - same normalized input（含 target facts/custom spec与 Cargo resolution record）→ same composition hash；相同 triple但不同 target facts/spec不能共享 identity，production rustc必须复现 exact digest。
 - `environment` 仅参与 composition resolver；generated Cargo target dependency 不含自定义 environment cfg，environment-specific implementation 由独立 Component package 表达。

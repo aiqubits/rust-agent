@@ -17,3 +17,4 @@ acceptance tests in the same change.
 - [ADR 0009: Disable implicit Host LLD substitution](0009-disable-implicit-host-lld.md)
 - [ADR 0010: Scope linker configuration to Host Cargo units](0010-scope-host-linker-configuration.md)
 - [ADR 0011: Bind Cargo's inherited driver environment](0011-bind-cargo-driver-environment.md)
+- [ADR 0012: Bind target-linker execution independently from the Rust sysroot](0012-bind-target-linker-execution.md)
