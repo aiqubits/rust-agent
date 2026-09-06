@@ -17,7 +17,6 @@ use crate::{
 const LOGICAL_CARGO: &str = "/rust-agent/toolchain/bin/cargo";
 const LOGICAL_RUSTC: &str = "/rust-agent/toolchain/bin/rustc";
 const LOGICAL_TARGET_DIR: &str = "/rust-agent/target";
-const BUILD_SYSROOT_FLAG: &str = "--sysroot=/rust-agent/toolchain";
 const PLANNER_TIMEOUT_MILLISECONDS: u64 = 2 * 60 * 1000;
 const CHANNEL_OVERRIDE: &str = "__CARGO_TEST_CHANNEL_OVERRIDE_DO_NOT_USE_THIS";
 const HOST_LINKER_FEATURE_FLAG: &str = "-Clinker-features=-lld";
@@ -37,8 +36,8 @@ pub enum TrustedCargoPlannerError {
     InputMismatch,
     #[error("trusted Cargo planner command failed with exit code {exit_code}: {diagnostic}")]
     SandboxFailed { exit_code: i32, diagnostic: String },
-    #[error("trusted Cargo planner executed a command outside its exact allowlist")]
-    InvalidExecutionTrace,
+    #[error("trusted Cargo planner executed a command outside its exact allowlist: {diagnostic}")]
+    InvalidExecutionTrace { diagnostic: String },
     #[error("trusted Cargo planner output root was modified")]
     OutputMutation,
     #[error("trusted Cargo planner sandbox failed: {0}")]
@@ -295,30 +294,47 @@ fn validate_execution_trace(
         .chain(arguments.iter().cloned())
         .collect::<Vec<_>>();
     let [root, descendants @ ..] = observation.executed_commands.as_slice() else {
-        return Err(TrustedCargoPlannerError::InvalidExecutionTrace);
+        return Err(TrustedCargoPlannerError::InvalidExecutionTrace {
+            diagnostic: "execution trace did not contain a Cargo root command".into(),
+        });
     };
-    if root.executable != LOGICAL_CARGO
-        || root.executable_sha256 != cargo_digest
-        || root.arguments != expected_root_arguments
-        || root.working_directory != request.invocation().working_directory
-        || descendants
-            .iter()
-            .any(|execution| !valid_rustc_query(request, execution, rustc_digest))
-    {
-        return Err(TrustedCargoPlannerError::InvalidExecutionTrace);
+    let host_linker_selected = cargo_invokes_host_linker(arguments, request.build_triple());
+    let root_is_valid = root.executable == LOGICAL_CARGO
+        && root.executable_sha256 == cargo_digest
+        && root.arguments == expected_root_arguments
+        && root.working_directory == request.invocation().working_directory;
+    let invalid_descendants = descendants
+        .iter()
+        .filter(|execution| {
+            !valid_rustc_query(request, execution, rustc_digest, host_linker_selected)
+        })
+        .collect::<Vec<_>>();
+    if !root_is_valid || !invalid_descendants.is_empty() {
+        return Err(TrustedCargoPlannerError::InvalidExecutionTrace {
+            diagnostic: format!(
+                "root-valid={root_is_valid} host-linker-selected={host_linker_selected} invalid-descendants={invalid_descendants:?}"
+            ),
+        });
     }
     Ok(())
+}
+
+fn cargo_invokes_host_linker(arguments: &[String], build_triple: &str) -> bool {
+    let expected = format!("host.{build_triple}.rustflags=[\"{HOST_LINKER_FEATURE_FLAG}\"]");
+    arguments
+        .windows(2)
+        .any(|value| value[0] == "--config" && value[1].as_str() == expected)
 }
 
 fn valid_rustc_query(
     request: &NormalizedCargoPlannerRequest,
     execution: &SeccompExecutedCommand,
     rustc_digest: &str,
+    host_linker_selected: bool,
 ) -> bool {
     let Some(arguments) = execution.arguments.strip_prefix(&[LOGICAL_RUSTC.into()]) else {
         return false;
     };
-    let host_linker_selected = request_invokes_host_linker(request);
     execution.executable == LOGICAL_RUSTC
         && execution.executable_sha256 == rustc_digest
         && execution.working_directory == request.invocation().working_directory
@@ -346,9 +362,7 @@ fn normalize_configured_rustc_query(
     }
     let is_target = option_value(arguments, "--target").is_some();
     validate_rustc_query(arguments, is_target, host_linker_selected).ok()?;
-    let expected_flag = if is_target {
-        Some(BUILD_SYSROOT_FLAG)
-    } else if host_linker_selected {
+    let expected_flag = if !is_target && host_linker_selected {
         Some(HOST_LINKER_FEATURE_FLAG)
     } else {
         None
@@ -382,14 +396,9 @@ fn validate_rustc_query(
     is_target: bool,
     host_linker_selected: bool,
 ) -> Result<(), TrustedCargoPlannerError> {
-    let sysroot_count = arguments
+    let contains_sysroot = arguments
         .iter()
-        .filter(|argument| argument.as_str() == BUILD_SYSROOT_FLAG)
-        .count();
-    let alternate_sysroot = arguments.windows(2).any(|pair| pair[0] == "--sysroot")
-        || arguments.iter().any(|argument| {
-            argument.starts_with("--sysroot=") && argument.as_str() != BUILD_SYSROOT_FLAG
-        });
+        .any(|argument| argument.starts_with("--sysroot"));
     let host_linker_feature_count = arguments
         .iter()
         .filter(|argument| argument.as_str() == HOST_LINKER_FEATURE_FLAG)
@@ -400,29 +409,16 @@ fn validate_rustc_query(
         .windows(2)
         .any(|pair| pair[0] == "-C" && pair[1].starts_with("linker-features"));
     let expected_host_linker_feature_count = usize::from(!is_target && host_linker_selected);
-    let expected_sysroot_count = usize::from(is_target);
-    if alternate_sysroot
+    if contains_sysroot
         || alternate_linker_feature
-        || sysroot_count != expected_sysroot_count
         || host_linker_feature_count != expected_host_linker_feature_count
     {
-        Err(TrustedCargoPlannerError::InvalidExecutionTrace)
+        Err(TrustedCargoPlannerError::InvalidExecutionTrace {
+            diagnostic: "rustc query did not contain its exact scoped flags".into(),
+        })
     } else {
         Ok(())
     }
-}
-
-fn request_invokes_host_linker(request: &NormalizedCargoPlannerRequest) -> bool {
-    let expected = format!(
-        "host.{}.rustflags=[\"{}\"]",
-        request.build_triple(),
-        HOST_LINKER_FEATURE_FLAG
-    );
-    request
-        .invocation()
-        .arguments
-        .windows(2)
-        .any(|value| value[0] == "--config" && value[1].as_str() == expected)
 }
 
 fn option_value<'a>(arguments: &'a [String], name: &str) -> Option<&'a str> {
@@ -450,6 +446,37 @@ mod tests {
     use super::*;
 
     const TARGET: &str = "aarch64-unknown-linux-gnu";
+    const BUILD_SYSROOT_FLAG: &str = "--sysroot=/rust-agent/toolchain";
+
+    #[test]
+    fn host_linker_scope_is_bound_to_the_current_cargo_invocation() {
+        let exact_host_configuration =
+            format!("host.x86_64-unknown-linux-gnu.rustflags=[\"{HOST_LINKER_FEATURE_FLAG}\"]");
+        let unit_graph_arguments = vec![
+            "build".into(),
+            "--config".into(),
+            exact_host_configuration.clone(),
+            "--unit-graph".into(),
+        ];
+        let metadata_arguments = vec!["metadata".into(), "--format-version".into(), "1".into()];
+
+        assert!(cargo_invokes_host_linker(
+            &unit_graph_arguments,
+            "x86_64-unknown-linux-gnu"
+        ));
+        assert!(!cargo_invokes_host_linker(
+            &metadata_arguments,
+            "x86_64-unknown-linux-gnu"
+        ));
+        assert!(!cargo_invokes_host_linker(&unit_graph_arguments, TARGET));
+        assert!(!cargo_invokes_host_linker(
+            &[
+                "--config".into(),
+                exact_host_configuration.replace("-lld", "+lld")
+            ],
+            "x86_64-unknown-linux-gnu"
+        ));
+    }
 
     #[test]
     fn configured_rustc_queries_are_normalized_with_scope_exact_flags() {
@@ -475,6 +502,14 @@ mod tests {
         );
 
         let target_query = cargo_target_information_query(Some(TARGET));
+        assert_eq!(
+            normalize_configured_rustc_query(&target_query, false),
+            Some(target_query.clone())
+        );
+        assert_eq!(
+            normalize_configured_rustc_query(&target_query, true),
+            Some(target_query.clone())
+        );
         let mut configured_target_query = target_query.clone();
         let target_flag_index = configured_target_query
             .iter()
@@ -483,7 +518,7 @@ mod tests {
         configured_target_query.insert(target_flag_index, BUILD_SYSROOT_FLAG.into());
         assert_eq!(
             normalize_configured_rustc_query(&configured_target_query, true),
-            Some(target_query)
+            None
         );
     }
 
@@ -500,7 +535,6 @@ mod tests {
             ),
             with_flags(&host_query, &["-Clinker-features=+lld"]),
             with_flags(&host_query, &["-C", "linker-features=-lld"]),
-            target_query.clone(),
             with_flags(
                 &target_query,
                 &[HOST_LINKER_FEATURE_FLAG, BUILD_SYSROOT_FLAG],
