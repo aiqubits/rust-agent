@@ -1293,6 +1293,33 @@ fn unit_observation_diagnostic(
     )
 }
 
+fn unit_observation_stage_error(
+    stage: impl std::fmt::Display,
+    observation: &LinuxSandboxExecutionObservation,
+    planned: &NormalizedHostCargoUnitGraph,
+) -> TrustedCargoBuildError {
+    TrustedCargoBuildError::UnitObservationOutput {
+        diagnostic: format!(
+            "stage={stage} {}",
+            unit_observation_diagnostic(observation, planned)
+        ),
+    }
+}
+
+fn add_unit_observation_stage(
+    error: TrustedCargoBuildError,
+    stage: impl std::fmt::Display,
+    observation: &LinuxSandboxExecutionObservation,
+    planned: &NormalizedHostCargoUnitGraph,
+) -> TrustedCargoBuildError {
+    match error {
+        TrustedCargoBuildError::UnitObservationMismatch => {
+            unit_observation_stage_error(stage, observation, planned)
+        }
+        other => other,
+    }
+}
+
 fn logical_target_path(path: &str) -> bool {
     path.starts_with(&format!("{LOGICAL_TARGET}/"))
         && !path.contains("/../")
@@ -1312,7 +1339,11 @@ fn observe_units(
     let cargo_digest = input_digest(inputs, ProductionInputFileRole::Cargo)?;
     let rustc_digest = input_digest(inputs, ProductionInputFileRole::Rustc)?;
     let [root, descendants @ ..] = observation.executed_commands.as_slice() else {
-        return Err(TrustedCargoBuildError::UnitObservationMismatch);
+        return Err(unit_observation_stage_error(
+            "root-missing",
+            observation,
+            planned,
+        ));
     };
     let expected_root_arguments = std::iter::once(LOGICAL_CARGO.into())
         .chain(root_arguments.iter().cloned())
@@ -1322,7 +1353,11 @@ fn observe_units(
         || root.arguments != expected_root_arguments
         || root.working_directory != request.invocation().working_directory
     {
-        return Err(TrustedCargoBuildError::UnitObservationMismatch);
+        return Err(unit_observation_stage_error(
+            "root-identity",
+            observation,
+            planned,
+        ));
     }
 
     let mut observed_compile_units = BTreeSet::new();
@@ -1334,16 +1369,25 @@ fn observe_units(
             let arguments = execution
                 .arguments
                 .strip_prefix(&[LOGICAL_RUSTC.into()])
-                .ok_or(TrustedCargoBuildError::UnitObservationMismatch)?;
+                .ok_or_else(|| unit_observation_stage_error("rustc-argv", observation, planned))?;
             if build_rustc_query_allowed(request, arguments, build_policy.host_linker_selected) {
                 continue;
             }
-            let rustc = RustcInvocation::parse(arguments, build_policy.host_linker_selected)?;
+            let rustc = RustcInvocation::parse(arguments, build_policy.host_linker_selected)
+                .map_err(|error| {
+                    add_unit_observation_stage(error, "rustc-parse", observation, planned)
+                })?;
             expected_target_linker_executions = expected_target_linker_executions
                 .checked_add(usize::from(
                     build_policy.target_linker.is_some() && rustc.requires_target_linker(),
                 ))
-                .ok_or(TrustedCargoBuildError::UnitObservationMismatch)?;
+                .ok_or_else(|| {
+                    unit_observation_stage_error(
+                        "target-linker-expected-overflow",
+                        observation,
+                        planned,
+                    )
+                })?;
             let matches = planned
                 .nodes()
                 .iter()
@@ -1351,17 +1395,38 @@ fn observe_units(
                 .map(|(selector, _)| selector.clone())
                 .collect::<Vec<_>>();
             let [selector] = matches.as_slice() else {
-                return Err(TrustedCargoBuildError::UnitObservationMismatch);
+                return Err(unit_observation_stage_error(
+                    format!(
+                        "rustc-selector-count-{}-crate-{}-target-{:?}",
+                        matches.len(),
+                        rustc.crate_name,
+                        rustc.target,
+                    ),
+                    observation,
+                    planned,
+                ));
             };
             if !observed_compile_units.insert(selector.clone()) {
-                return Err(TrustedCargoBuildError::UnitObservationMismatch);
+                return Err(unit_observation_stage_error(
+                    format!("duplicate-rustc-selector-{selector:?}"),
+                    observation,
+                    planned,
+                ));
             }
             verify_extern_edges(
                 planned,
                 selector,
                 &rustc.externs,
                 &cargo_messages.artifact_files,
-            )?;
+            )
+            .map_err(|error| {
+                add_unit_observation_stage(
+                    error,
+                    format!("extern-edges-{selector:?}"),
+                    observation,
+                    planned,
+                )
+            })?;
         } else if execution
             .executable
             .starts_with(&format!("{LOGICAL_TARGET}/"))
@@ -1371,26 +1436,40 @@ fn observe_units(
                 .values()
                 .any(|executable| executable == &execution.executable)
             {
-                return Err(TrustedCargoBuildError::UnitObservationMismatch);
+                return Err(unit_observation_stage_error(
+                    format!("unexpected-target-executable-{}", execution.executable),
+                    observation,
+                    planned,
+                ));
             }
             let count = observed_build_script_executions
                 .entry(execution.executable.clone())
                 .or_insert(0usize);
-            *count = count
-                .checked_add(1)
-                .ok_or(TrustedCargoBuildError::UnitObservationMismatch)?;
+            *count = count.checked_add(1).ok_or_else(|| {
+                unit_observation_stage_error("build-script-count-overflow", observation, planned)
+            })?;
         } else if build_policy.target_linker.is_some_and(|(logical, digest)| {
             execution.executable == logical && execution.executable_sha256 == digest
         }) {
             observed_target_linker_executions = observed_target_linker_executions
                 .checked_add(1)
-                .ok_or(TrustedCargoBuildError::UnitObservationMismatch)?;
+                .ok_or_else(|| {
+                    unit_observation_stage_error(
+                        "target-linker-observed-overflow",
+                        observation,
+                        planned,
+                    )
+                })?;
         } else if build_policy
             .executable_digests
             .get(execution.executable.as_str())
             .is_none_or(|digest| **digest != execution.executable_sha256)
         {
-            return Err(TrustedCargoBuildError::UnitObservationMismatch);
+            return Err(unit_observation_stage_error(
+                format!("unaccounted-executable-{}", execution.executable),
+                observation,
+                planned,
+            ));
         }
     }
 
@@ -1409,14 +1488,37 @@ fn observe_units(
     validate_target_linker_execution_count(
         expected_target_linker_executions,
         observed_target_linker_executions,
-    )?;
+    )
+    .map_err(|error| {
+        add_unit_observation_stage(
+            error,
+            format!(
+                "target-linker-count-expected-{expected_target_linker_executions}-observed-{observed_target_linker_executions}"
+            ),
+            observation,
+            planned,
+        )
+    })?;
     validate_build_script_execution_counts(
         &expected_build_scripts,
         &cargo_messages.build_script_executables,
         &observed_build_script_executions,
-    )?;
+    )
+    .map_err(|error| {
+        add_unit_observation_stage(error, "build-script-counts", observation, planned)
+    })?;
     if observed_compile_units != expected_compile_units {
-        return Err(TrustedCargoBuildError::UnitObservationMismatch);
+        let missing = expected_compile_units
+            .difference(&observed_compile_units)
+            .collect::<Vec<_>>();
+        let unexpected = observed_compile_units
+            .difference(&expected_compile_units)
+            .collect::<Vec<_>>();
+        return Err(unit_observation_stage_error(
+            format!("compile-coverage-missing-{missing:?}-unexpected-{unexpected:?}"),
+            observation,
+            planned,
+        ));
     }
     Ok(())
 }
@@ -2470,6 +2572,34 @@ mod tests {
             diagnostic_head_and_tail(b"0123456789", 6),
             "012[... 4 bytes omitted ...]789"
         );
+
+        let observation = LinuxSandboxExecutionObservation {
+            schema: 1,
+            request_digest: "1".repeat(64),
+            backend_identity_digest: "2".repeat(64),
+            landlock_policy_digest: "3".repeat(64),
+            read_only_mounts: vec![],
+            writable_mounts: vec![],
+            canonical_metadata_roots: vec![],
+            enforcements: vec![],
+            executed_commands: vec![crate::SeccompExecutedCommand {
+                executable: LOGICAL_CARGO.into(),
+                arguments: vec![LOGICAL_CARGO.into()],
+                working_directory: "/rust-agent/closure".into(),
+                executable_sha256: "4".repeat(64),
+            }],
+            exit_code: 0,
+            stdout_sha256: "5".repeat(64),
+            stderr_sha256: "6".repeat(64),
+            digest: "7".repeat(64),
+        };
+        let TrustedCargoBuildError::UnitObservationOutput { diagnostic } =
+            unit_observation_stage_error("exact-stage", &observation, &graph(false))
+        else {
+            panic!("stage diagnostics must retain the unit-observation error class");
+        };
+        assert!(diagnostic.starts_with("stage=exact-stage execution-count=1 "));
+        assert!(diagnostic.contains(&format!("\"{LOGICAL_CARGO}\": 1")));
     }
 
     #[test]
