@@ -30,9 +30,9 @@ use rust_agent_build_executor::{
     ProductionExecutable, ProductionExecutionEvidence, ProductionFetchPolicy,
     ProductionFetchRedirectPolicy, ProductionHostBuildPipelineOptions, ProductionHostLinker,
     ProductionIntegrationPostInput, ProductionIntegrationPrePipelineOptions,
-    ProductionOperationKind, ProductionReadInput, ProductionSandboxBackend, ProductionToolIdentity,
-    ProductionToolchain, ProductionTreeIdentity, RustcSettingsRecord, SigningHelper,
-    TrustedCargoFetchEndpointResolution, TrustedCargoFetchError, TrustedSigner,
+    ProductionOperationKind, ProductionReadInput, ProductionSandboxBackend, ProductionTargetLinker,
+    ProductionToolIdentity, ProductionToolchain, ProductionTreeIdentity, RustcSettingsRecord,
+    SigningHelper, TrustedCargoFetchEndpointResolution, TrustedCargoFetchError, TrustedSigner,
     VerifiedLinuxSandboxBackend, cargo_resolution_record_digest,
     create_production_artifact_staging, create_production_build_attestation_payload,
     create_production_integration_post_payload, derive_cargo_planner_edge_semantics_from_metadata,
@@ -62,6 +62,7 @@ use walkdir::WalkDir;
 
 const TEST_CREDENTIAL: &str = "phase-1b-fixture-token";
 const LOGICAL_HOST_LINKER: &str = "/rust-agent/tools/host-linker";
+const LOGICAL_TARGET_LINKER: &str = "/rust-agent/target-tools/wasm-rust-lld";
 const LOGICAL_COMPILER_PATH: &str = "/rust-agent/tools";
 const MAX_LINKER_SCRIPT_BYTES: u64 = 64 * 1024;
 const MAX_LINKER_SCRIPT_FILES: usize = 64;
@@ -505,6 +506,12 @@ fn main() {
         .trim(),
     );
     let build_triple = host_triple(&compiler_rustc);
+    let target_linker = cross_compile.then(|| {
+        sysroot
+            .join("lib/rustlib")
+            .join(&build_triple)
+            .join("bin/rust-lld")
+    });
     let target_triple = if cross_compile {
         "wasm32-unknown-unknown".into()
     } else {
@@ -542,7 +549,7 @@ fn main() {
         .unwrap();
 
     let policy = ProductionBuildExecutionPolicy {
-        schema: 3,
+        schema: 4,
         id: "real-fetch-fixture".into(),
         host: "cfg(target_os = \"linux\")".into(),
         backend: ProductionSandboxBackend::LinuxLandlockSeccomp,
@@ -662,6 +669,17 @@ fn main() {
             executable: "host-linker".into(),
             helpers: vec!["collect2".into(), "ld".into()],
         }),
+        target_linkers: target_linker
+            .as_ref()
+            .map(|path| ProductionTargetLinker {
+                target: "wasm32-unknown-unknown".into(),
+                id: "wasm-rust-lld".into(),
+                path: path.clone(),
+                sha256: sha256_file(path),
+                version: first_line(path, &["-flavor", "wasm", "--version"]),
+            })
+            .into_iter()
+            .collect(),
         environment: (mode == FetchFixtureMode::HostPipeline)
             .then_some(ProductionEnvironment {
                 id: "fixture-channel".into(),
@@ -1084,6 +1102,7 @@ fn main() {
     runtime_executables.extend(host_linker.as_deref());
     runtime_executables.extend(host_linker_collect2.as_deref());
     runtime_executables.extend(host_linker_ld.as_deref());
+    runtime_executables.extend(target_linker.as_deref());
     let (runtime_symlinks, interpreters) = copy_dynamic_runtime(
         &runtime_executables,
         &[cargo.as_path(), rustc.as_path()],
@@ -1255,7 +1274,7 @@ fn main() {
         let composition = fixture_composition_manifest(&policy, &normalized_closure, build_kind);
         let build_inputs = preflight_production_build_inputs(&policy, &normalized_closure).unwrap();
         let planner_request = CargoPlannerRequest {
-            schema: 4,
+            schema: 5,
             root: CargoPlannerGraphRoot::EmittedStandalone,
         }
         .normalize(&policy, &normalized_closure)
@@ -1320,6 +1339,16 @@ fn main() {
         );
         if build_kind == BuildKind::Wasm {
             assert!(built.wasm().is_some());
+            assert_eq!(
+                built
+                    .build()
+                    .sandbox_observation()
+                    .executed_commands
+                    .iter()
+                    .filter(|execution| execution.executable == LOGICAL_TARGET_LINKER)
+                    .count(),
+                1
+            );
             assert_eq!(
                 built.attestation().manifest().entry_artifact,
                 "bundle/rust_agent.js"
@@ -1386,13 +1415,13 @@ fn main() {
         );
         let build_inputs = preflight_production_build_inputs(&policy, &normalized_closure).unwrap();
         let standalone_request = CargoPlannerRequest {
-            schema: 4,
+            schema: 5,
             root: CargoPlannerGraphRoot::EmittedStandalone,
         }
         .normalize(&policy, &normalized_closure)
         .unwrap();
         let final_request = CargoPlannerRequest {
-            schema: 4,
+            schema: 5,
             root: CargoPlannerGraphRoot::FinalHost,
         }
         .normalize(&policy, &normalized_closure)
@@ -1594,7 +1623,7 @@ fn main() {
         );
         if cross_compile {
             let standalone_request = CargoPlannerRequest {
-                schema: 4,
+                schema: 5,
                 root: CargoPlannerGraphRoot::EmittedStandalone,
             }
             .normalize(&policy, &normalized_closure)
@@ -1627,7 +1656,7 @@ fn main() {
             );
         }
         let planner_request = CargoPlannerRequest {
-            schema: 4,
+            schema: 5,
             root: CargoPlannerGraphRoot::FinalHost,
         }
         .normalize(&policy, &normalized_closure)
@@ -2375,7 +2404,7 @@ fn derive_fixture_cargo_graph(
     locked: &rust_agent_build_executor::NormalizedLockedSourceClosure,
 ) -> HostCargoUnitGraph {
     let request = CargoPlannerRequest {
-        schema: 4,
+        schema: 5,
         root: CargoPlannerGraphRoot::EmittedStandalone,
     }
     .normalize(policy, bootstrap_closure)

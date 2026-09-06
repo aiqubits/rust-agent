@@ -93,7 +93,7 @@ supervised rustc observations bind the remaining Host configuration arguments.
 
 ## Acceptance tests
 
-- `cargo_planner::tests::schema_four_binds_host_only_linker_configuration`
+- `cargo_planner::tests::schema_five_binds_host_only_linker_configuration`
 - `cargo_planner::tests::schema_three_is_rejected_after_host_config_scoping`
 - `production_build::tests::cargo_build_retains_the_request_bound_channel_override`
 - `production_build::tests::host_and_target_rustc_flags_are_scope_exact`

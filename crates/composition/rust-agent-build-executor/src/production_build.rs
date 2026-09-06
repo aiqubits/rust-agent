@@ -170,6 +170,12 @@ pub fn execute_trusted_cargo_build(
             .iter()
             .map(|executable| executable.logical_mount.clone()),
     );
+    allowed_executables.extend(
+        enforcement
+            .target_linker
+            .iter()
+            .map(|linker| linker.executable.logical_mount.clone()),
+    );
     allowed_executables.sort();
 
     let command = LinuxSandboxCommand {
@@ -232,6 +238,12 @@ pub fn execute_trusted_cargo_build(
             .map(|item| (item.logical_mount.as_str(), item.sha256.as_str()))
             .collect(),
         host_linker_selected: enforcement.host_linker.is_some(),
+        target_linker: enforcement.target_linker.as_ref().map(|linker| {
+            (
+                linker.executable.logical_mount.as_str(),
+                linker.executable.sha256.as_str(),
+            )
+        }),
     };
     observe_units(
         request,
@@ -340,6 +352,7 @@ struct CargoMessageObservation {
 struct BuildUnitObservationPolicy<'a> {
     executable_digests: BTreeMap<&'a str, &'a str>,
     host_linker_selected: bool,
+    target_linker: Option<(&'a str, &'a str)>,
 }
 
 fn verify_cargo_messages(
@@ -947,6 +960,8 @@ fn observe_units(
 
     let mut observed_compile_units = BTreeSet::new();
     let mut observed_build_scripts = BTreeSet::new();
+    let mut expected_target_linker_executions = 0usize;
+    let mut observed_target_linker_executions = 0usize;
     for execution in descendants {
         if execution.executable == LOGICAL_RUSTC && execution.executable_sha256 == rustc_digest {
             let arguments = execution
@@ -957,6 +972,11 @@ fn observe_units(
                 continue;
             }
             let rustc = RustcInvocation::parse(arguments, build_policy.host_linker_selected)?;
+            expected_target_linker_executions = expected_target_linker_executions
+                .checked_add(usize::from(
+                    build_policy.target_linker.is_some() && rustc.requires_target_linker(),
+                ))
+                .ok_or(TrustedCargoBuildError::UnitObservationMismatch)?;
             let matches = planned
                 .nodes()
                 .iter()
@@ -991,6 +1011,12 @@ fn observe_units(
             if !observed_build_scripts.insert(selector.clone()) {
                 return Err(TrustedCargoBuildError::UnitObservationMismatch);
             }
+        } else if build_policy.target_linker.is_some_and(|(logical, digest)| {
+            execution.executable == logical && execution.executable_sha256 == digest
+        }) {
+            observed_target_linker_executions = observed_target_linker_executions
+                .checked_add(1)
+                .ok_or(TrustedCargoBuildError::UnitObservationMismatch)?;
         } else if build_policy
             .executable_digests
             .get(execution.executable.as_str())
@@ -1012,12 +1038,27 @@ fn observe_units(
         .filter(|selector| selector.compile_mode == CargoCompileMode::RunCustomBuild)
         .cloned()
         .collect::<BTreeSet<_>>();
+    validate_target_linker_execution_count(
+        expected_target_linker_executions,
+        observed_target_linker_executions,
+    )?;
     if observed_compile_units != expected_compile_units
         || observed_build_scripts != expected_build_scripts
     {
         return Err(TrustedCargoBuildError::UnitObservationMismatch);
     }
     Ok(())
+}
+
+fn validate_target_linker_execution_count(
+    expected: usize,
+    observed: usize,
+) -> Result<(), TrustedCargoBuildError> {
+    if expected == observed {
+        Ok(())
+    } else {
+        Err(TrustedCargoBuildError::UnitObservationMismatch)
+    }
 }
 
 struct RustcInvocation {
@@ -1086,6 +1127,14 @@ impl RustcInvocation {
             && self.features == unit.features
             && crate_type_matches(selector.crate_kind, &self.crate_types)
             && selector.compile_mode != CargoCompileMode::RunCustomBuild
+    }
+
+    fn requires_target_linker(&self) -> bool {
+        self.target.is_some()
+            && self
+                .crate_types
+                .iter()
+                .any(|crate_type| matches!(crate_type.as_str(), "bin" | "cdylib" | "dylib"))
     }
 }
 
@@ -1340,6 +1389,37 @@ mod tests {
         ] {
             assert!(matches!(
                 RustcInvocation::parse(&arguments, true),
+                Err(TrustedCargoBuildError::UnitObservationMismatch)
+            ));
+        }
+    }
+
+    #[test]
+    fn target_linker_observation_is_exact() {
+        let target_cdylib = RustcInvocation::parse(
+            &rustc_arguments(&[
+                "--target",
+                "wasm32-unknown-unknown",
+                "--crate-type",
+                "cdylib",
+                BUILD_SYSROOT_FLAG,
+            ]),
+            false,
+        )
+        .unwrap();
+        let target_rlib = RustcInvocation::parse(
+            &rustc_arguments(&["--target", "wasm32-unknown-unknown", BUILD_SYSROOT_FLAG]),
+            false,
+        )
+        .unwrap();
+        let host_binary = RustcInvocation::parse(&rustc_arguments(&[]), false).unwrap();
+        assert!(target_cdylib.requires_target_linker());
+        assert!(!target_rlib.requires_target_linker());
+        assert!(!host_binary.requires_target_linker());
+        assert!(validate_target_linker_execution_count(1, 1).is_ok());
+        for (expected, observed) in [(1, 0), (0, 1), (1, 2)] {
+            assert!(matches!(
+                validate_target_linker_execution_count(expected, observed),
                 Err(TrustedCargoBuildError::UnitObservationMismatch)
             ));
         }

@@ -228,6 +228,9 @@ fn logical_executable(
         ProductionInputFileRole::BuildExecutable
         | ProductionInputFileRole::HostLinker
         | ProductionInputFileRole::HostLinkerHelper => Ok(format!("/rust-agent/tools/{}", file.id)),
+        ProductionInputFileRole::TargetLinker => {
+            Ok(format!("/rust-agent/target-tools/{}", file.id))
+        }
         ProductionInputFileRole::CredentialHelper | ProductionInputFileRole::FetchTlsCaBundle => {
             Err(TrustedProductionPreflightError::InputMismatch)
         }

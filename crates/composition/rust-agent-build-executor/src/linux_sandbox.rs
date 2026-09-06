@@ -750,6 +750,10 @@ impl LinuxSandboxReadOnlyMount {
                     LinuxSandboxMountKind::BuildExecutable,
                     format!("/rust-agent/tools/{}", file.id),
                 ),
+                ProductionInputFileRole::TargetLinker => (
+                    LinuxSandboxMountKind::ToolchainExecutable,
+                    format!("/rust-agent/target-tools/{}", file.id),
+                ),
             };
             let source = inputs.retained_file_identity(file.role, &file.id)?;
             mounts.push(Self {

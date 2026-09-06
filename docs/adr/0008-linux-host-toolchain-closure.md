@@ -84,8 +84,8 @@ Host files remain invisible.
 ## Acceptance tests
 
 - `production_policy::host_linker_bundle_is_closed_selected_and_path_free`
-- `cargo_planner::tests::schema_four_binds_host_only_linker_configuration`
-- `production_inputs::tests::host_linker_helper_preflight_roles_are_closed_and_schema_three`
+- `cargo_planner::tests::schema_five_binds_host_only_linker_configuration`
+- `production_inputs::tests::host_linker_helper_preflight_roles_are_closed_and_schema_four`
 - `production_cargo_fetch::host_linker_support_files_follow_logical_install_and_compiler_paths`
 - `production_cargo_fetch::production_host_pre_build_post_pipeline_is_signed_and_reverified`
 - `production_cargo_fetch::production_standalone_pipeline_is_signed_and_reverified`

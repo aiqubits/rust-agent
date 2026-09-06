@@ -721,8 +721,8 @@ impl ProductionBuildManifest {
                 return invalid("selected environment collides with the Cargo driver environment");
             }
         }
-        if self.build_enforcement_identity.schema != 2
-            || self.build_enforcement_identity.backend_semantic_version != 5
+        if self.build_enforcement_identity.schema != 3
+            || self.build_enforcement_identity.backend_semantic_version != 6
             || self.build_enforcement_identity.cargo_driver_environment
                 != expected_driver_environment
             || self.cargo_invocation.environment != expected_invocation_environment

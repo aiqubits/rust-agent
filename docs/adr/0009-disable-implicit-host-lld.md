@@ -69,7 +69,7 @@ Cargo's Host-only configuration and a schema-4 planner request.
 
 ## Acceptance tests
 
-- `cargo_planner::tests::schema_four_binds_host_only_linker_configuration`
+- `cargo_planner::tests::schema_five_binds_host_only_linker_configuration`
 - `cargo_planner::tests::schema_three_is_rejected_after_host_config_scoping`
 - `production_build::tests::host_and_target_rustc_flags_are_scope_exact`
 - `production_build::tests::rustc_observation_rejects_cross_kind_linker_flags`

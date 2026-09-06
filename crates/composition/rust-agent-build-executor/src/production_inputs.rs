@@ -50,6 +50,7 @@ pub enum ProductionInputFileRole {
     BuildExecutable,
     HostLinker,
     HostLinkerHelper,
+    TargetLinker,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
@@ -220,11 +221,13 @@ struct VerifiedTree {
 
 #[derive(Debug, Error)]
 pub enum ProductionInputIdentityError {
-    #[error("production input identity JSON exceeds the schema-v3 byte limit")]
+    #[error("production input identity JSON exceeds the schema-v4 byte limit")]
     JsonTooLarge,
     #[error("production input identity JSON is invalid: {0}")]
     Json(#[from] serde_json::Error),
-    #[error("unsupported production input identity schema {0}; expected 3")]
+    #[error(
+        "unsupported production input identity schema {0}; expected 4 for requests or 3 for observations"
+    )]
     UnsupportedSchema(u32),
     #[error("production input identity request is malformed: {0}")]
     InvalidRequest(&'static str),
@@ -381,6 +384,7 @@ pub fn preflight_production_build_inputs(
     preflight_inputs(build_request(
         policy,
         closure.build_requirements(),
+        &closure.build_context().target,
         Some(closure.digest()),
     )?)
 }
@@ -414,7 +418,7 @@ impl ProductionInputIdentityRequest {
 
     fn recompute_digest(&self) -> Result<String, ProductionInputIdentityError> {
         Ok(hex::encode(canonical::domain_hash(
-            b"rust-agent-production-input-identity-request-v3\0",
+            b"rust-agent-production-input-identity-request-v4\0",
             &RequestProjection {
                 schema: self.schema,
                 scope: self.scope,
@@ -427,7 +431,7 @@ impl ProductionInputIdentityRequest {
     }
 
     fn verify_self(&self) -> Result<(), ProductionInputIdentityError> {
-        if self.schema != 3 {
+        if self.schema != 4 {
             return Err(ProductionInputIdentityError::UnsupportedSchema(self.schema));
         }
         if !is_digest(&self.build_execution_policy_digest)
@@ -438,7 +442,7 @@ impl ProductionInputIdentityRequest {
         {
             return Err(ProductionInputIdentityError::InvalidRequest("digest"));
         }
-        let maximum = MAX_BUILD_REQUIREMENT_ENTRIES_PER_KIND + 3;
+        let maximum = MAX_BUILD_REQUIREMENT_ENTRIES_PER_KIND + 4;
         if self.files.len() > maximum || self.trees.len() > maximum {
             return Err(ProductionInputIdentityError::InvalidRequest("input count"));
         }
@@ -486,6 +490,7 @@ impl ProductionInputIdentityRequest {
                             ProductionInputFileRole::BuildExecutable
                                 | ProductionInputFileRole::HostLinker
                                 | ProductionInputFileRole::HostLinkerHelper
+                                | ProductionInputFileRole::TargetLinker
                         )
                     })
                     || self
@@ -517,6 +522,7 @@ impl ProductionInputIdentityRequest {
                                 | ProductionInputFileRole::BuildExecutable
                                 | ProductionInputFileRole::HostLinker
                                 | ProductionInputFileRole::HostLinkerHelper
+                                | ProductionInputFileRole::TargetLinker
                         )
                     })
                 {
@@ -536,6 +542,11 @@ impl ProductionInputIdentityRequest {
                     .iter()
                     .filter(|file| file.role == ProductionInputFileRole::HostLinkerHelper)
                     .count();
+                let target_linkers = self
+                    .files
+                    .iter()
+                    .filter(|file| file.role == ProductionInputFileRole::TargetLinker)
+                    .count();
                 if self.host_build_input_closure_digest.is_none()
                     || self.files.iter().any(|file| {
                         matches!(
@@ -552,6 +563,7 @@ impl ProductionInputIdentityRequest {
                         != 1
                     || host_linkers > 1
                     || (host_linker_helpers > 0 && host_linkers != 1)
+                    || target_linkers > 1
                 {
                     return Err(ProductionInputIdentityError::InvalidRequest("build scope"));
                 }
@@ -574,7 +586,7 @@ impl ProductionInputIdentityObservation {
         probes: Vec<ProductionVersionProbeResult>,
     ) -> Result<Self, ProductionInputIdentityError> {
         let mut observation = Self {
-            schema: 2,
+            schema: 3,
             request_digest,
             probes,
             digest: String::new(),
@@ -599,7 +611,7 @@ impl ProductionInputIdentityObservation {
 
     fn recompute_digest(&self) -> Result<String, ProductionInputIdentityError> {
         Ok(hex::encode(canonical::domain_hash(
-            b"rust-agent-production-input-identity-observation-v2\0",
+            b"rust-agent-production-input-identity-observation-v3\0",
             &ObservationProjection {
                 schema: self.schema,
                 request_digest: &self.request_digest,
@@ -609,11 +621,11 @@ impl ProductionInputIdentityObservation {
     }
 
     fn verify_self(&self) -> Result<(), ProductionInputIdentityError> {
-        if self.schema != 2 {
+        if self.schema != 3 {
             return Err(ProductionInputIdentityError::UnsupportedSchema(self.schema));
         }
         if !is_digest(&self.request_digest)
-            || self.probes.len() > MAX_BUILD_REQUIREMENT_ENTRIES_PER_KIND + 2
+            || self.probes.len() > MAX_BUILD_REQUIREMENT_ENTRIES_PER_KIND + 3
         {
             return Err(ProductionInputIdentityError::InvalidObservation(
                 "request or probe count",
@@ -1497,6 +1509,7 @@ fn fetch_request(
 fn build_request(
     policy: &NormalizedProductionBuildPolicy,
     requirements: &BuildRequirements,
+    target: &str,
     closure_digest: Option<&str>,
 ) -> Result<ProductionInputIdentityRequest, ProductionInputIdentityError> {
     let policy_data = policy.policy();
@@ -1545,6 +1558,16 @@ fn build_request(
             &executable.sha256,
             &executable.version,
             &["--version"],
+        ));
+    }
+    if let Some(linker) = policy.selected_target_linker(target)? {
+        files.push(tool_file(
+            ProductionInputFileRole::TargetLinker,
+            &linker.id,
+            &linker.path,
+            &linker.sha256,
+            &linker.version,
+            &["-flavor", "wasm", "--version"],
         ));
     }
     let mut trees = vec![ProductionInputTree {
@@ -1610,7 +1633,7 @@ fn finish_request(
     files.sort_by(|left, right| file_key(left).cmp(&file_key(right)));
     trees.sort_by(|left, right| tree_key(left).cmp(&tree_key(right)));
     let mut request = ProductionInputIdentityRequest {
-        schema: 3,
+        schema: 4,
         scope,
         build_execution_policy_digest: policy_digest.into(),
         host_build_input_closure_digest: closure_digest.map(str::to_owned),
@@ -1688,6 +1711,7 @@ fn validate_file(file: &ProductionInputFile) -> Result<(), ProductionInputIdenti
         ProductionInputFileRole::BuildExecutable
         | ProductionInputFileRole::HostLinker
         | ProductionInputFileRole::HostLinkerHelper => Some(&["--version"]),
+        ProductionInputFileRole::TargetLinker => Some(&["-flavor", "wasm", "--version"]),
     };
     match (&file.version_probe, expected_arguments) {
         (None, None) => Ok(()),
@@ -1792,8 +1816,8 @@ mod tests {
         DerivedExecutablePolicy, ProductionAttestationPolicy, ProductionBuildExecutionPolicy,
         ProductionEnvironment, ProductionExecutable, ProductionFetchPolicy,
         ProductionFetchRedirectPolicy, ProductionFileIdentity, ProductionReadInput,
-        ProductionSandboxBackend, ProductionToolIdentity, ProductionToolchain,
-        ProductionTreeIdentity, SigningHelper, TrustedSigner,
+        ProductionSandboxBackend, ProductionTargetLinker, ProductionToolIdentity,
+        ProductionToolchain, ProductionTreeIdentity, SigningHelper, TrustedSigner,
     };
 
     struct Fixture {
@@ -1873,7 +1897,7 @@ mod tests {
         fs::write(selected_read_input.join("sdk.h"), b"sdk-fixture").unwrap();
 
         let policy = ProductionBuildExecutionPolicy {
-            schema: 3,
+            schema: 4,
             id: "fixture-policy".into(),
             host: "cfg(target_os = \"linux\")".into(),
             backend: ProductionSandboxBackend::LinuxLandlockSeccomp,
@@ -1947,6 +1971,7 @@ mod tests {
                 },
             ],
             host_linker: None,
+            target_linkers: vec![],
             environment: vec![ProductionEnvironment {
                 id: "vendor-sdk-channel".into(),
                 variable: "VENDOR_SDK_CHANNEL".into(),
@@ -1979,12 +2004,13 @@ mod tests {
         preflight_inputs(build_request(
             &fixture.policy,
             &fixture.requirements,
+            "aarch64-unknown-linux-gnu",
             Some(&"a".repeat(64)),
         )?)
     }
 
     #[test]
-    fn host_linker_helper_preflight_roles_are_closed_and_schema_three() {
+    fn host_linker_helper_preflight_roles_are_closed_and_schema_four() {
         let fixture = fixture();
         let mut policy = fixture.policy.policy().clone();
         policy.host_linker = Some(crate::ProductionHostLinker {
@@ -1996,8 +2022,14 @@ mod tests {
             executables: BTreeSet::from(["target-linker".into(), "unused-codegen".into()]),
             ..BuildRequirements::default()
         };
-        let request = build_request(&policy, &requirements, Some(&"a".repeat(64))).unwrap();
-        assert_eq!(request.schema, 3);
+        let request = build_request(
+            &policy,
+            &requirements,
+            "aarch64-unknown-linux-gnu",
+            Some(&"a".repeat(64)),
+        )
+        .unwrap();
+        assert_eq!(request.schema, 4);
         assert!(request.files.iter().any(|file| {
             file.id == "target-linker" && file.role == ProductionInputFileRole::HostLinker
         }));
@@ -2006,11 +2038,11 @@ mod tests {
         }));
 
         let mut old_schema = request.clone();
-        old_schema.schema = 2;
+        old_schema.schema = 3;
         old_schema.digest = old_schema.recompute_digest().unwrap();
         assert!(matches!(
             old_schema.verify_self(),
-            Err(ProductionInputIdentityError::UnsupportedSchema(2))
+            Err(ProductionInputIdentityError::UnsupportedSchema(3))
         ));
 
         let mut helper_without_linker = request;
@@ -2028,6 +2060,63 @@ mod tests {
             helper_without_linker.verify_self(),
             Err(ProductionInputIdentityError::InvalidRequest("build scope"))
         ));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn target_linker_preflight_is_separate_descriptor_role() {
+        let fixture = fixture();
+        let target_linker = selected_tool("rustc");
+        let mut policy = fixture.policy.policy().clone();
+        policy.target_linkers = vec![ProductionTargetLinker {
+            target: "wasm32-unknown-unknown".into(),
+            id: "wasm-rust-lld".into(),
+            path: target_linker.clone(),
+            sha256: file_sha256(&target_linker),
+            version: "LLD fixture-v1".into(),
+        }];
+        let policy = policy.normalize().unwrap();
+        let request = build_request(
+            &policy,
+            &fixture.requirements,
+            "wasm32-unknown-unknown",
+            Some(&"a".repeat(64)),
+        )
+        .unwrap();
+        let linker = request
+            .files
+            .iter()
+            .find(|file| file.role == ProductionInputFileRole::TargetLinker)
+            .unwrap();
+        assert_eq!(linker.id, "wasm-rust-lld");
+        assert_eq!(
+            linker.version_probe.as_ref().unwrap().arguments,
+            ["-flavor", "wasm", "--version"]
+        );
+        assert!(request.files.iter().all(|file| {
+            file.role != ProductionInputFileRole::TargetLinker || file.id == "wasm-rust-lld"
+        }));
+
+        let inputs = preflight_inputs(request).unwrap();
+        let mounts = crate::LinuxSandboxReadOnlyMount::production_inputs(&inputs).unwrap();
+        let target_mount = mounts
+            .iter()
+            .find(|mount| mount.identity().id == "wasm-rust-lld")
+            .unwrap()
+            .identity();
+        assert_eq!(
+            target_mount.kind,
+            crate::LinuxSandboxMountKind::ToolchainExecutable
+        );
+        assert_eq!(
+            target_mount.logical_path,
+            "/rust-agent/target-tools/wasm-rust-lld"
+        );
+        assert!(target_mount.executable);
+        assert!(mounts.iter().any(|mount| {
+            mount.identity().kind == crate::LinuxSandboxMountKind::ToolchainSysroot
+                && !mount.identity().executable
+        }));
     }
 
     fn successful_observation(
@@ -2230,7 +2319,7 @@ mod tests {
             ProductionInputIdentityObservation::from_json(&json).unwrap(),
             observation
         );
-        let unknown = json.replacen("\"schema\":2", "\"schema\":2,\"ambient\":true", 1);
+        let unknown = json.replacen("\"schema\":3", "\"schema\":3,\"ambient\":true", 1);
         assert!(matches!(
             ProductionInputIdentityObservation::from_json(&unknown),
             Err(ProductionInputIdentityError::Json(_))

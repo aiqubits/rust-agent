@@ -78,7 +78,7 @@ pub struct VerifiedCargoUnitGraphEnvelope {
 
 #[derive(Debug, Error)]
 pub enum CargoPlannerError {
-    #[error("unsupported Cargo planner request schema {0}; expected 3")]
+    #[error("unsupported Cargo planner request schema {0}; expected 5")]
     UnsupportedRequestSchema(u32),
     #[error("Cargo planner policy does not match HostBuildInputClosure")]
     PolicyMismatch,
@@ -222,7 +222,7 @@ impl CargoPlannerRequest {
         policy: &NormalizedProductionBuildPolicy,
         closure: &NormalizedHostBuildInputClosure,
     ) -> Result<NormalizedCargoPlannerRequest, CargoPlannerError> {
-        if self.schema != 4 {
+        if self.schema != 5 {
             return Err(CargoPlannerError::UnsupportedRequestSchema(self.schema));
         }
         if closure.build_execution_policy_digest() != policy.full_digest() {
@@ -277,6 +277,16 @@ impl CargoPlannerRequest {
             context.profile.clone(),
         ];
         arguments.extend(artifact_selector.cargo_arguments());
+        let selected_target_linker = policy.selected_target_linker(&context.target)?;
+        if let Some(target_linker) = selected_target_linker {
+            arguments.extend([
+                "--config".into(),
+                format!(
+                    "target.{}.linker=\"/rust-agent/target-tools/{}\"",
+                    target_linker.target, target_linker.id
+                ),
+            ]);
+        }
         let selected_host_linker = policy.selected_host_linker(closure.build_requirements())?;
         if let Some(host_linker) = selected_host_linker {
             arguments.extend([
@@ -312,7 +322,7 @@ impl CargoPlannerRequest {
             working_directory,
         };
         let projection = PlannerRequestProjection {
-            schema: 4,
+            schema: 5,
             root: self.root,
             planner: &planner,
             build_execution_policy_digest: policy.full_digest(),
@@ -328,7 +338,7 @@ impl CargoPlannerRequest {
             working_directory: &invocation.working_directory,
         };
         let digest = hex::encode(canonical::domain_hash(
-            b"rust-agent-cargo-unit-graph-planner-request-v4\0",
+            b"rust-agent-cargo-unit-graph-planner-request-v5\0",
             &projection,
         )?);
         Ok(NormalizedCargoPlannerRequest {
@@ -400,7 +410,7 @@ impl NormalizedCargoPlannerRequest {
 
     pub fn verify(&self) -> Result<(), CargoPlannerError> {
         let projection = PlannerRequestProjection {
-            schema: 4,
+            schema: 5,
             root: self.root,
             planner: &self.planner,
             build_execution_policy_digest: &self.build_execution_policy_digest,
@@ -416,7 +426,7 @@ impl NormalizedCargoPlannerRequest {
             working_directory: &self.invocation.working_directory,
         };
         let digest = hex::encode(canonical::domain_hash(
-            b"rust-agent-cargo-unit-graph-planner-request-v4\0",
+            b"rust-agent-cargo-unit-graph-planner-request-v5\0",
             &projection,
         )?);
         let host_linker_selected =
@@ -771,8 +781,9 @@ mod tests {
         HostFeaturePolicyClosure, LockedSourceClosure, LockedSourceError,
         NormalizedLockedSourceClosure, ProductionAttestationPolicy, ProductionBuildExecutionPolicy,
         ProductionExecutable, ProductionFetchPolicy, ProductionFetchRedirectPolicy,
-        ProductionHostLinker, ProductionSandboxBackend, ProductionToolIdentity,
-        ProductionToolchain, ProductionTreeIdentity, SigningHelper, TrustedSigner,
+        ProductionHostLinker, ProductionSandboxBackend, ProductionTargetLinker,
+        ProductionToolIdentity, ProductionToolchain, ProductionTreeIdentity, SigningHelper,
+        TrustedSigner,
     };
 
     fn digest(byte: char) -> String {
@@ -781,7 +792,7 @@ mod tests {
 
     fn policy() -> NormalizedProductionBuildPolicy {
         ProductionBuildExecutionPolicy {
-            schema: 3,
+            schema: 4,
             id: "ci-linux-hermetic-v1".into(),
             host: "cfg(target_os = \"linux\")".into(),
             backend: ProductionSandboxBackend::LinuxLandlockSeccomp,
@@ -841,6 +852,13 @@ mod tests {
                 executable: "host-linker".into(),
                 helpers: vec!["host-linker-helper".into()],
             }),
+            target_linkers: vec![ProductionTargetLinker {
+                target: "wasm32-unknown-unknown".into(),
+                id: "wasm-rust-lld".into(),
+                path: "/runner/toolchain/lib/rustlib/host/bin/rust-lld".into(),
+                sha256: digest('c'),
+                version: "LLD fixture-v1".into(),
+            }],
             environment: vec![],
             derived_executable: DerivedExecutablePolicy {
                 roots: vec!["target".into()],
@@ -944,6 +962,15 @@ mod tests {
     ) -> NormalizedHostBuildInputClosure {
         let mut context = context();
         context.artifact_selector.target = target;
+        closure_with_context(policy, &context, graph(), requirements)
+    }
+
+    fn closure_with_context(
+        policy: &NormalizedProductionBuildPolicy,
+        context: &BuildEnforcementContext,
+        graph: HostCargoUnitGraph,
+        requirements: &BuildRequirements,
+    ) -> NormalizedHostBuildInputClosure {
         let record = |role, id, path, value: String| {
             item(
                 role,
@@ -1026,13 +1053,13 @@ mod tests {
                     context.artifact_selector.digest().unwrap(),
                 ),
             ],
-            standalone_unit_graph: graph(),
-            final_unit_graph: graph(),
+            standalone_unit_graph: graph.clone(),
+            final_unit_graph: graph,
             build_context: context.clone(),
             build_requirements: requirements.clone(),
             build_execution_policy_digest: policy.full_digest().into(),
             build_enforcement_identity_digest: policy
-                .enforcement_identity_digest(requirements, &context)
+                .enforcement_identity_digest(requirements, context)
                 .unwrap(),
             host_feature_policy: HostFeaturePolicyClosure::None,
             unit_feature_delta_digest: digest('0'),
@@ -1345,7 +1372,7 @@ mod tests {
     }
 
     #[test]
-    fn schema_four_binds_host_only_linker_configuration() {
+    fn schema_five_binds_host_only_linker_configuration() {
         let policy = policy();
         let unselected_closure = closure(&policy);
         let closure = closure_with_artifact_and_requirements(
@@ -1357,7 +1384,7 @@ mod tests {
             },
         );
         let final_request = CargoPlannerRequest {
-            schema: 4,
+            schema: 5,
             root: CargoPlannerGraphRoot::FinalHost,
         }
         .normalize(&policy, &closure)
@@ -1439,11 +1466,11 @@ mod tests {
         );
         assert_eq!(
             final_request.digest(),
-            "3c136647cab7ae4e041d4106397a21e2e309fe27a53eb19c20cad8987bc4d447"
+            "728b0e7b3eb58090af46cc8ea092bd1d46af5e15c6d49fc5201ba973acb8c54c"
         );
 
         let standalone = CargoPlannerRequest {
-            schema: 4,
+            schema: 5,
             root: CargoPlannerGraphRoot::EmittedStandalone,
         }
         .normalize(&policy, &closure)
@@ -1462,7 +1489,7 @@ mod tests {
         assert_ne!(standalone.digest(), final_request.digest());
 
         let unselected = CargoPlannerRequest {
-            schema: 4,
+            schema: 5,
             root: CargoPlannerGraphRoot::FinalHost,
         }
         .normalize(&policy, &unselected_closure)
@@ -1494,6 +1521,97 @@ mod tests {
     }
 
     #[test]
+    fn schema_five_binds_target_linker_configuration() {
+        let policy = policy();
+        let mut wasm_context = context();
+        wasm_context.target = "wasm32-unknown-unknown".into();
+        let mut wasm_graph = graph();
+        wasm_graph.composition_target = wasm_context.target.clone();
+        wasm_graph.nodes[0].selector.compilation_target = wasm_context.target.clone();
+        let closure = closure_with_context(
+            &policy,
+            &wasm_context,
+            wasm_graph,
+            &BuildRequirements::default(),
+        );
+        let request = CargoPlannerRequest {
+            schema: 5,
+            root: CargoPlannerGraphRoot::FinalHost,
+        }
+        .normalize(&policy, &closure)
+        .unwrap();
+        let target_config =
+            "target.wasm32-unknown-unknown.linker=\"/rust-agent/target-tools/wasm-rust-lld\"";
+        assert_eq!(
+            request
+                .invocation()
+                .arguments
+                .iter()
+                .filter(|argument| argument.as_str() == target_config)
+                .count(),
+            1
+        );
+        assert!(
+            !request
+                .invocation()
+                .environment
+                .contains_key("COMPILER_PATH")
+        );
+        let enforcement = policy
+            .enforcement_identity(&BuildRequirements::default(), &wasm_context)
+            .unwrap();
+        let linker = enforcement.target_linker.unwrap();
+        assert_eq!(linker.target, "wasm32-unknown-unknown");
+        assert_eq!(
+            linker.executable.logical_mount,
+            "/rust-agent/target-tools/wasm-rust-lld"
+        );
+        assert_eq!(linker.cargo_config, target_config);
+
+        assert!(matches!(
+            CargoPlannerRequest {
+                schema: 4,
+                root: CargoPlannerGraphRoot::FinalHost,
+            }
+            .normalize(&policy, &closure),
+            Err(CargoPlannerError::UnsupportedRequestSchema(4))
+        ));
+        let mut missing = policy.policy().clone();
+        missing.target_linkers.clear();
+        let missing = missing.normalize().unwrap();
+        assert!(matches!(
+            missing.selected_target_linker("wasm32-unknown-unknown"),
+            Err(ProductionBuildPolicyError::MissingTargetLinker(target))
+                if target == "wasm32-unknown-unknown"
+        ));
+    }
+
+    #[test]
+    fn schema_four_is_rejected_after_target_linker_binding() {
+        let policy = policy();
+        let mut wasm_context = context();
+        wasm_context.target = "wasm32-unknown-unknown".into();
+        let mut wasm_graph = graph();
+        wasm_graph.composition_target = wasm_context.target.clone();
+        wasm_graph.nodes[0].selector.compilation_target = wasm_context.target.clone();
+        let closure = closure_with_context(
+            &policy,
+            &wasm_context,
+            wasm_graph,
+            &BuildRequirements::default(),
+        );
+
+        assert!(matches!(
+            CargoPlannerRequest {
+                schema: 4,
+                root: CargoPlannerGraphRoot::FinalHost,
+            }
+            .normalize(&policy, &closure),
+            Err(CargoPlannerError::UnsupportedRequestSchema(4))
+        ));
+    }
+
+    #[test]
     fn schema_three_is_rejected_after_host_config_scoping() {
         let policy = policy();
         let request = CargoPlannerRequest {
@@ -1509,14 +1627,14 @@ mod tests {
 
     #[test]
     fn schema_two_binds_the_exact_pinned_channel_override() {
-        schema_four_binds_host_only_linker_configuration();
+        schema_five_binds_host_only_linker_configuration();
     }
 
     #[test]
     fn unit_graph_v1_envelope_is_closed_context_checked_and_mutation_detecting() {
         let policy = policy();
         let request = CargoPlannerRequest {
-            schema: 4,
+            schema: 5,
             root: CargoPlannerGraphRoot::FinalHost,
         }
         .normalize(&policy, &closure(&policy))
@@ -1530,7 +1648,7 @@ mod tests {
         assert_eq!(verified.root_count(), 1);
         assert_eq!(
             verified.digest(),
-            "e41fe7f5d240fe9a6dc53b84243aee0bff0db8ca084c6db6bcfbc22a3c2d56c9"
+            "c7c3953b9b4d7896c29ecedddcb9b5ae7263163f0ab203a6fc0b423c926e4051"
         );
 
         assert!(matches!(
@@ -1546,7 +1664,7 @@ mod tests {
         let rotated = rotated.normalize().unwrap();
         assert!(matches!(
             CargoPlannerRequest {
-                schema: 4,
+                schema: 5,
                 root: CargoPlannerGraphRoot::FinalHost,
             }
             .normalize(&rotated, &closure(&policy)),
@@ -1647,7 +1765,7 @@ mod tests {
         let policy = policy();
         let host_closure = closure(&policy);
         let request = CargoPlannerRequest {
-            schema: 4,
+            schema: 5,
             root: CargoPlannerGraphRoot::FinalHost,
         }
         .normalize(&policy, &host_closure)
@@ -1755,7 +1873,7 @@ mod tests {
         ] {
             let selected_closure = closure_with_artifact(&policy, target);
             let selected_request = CargoPlannerRequest {
-                schema: 4,
+                schema: 5,
                 root: CargoPlannerGraphRoot::FinalHost,
             }
             .normalize(&policy, &selected_closure)
@@ -1792,7 +1910,7 @@ mod tests {
         let policy = policy();
         let host_closure = closure(&policy);
         let request = CargoPlannerRequest {
-            schema: 4,
+            schema: 5,
             root: CargoPlannerGraphRoot::FinalHost,
         }
         .normalize(&policy, &host_closure)
@@ -1851,7 +1969,7 @@ mod tests {
         let policy = policy();
         let host_closure = closure(&policy);
         let request = CargoPlannerRequest {
-            schema: 4,
+            schema: 5,
             root: CargoPlannerGraphRoot::FinalHost,
         }
         .normalize(&policy, &host_closure)
@@ -1864,7 +1982,7 @@ mod tests {
         let sources = locked_sources();
 
         let standalone = CargoPlannerRequest {
-            schema: 4,
+            schema: 5,
             root: CargoPlannerGraphRoot::EmittedStandalone,
         }
         .normalize(&policy, &closure(&policy))
@@ -2122,7 +2240,7 @@ mod tests {
         assert!(output.stderr.is_empty());
         let policy = policy();
         let request = CargoPlannerRequest {
-            schema: 4,
+            schema: 5,
             root: CargoPlannerGraphRoot::FinalHost,
         }
         .normalize(&policy, &closure(&policy))
@@ -2144,7 +2262,7 @@ mod tests {
     fn channel_override_digest_argv_and_output_drift_fail_closed() {
         let policy = policy();
         let mut request = CargoPlannerRequest {
-            schema: 4,
+            schema: 5,
             root: CargoPlannerGraphRoot::FinalHost,
         }
         .normalize(&policy, &closure(&policy))
@@ -2172,7 +2290,7 @@ mod tests {
             },
         ] {
             let mut request = CargoPlannerRequest {
-                schema: 4,
+                schema: 5,
                 root: CargoPlannerGraphRoot::FinalHost,
             }
             .normalize(&policy, &closure(&policy))
@@ -2185,7 +2303,7 @@ mod tests {
         }
 
         let mut request = CargoPlannerRequest {
-            schema: 4,
+            schema: 5,
             root: CargoPlannerGraphRoot::FinalHost,
         }
         .normalize(&policy, &closure(&policy))
@@ -2197,7 +2315,7 @@ mod tests {
         ));
 
         let request = CargoPlannerRequest {
-            schema: 4,
+            schema: 5,
             root: CargoPlannerGraphRoot::FinalHost,
         }
         .normalize(&policy, &closure(&policy))
@@ -2240,7 +2358,7 @@ mod tests {
 
         let policy = policy();
         let request = CargoPlannerRequest {
-            schema: 4,
+            schema: 5,
             root: CargoPlannerGraphRoot::FinalHost,
         }
         .normalize(&policy, &closure(&policy))

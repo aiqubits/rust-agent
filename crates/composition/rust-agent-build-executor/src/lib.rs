@@ -188,13 +188,14 @@ pub use production_planner::{
 pub use production_policy::{
     BuildArtifactSelector, BuildArtifactTarget, BuildEnforcementContext,
     BuildEnforcementEnvironment, BuildEnforcementExecutable, BuildEnforcementHostLinker,
-    BuildEnforcementIdentity, BuildEnforcementReadInput, BuildEnforcementToolchain,
-    BuildPanicStrategy, DerivedExecutablePolicy, NormalizedProductionBuildPolicy,
-    ProductionAttestationPolicy, ProductionBuildExecutionPolicy, ProductionBuildPolicyError,
-    ProductionEnvironment, ProductionExecutable, ProductionFetchPolicy,
+    BuildEnforcementIdentity, BuildEnforcementReadInput, BuildEnforcementTargetLinker,
+    BuildEnforcementToolchain, BuildPanicStrategy, DerivedExecutablePolicy,
+    NormalizedProductionBuildPolicy, ProductionAttestationPolicy, ProductionBuildExecutionPolicy,
+    ProductionBuildPolicyError, ProductionEnvironment, ProductionExecutable, ProductionFetchPolicy,
     ProductionFetchRedirectPolicy, ProductionFileIdentity, ProductionHostLinker,
-    ProductionReadInput, ProductionSandboxBackend, ProductionToolIdentity, ProductionToolchain,
-    ProductionTreeIdentity, SigningHelper, TrustedReviewerPolicy, TrustedSigner,
+    ProductionReadInput, ProductionSandboxBackend, ProductionTargetLinker, ProductionToolIdentity,
+    ProductionToolchain, ProductionTreeIdentity, SigningHelper, TrustedReviewerPolicy,
+    TrustedSigner,
 };
 #[cfg(target_os = "linux")]
 pub use production_preflight::{

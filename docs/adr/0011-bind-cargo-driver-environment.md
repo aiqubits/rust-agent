@@ -76,7 +76,7 @@ cannot be accepted as version 5 evidence.
 
 ## Acceptance tests
 
-- `cargo_planner::tests::schema_four_binds_host_only_linker_configuration`
+- `cargo_planner::tests::schema_five_binds_host_only_linker_configuration`
 - `production_build::tests::cargo_build_retains_the_request_bound_channel_override`
 - `production_policy::host_linker_bundle_is_closed_selected_and_path_free`
 - `production_artifact::production_manifest_recomputes_identity_and_accounts_for_the_closed_artifact_tree`

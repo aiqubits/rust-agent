@@ -14,12 +14,12 @@ use rust_agent_build_executor::{
     HostBuildClosureStage, HostBuildInputClosure, HostBuildInputClosureError, HostCargoUnitGraph,
     HostFeaturePolicyClosure, LockedSourceClosure, LockedSourceError, NormalizedCargoFetchRequest,
     NormalizedLockedSourceClosure, NormalizedProductionBuildPolicy, ProductionAttestationPolicy,
-    ProductionBuildExecutionPolicy, ProductionFetchPolicy, ProductionFetchRedirectPolicy,
-    ProductionFileIdentity, ProductionSandboxBackend, ProductionToolIdentity, ProductionToolchain,
-    ProductionTreeIdentity, SigningHelper, SnapshotMaterializationError, TrustedReviewerPolicy,
-    TrustedSigner, ValidatedCargoFetchObservation, materialize_cargo_fetch_cache,
-    open_verified_cargo_fetch_cache, verify_development_host_closure_stage_chain,
-    verify_materialized_cargo_fetch_cache,
+    ProductionBuildExecutionPolicy, ProductionBuildPolicyError, ProductionFetchPolicy,
+    ProductionFetchRedirectPolicy, ProductionFileIdentity, ProductionSandboxBackend,
+    ProductionToolIdentity, ProductionToolchain, ProductionTreeIdentity, SigningHelper,
+    SnapshotMaterializationError, TrustedReviewerPolicy, TrustedSigner,
+    ValidatedCargoFetchObservation, materialize_cargo_fetch_cache, open_verified_cargo_fetch_cache,
+    verify_development_host_closure_stage_chain, verify_materialized_cargo_fetch_cache,
 };
 use rust_agent_composition::{
     CustomTargetSpecRecord,
@@ -34,7 +34,7 @@ fn digest(byte: char) -> String {
 
 fn policy() -> NormalizedProductionBuildPolicy {
     ProductionBuildExecutionPolicy {
-        schema: 3,
+        schema: 4,
         id: "ci-linux-hermetic-v1".into(),
         host: "cfg(target_os = \"linux\")".into(),
         backend: ProductionSandboxBackend::LinuxLandlockSeccomp,
@@ -82,6 +82,7 @@ fn policy() -> NormalizedProductionBuildPolicy {
         read_inputs: vec![],
         executables: vec![],
         host_linker: None,
+        target_linkers: vec![],
         environment: vec![],
         derived_executable: DerivedExecutablePolicy {
             roots: vec!["target".into()],
@@ -335,7 +336,7 @@ fn closure_digest_is_order_independent_and_stage_chain_is_exact() {
     assert_eq!(normalized.items(), reordered.items());
     assert_eq!(
         normalized.digest(),
-        "04a979c8f742fb981b0ce9a90cb92310f56cd68251dc1a9fbb253d5418d1a5e3"
+        "f91b8efcb71e4f0b1c81591e6ef777819da6a2ca3167b26969da5c77319454b0"
     );
 
     let pre = normalized
@@ -407,7 +408,9 @@ fn item_and_context_drift_fail_before_stage_receipts() {
     target_drift.build_context.target = "wasm32-unknown-unknown".into();
     assert!(matches!(
         target_drift.normalize(&policy),
-        Err(HostBuildInputClosureError::BuildEnforcementIdentityMismatch)
+        Err(HostBuildInputClosureError::ProductionPolicy(
+            ProductionBuildPolicyError::MissingTargetLinker(target)
+        )) if target == "wasm32-unknown-unknown"
     ));
 
     let mut graph_drift = closure(&policy);

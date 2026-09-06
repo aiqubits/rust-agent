@@ -5,8 +5,9 @@ use rust_agent_build_executor::{
     DerivedExecutablePolicy, ProductionAttestationPolicy, ProductionBuildExecutionPolicy,
     ProductionBuildPolicyError, ProductionEnvironment, ProductionExecutable, ProductionFetchPolicy,
     ProductionFetchRedirectPolicy, ProductionFileIdentity, ProductionHostLinker,
-    ProductionReadInput, ProductionSandboxBackend, ProductionToolIdentity, ProductionToolchain,
-    ProductionTreeIdentity, SigningHelper, TrustedReviewerPolicy, TrustedSigner,
+    ProductionReadInput, ProductionSandboxBackend, ProductionTargetLinker, ProductionToolIdentity,
+    ProductionToolchain, ProductionTreeIdentity, SigningHelper, TrustedReviewerPolicy,
+    TrustedSigner,
 };
 use rust_agent_composition::metadata::BuildRequirements;
 
@@ -16,7 +17,7 @@ fn digest(byte: &str) -> String {
 
 fn policy() -> ProductionBuildExecutionPolicy {
     ProductionBuildExecutionPolicy {
-        schema: 3,
+        schema: 4,
         id: "ci-linux-hermetic-v1".into(),
         host: "cfg(target_os = \"linux\")".into(),
         backend: ProductionSandboxBackend::LinuxLandlockSeccomp,
@@ -117,6 +118,13 @@ fn policy() -> ProductionBuildExecutionPolicy {
             executable: "target-linker".into(),
             helpers: vec!["host-linker-helper".into()],
         }),
+        target_linkers: vec![ProductionTargetLinker {
+            target: "wasm32-unknown-unknown".into(),
+            id: "wasm-rust-lld".into(),
+            path: "/runner-a/toolchain/lib/rustlib/host/bin/rust-lld".into(),
+            sha256: digest("d"),
+            version: "LLD fixture-v1".into(),
+        }],
         environment: vec![
             ProductionEnvironment {
                 id: "unused-channel".into(),
@@ -257,6 +265,7 @@ fn normalization_is_order_independent_and_schema_digest_is_frozen() {
         .signer_ids
         .reverse();
     reordered.executables.reverse();
+    reordered.target_linkers.reverse();
     reordered.read_inputs.reverse();
     reordered.environment.reverse();
     let reordered = reordered.normalize().unwrap();
@@ -272,13 +281,13 @@ fn normalization_is_order_independent_and_schema_digest_is_frozen() {
 
     assert_eq!(
         normalized.full_digest(),
-        "ceb50e62bca590cf00851599eed1e85d8270f56af73e006deac6e72cbc5f89ab"
+        "b6446f1560e2841d8e403b8258278381883d1796695f6e3e2495a47a17f78005"
     );
     assert_eq!(
         normalized
             .enforcement_identity_digest(&requirements(), &context())
             .unwrap(),
-        "704633b7a186ca41deea2b916536bf9862ec1ce400a7157977ec394277a4a14c"
+        "7b9435fcaea9921cf1763bc97327b25a790bdd98a8eac56a1aeb5cd97478b65e"
     );
 }
 
@@ -307,10 +316,10 @@ fn requirement_resolution_is_typed_and_minimal() {
 #[test]
 fn host_linker_bundle_is_closed_selected_and_path_free() {
     let mut old_schema = policy();
-    old_schema.schema = 2;
+    old_schema.schema = 3;
     assert!(matches!(
         old_schema.normalize(),
-        Err(ProductionBuildPolicyError::UnsupportedSchema(2))
+        Err(ProductionBuildPolicyError::UnsupportedSchema(3))
     ));
 
     let mut unordered = policy();
@@ -333,7 +342,8 @@ fn host_linker_bundle_is_closed_selected_and_path_free() {
         .enforcement_identity(&requirements, &context())
         .unwrap();
     let host_linker = identity.host_linker.unwrap();
-    assert_eq!(identity.backend_semantic_version, 5);
+    assert_eq!(identity.schema, 3);
+    assert_eq!(identity.backend_semantic_version, 6);
     assert_eq!(
         identity
             .cargo_driver_environment
@@ -396,6 +406,91 @@ fn host_linker_bundle_is_closed_selected_and_path_free() {
     assert!(matches!(
         missing.normalize(),
         Err(ProductionBuildPolicyError::InvalidHostLinker(_))
+    ));
+}
+
+#[test]
+fn target_linker_is_target_exact_selected_and_path_free() {
+    let normalized = policy().normalize().unwrap();
+    assert!(
+        normalized
+            .selected_target_linker("aarch64-unknown-linux-gnu")
+            .unwrap()
+            .is_none()
+    );
+    let mut wasm_context = context();
+    wasm_context.target = "wasm32-unknown-unknown".into();
+    let identity = normalized
+        .enforcement_identity(&requirements(), &wasm_context)
+        .unwrap();
+    let target_linker = identity.target_linker.unwrap();
+    assert_eq!(target_linker.target, "wasm32-unknown-unknown");
+    assert_eq!(target_linker.executable.id, "wasm-rust-lld");
+    assert_eq!(
+        target_linker.executable.logical_mount,
+        "/rust-agent/target-tools/wasm-rust-lld"
+    );
+    assert_eq!(
+        target_linker.cargo_config,
+        "target.wasm32-unknown-unknown.linker=\"/rust-agent/target-tools/wasm-rust-lld\""
+    );
+    assert!(
+        !serde_json::to_string(&target_linker)
+            .unwrap()
+            .contains("/runner-a/")
+    );
+
+    let original_digest = normalized
+        .enforcement_identity_digest(&requirements(), &wasm_context)
+        .unwrap();
+    let mut moved = policy();
+    moved.target_linkers[0].path = "/runner-b/toolchain/bin/rust-lld".into();
+    let moved = moved.normalize().unwrap();
+    assert_ne!(moved.full_digest(), normalized.full_digest());
+    assert_eq!(
+        moved
+            .enforcement_identity_digest(&requirements(), &wasm_context)
+            .unwrap(),
+        original_digest
+    );
+
+    let mut changed = policy();
+    changed.target_linkers[0].sha256 = digest("e");
+    assert_ne!(
+        changed
+            .normalize()
+            .unwrap()
+            .enforcement_identity_digest(&requirements(), &wasm_context)
+            .unwrap(),
+        original_digest
+    );
+    let mut duplicate_target = policy();
+    duplicate_target
+        .target_linkers
+        .push(duplicate_target.target_linkers[0].clone());
+    assert!(matches!(
+        duplicate_target.normalize(),
+        Err(ProductionBuildPolicyError::InvalidTargetLinker(_))
+    ));
+    let mut overlap = policy();
+    overlap.target_linkers[0].id = "target-linker".into();
+    assert!(matches!(
+        overlap.normalize(),
+        Err(ProductionBuildPolicyError::InvalidTargetLinker(_))
+    ));
+    let mut unsupported = policy();
+    unsupported.target_linkers[0].target = "aarch64-unknown-linux-gnu".into();
+    assert!(matches!(
+        unsupported.normalize(),
+        Err(ProductionBuildPolicyError::InvalidTargetLinker(_))
+    ));
+    let mut missing = policy();
+    missing.target_linkers.clear();
+    let missing = missing.normalize().unwrap();
+    assert!(matches!(
+        missing.enforcement_identity(&requirements(), &wasm_context),
+        Err(ProductionBuildPolicyError::MissingTargetLinker(target))
+            if target == "wasm32-unknown-unknown"
     ));
 }
 
@@ -546,7 +641,7 @@ fn attestation_trust_graph_and_closed_toml_fail_closed() {
         .unwrap()
         .normalize()
         .unwrap();
-    let unknown = encoded.replacen("schema = 3", "schema = 3\nambient-home = true", 1);
+    let unknown = encoded.replacen("schema = 4", "schema = 4\nambient-home = true", 1);
     assert!(matches!(
         ProductionBuildExecutionPolicy::from_toml(&unknown),
         Err(ProductionBuildPolicyError::Toml(_))
