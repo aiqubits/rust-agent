@@ -7,7 +7,7 @@ represented in `docs/invariant-tests.md` and all applicable gates pass.
 |---|---|---|
 | 0 — repository and contract | Complete | Rust/Cargo 1.97.1 synchronization, workspace/deny/ADR gates, effect-free core/runtime contracts, checked lifecycle identities, closed target-fact/custom-target records, globally bounded catalog owners and symbolic per-target support analysis, resource-namespace bootstrap contracts, Host/runtime metadata, canonical Host Cargo unit-graph schemas and privacy fixtures are implemented. Production composition discovers schema-owned Capability/Component/runtime/Host and direct-root build-requirement metadata from workspace package manifests through bounded, timed, offline, isolated `cargo metadata`; package/path ownership is derived from the exact workspace-member result, unknown/mixed/spoofed metadata and default-feature drift fail closed, and a real discovery round-trip is checked against the test-only catalog fixture. All 12 Phase 0 acceptance criteria have exact non-wildcard mappings, and the mapping/CI gate passes. |
 | 1A — generated graph proof | Complete | The development-only generator/resolver/build path, path-free compose rustc executable/version/full-sysroot provenance, canonical target-fact and custom-spec snapshots with rustc/Cargo before/after drift checks, schema-owned Cargo package-metadata discovery, bounded/shared target-support analysis, direct-serde-bounded metadata/profile/trust/diagnostic/composition/security/Cargo-source collections, an identity-bound normalized catalog/trust-policy/evidence-byte/root-requirement generator-input commitment with resolver/attribution/generated-source/source-closure rederivation, selected-evidence snapshot verification, conservative aggregate App handoff, generated namespaced host APIs and required-field HostBindings builders, shared-host Config-field type/identity sealing with a real two-App same-identity/no-reopen external Host fixture, committed-built-in-fact Cargo target-dependency rewriting with transitive active path-package snapshots, composition-wide source entry/byte preflight before copy or hash, checked canonical resolution/manifests, exact Cargo.lock source projection, Cargo-config ancestor rejection, source snapshots, real graph presence/absence, integration verification, topology fixtures, target matrix and WASM packaging are implemented. A checked-in custom target now completes compose, lockfile generation and locked offline development build with the real pinned Rust/Cargo 1.97.1 toolchain. All 10 Phase 1A acceptance criteria have exact non-wildcard mappings, and every applicable local gate passes. Phase 1A artifacts remain `deployable=false`; immutable production mounted-view enforcement remains a Phase 1B gate. |
-| 1B — Linux production build | Implementation complete; runner revalidation pending | All 12 acceptance criteria remain mapped. ADRs 0009–0011 close Host-linker and inherited Cargo-driver execution. ADR 0012 now binds the `wasm32-unknown-unknown` Target linker through production-policy schema 4, input request/observation schemas 4/3, planner schema 5 and enforcement schema/backend semantics 3/6 while retaining a non-executable sysroot. Focused tests and the real cross planner pass locally. A fresh successful Ubuntu 24.04 production gate is still required before the phase or any artifact is called deployable. |
+| 1B — Linux production build | Implementation complete; runner revalidation pending | All 12 acceptance criteria remain mapped. The production graph and observer now retain exact Cargo extern-crate aliases in addition to the Host/Target, linker and inherited Cargo-driver contracts from ADRs 0009–0012. Focused tests and the real cross planner pass locally. A fresh successful Ubuntu 24.04 production gate is still required before the phase or any artifact is called deployable. |
 | 2 — minimal runtime spine | Not started | The Phase 1A gate has passed; implementation must provide real minimal runtime behavior and must not be represented by empty product crates. |
 | 3 — tool execution plane | Not started | The Phase 1A contract is stable; no Phase 3 implementation has started. |
 | 4 — local execution providers | Not started | Real-target security regressions required. |
@@ -214,7 +214,9 @@ No test result above is evidence for Phase 1B deployability or for a Phase 2+ ru
   closure matches the planner request, its Cargo.lock matches the normalized source closure,
   path/registry/git package ids resolve to the exact locked source identities, the single root
   matches the typed artifact selector and a closed request/envelope-bound edge-semantics record
-  covers every raw edge exactly once. Cross-compile build scripts, proc macros and their transitive
+  covers every raw edge exactly once. Each normalized edge retains Cargo's exact extern-crate name,
+  including dependency aliases, in canonical graph ordering, digest and planned/observed equality;
+  invalid or renamed observation drift fails closed. Cross-compile build scripts, proc macros and their transitive
   units remain in the BuildHost domain while artifact and normal target dependencies remain in the
   Target domain; closure, lock, source, root, target kind, edge identity/kind/domain or sidecar
   schema drift fails closed;
@@ -303,16 +305,13 @@ preprovisioned and authenticated network fetch, the immutable Cargo planner, cro
 scripts/proc macros, exact observed graphs, standalone output, sandboxed pinned wasm-bindgen, and
 Host integration pre/build/post. Completion requires an externally signed one-use handle; its
 append-only attestation is durably published before an opaque permit can atomically expose the
-`deployable=true` artifact, and production inspection rechecks both. GitHub run `34030238776`
+`deployable=true` artifact, and production inspection rechecks both. GitHub run `34055118763`
 passed Quality, the real Landlock ABI 2 gate, the namespace/descendant escape matrix, every fetch
-fixture and the immutable trusted planner. Its bounded diagnostics then exposed two remaining
-compatibility boundaries: Cargo 1.97.1 uses the already-planned `#<version>` package-id form when a
-path package name equals its source-directory basename, and the WASM target link attempts to execute
-the pinned sysroot's `rust-lld`, which the closed executable policy correctly rejects until the
-explicit target-linker contract required by ADR 0009 exists. The message verifier now accepts both
-canonical Cargo 1.97.1 path package-id forms while retaining exact source-root matching. Accepted
-ADR 0012 and its implementation now provide the target-exact, separately
-descriptor-mounted/probed linker identity without making the sysroot executable. The focused
-policy/planner/preflight/observer regressions and real cross planner pass locally; a fresh successful
-Ubuntu 24.04 Phase 1B run remains. The local host's Landlock ABI 1 still cannot supply the required
-`Refer` enforcement.
+fixture, the immutable trusted planner, the cross-compiled observer, standalone pipeline and Host
+integration pipeline. Its only failing fixture isolated Cargo's renamed `rustversion_compat`
+build-dependency: the verified edge sidecar retained that alias but `HostCargoUnitGraph` discarded it
+and the rustc observer guessed the target name `rustversion`. The graph now retains and digest-binds
+the exact extern-crate name and the observer verifies the same alias plus artifact identity; focused
+positive, drift and invalid-input regressions and the complete executor test suite pass locally. A
+fresh successful Ubuntu 24.04 Phase 1B run remains. The local host's Landlock ABI 1 still cannot
+supply the required `Refer` enforcement.

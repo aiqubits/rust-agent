@@ -480,6 +480,7 @@ pub fn normalize_cargo_unit_graph(
         edges.push(CargoUnitEdge {
             dependent: dependent.selector.clone(),
             dependency: dependency.selector.clone(),
+            extern_crate_name: semantic.extern_crate_name.clone(),
             dependency_kind: semantic.dependency_kind,
             target_evaluation_domain: semantic.target_evaluation_domain,
         });

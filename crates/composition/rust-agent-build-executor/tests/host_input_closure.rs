@@ -179,6 +179,7 @@ fn unit_graph() -> HostCargoUnitGraph {
         edges: vec![CargoUnitEdge {
             dependent: target_selector(),
             dependency: host_selector(),
+            extern_crate_name: "build_script_build".into(),
             dependency_kind: CargoDependencyKind::Build,
             target_evaluation_domain: CargoTargetEvaluationDomain::BuildHost,
         }],
@@ -336,7 +337,7 @@ fn closure_digest_is_order_independent_and_stage_chain_is_exact() {
     assert_eq!(normalized.items(), reordered.items());
     assert_eq!(
         normalized.digest(),
-        "f91b8efcb71e4f0b1c81591e6ef777819da6a2ca3167b26969da5c77319454b0"
+        "74204426c7750c994b58cc62517371762325841747d1afd00bffa8b7ccc55f54"
     );
 
     let pre = normalized

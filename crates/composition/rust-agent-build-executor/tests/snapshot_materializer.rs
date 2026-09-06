@@ -339,6 +339,7 @@ fn unit_graph() -> HostCargoUnitGraph {
         edges: vec![CargoUnitEdge {
             dependent: target_selector(),
             dependency: host_selector(),
+            extern_crate_name: "build_script_build".into(),
             dependency_kind: CargoDependencyKind::Build,
             target_evaluation_domain: CargoTargetEvaluationDomain::BuildHost,
         }],

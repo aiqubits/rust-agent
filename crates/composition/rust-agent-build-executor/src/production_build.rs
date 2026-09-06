@@ -1795,19 +1795,18 @@ fn verify_extern_edges(
     externs: &BTreeMap<String, String>,
     artifact_files: &BTreeMap<String, crate::CargoUnitSelector>,
 ) -> Result<(), TrustedCargoBuildError> {
-    let expected = planned
+    let expected_edges = planned
         .edges()
         .iter()
         .filter(|edge| &edge.dependent == dependent)
         .filter(|edge| edge.dependency.compile_mode != CargoCompileMode::RunCustomBuild)
-        .map(|edge| {
-            (
-                edge.dependency.target_name.replace('-', "_"),
-                edge.dependency.clone(),
-            )
-        })
+        .collect::<Vec<_>>();
+    let expected = expected_edges
+        .iter()
+        .map(|edge| (edge.extern_crate_name.clone(), edge.dependency.clone()))
         .collect::<BTreeMap<_, _>>();
-    if expected.len() == externs.len()
+    if expected.len() == expected_edges.len()
+        && expected.len() == externs.len()
         && expected.iter().all(|(name, selector)| {
             externs.get(name).and_then(|path| artifact_files.get(path)) == Some(selector)
         })
@@ -2780,7 +2779,7 @@ mod tests {
     }
 
     #[test]
-    fn extern_edges_require_exact_equality() {
+    fn renamed_extern_edges_require_exact_name_and_artifact_equality() {
         let graph = graph(true);
         let dependent = graph
             .nodes()
@@ -2798,7 +2797,7 @@ mod tests {
         verify_extern_edges(
             &graph,
             dependent,
-            &BTreeMap::from([("dependency".into(), dependency_path.into())]),
+            &BTreeMap::from([("fixture_dependency".into(), dependency_path.into())]),
             &artifact_files,
         )
         .unwrap();
@@ -2806,8 +2805,17 @@ mod tests {
             verify_extern_edges(
                 &graph,
                 dependent,
+                &BTreeMap::from([("dependency".into(), dependency_path.into())]),
+                &artifact_files,
+            ),
+            Err(TrustedCargoBuildError::UnitObservationMismatch)
+        ));
+        assert!(matches!(
+            verify_extern_edges(
+                &graph,
+                dependent,
                 &BTreeMap::from([
-                    ("dependency".into(), dependency_path.into()),
+                    ("fixture_dependency".into(), dependency_path.into()),
                     ("unplanned".into(), dependency_path.into()),
                 ]),
                 &artifact_files,
@@ -2849,6 +2857,7 @@ mod tests {
             edges.push(CargoUnitEdge {
                 dependent: fixture,
                 dependency,
+                extern_crate_name: "fixture_dependency".into(),
                 dependency_kind: CargoDependencyKind::Normal,
                 target_evaluation_domain: CargoTargetEvaluationDomain::Target,
             });

@@ -128,6 +128,8 @@ pub enum CargoTargetEvaluationDomain {
 pub struct CargoUnitEdge {
     pub dependent: CargoUnitSelector,
     pub dependency: CargoUnitSelector,
+    #[serde(rename = "extern-crate-name")]
+    pub extern_crate_name: String,
     #[serde(rename = "dependency-kind")]
     pub dependency_kind: CargoDependencyKind,
     #[serde(rename = "target-evaluation-domain")]
@@ -193,6 +195,8 @@ pub enum CargoUnitGraphError {
     MissingEdgeNode(Box<CargoUnitEdge>),
     #[error("duplicate Cargo unit edge: {0:?}")]
     DuplicateEdge(Box<CargoUnitEdge>),
+    #[error("Cargo compile unit has an ambiguous extern-crate name: {0:?}")]
+    AmbiguousExternCrateName(Box<CargoUnitEdge>),
     #[error("HostCargoUnitGraph contains a dependency cycle")]
     DependencyCycle,
     #[error("Cargo edge dependency kind/domain does not match its dependency unit: {0:?}")]
@@ -236,6 +240,7 @@ impl HostCargoUnitGraph {
         }
 
         let mut edges = BTreeSet::new();
+        let mut extern_names = BTreeSet::new();
         for edge in &self.edges {
             if !nodes.contains_key(&edge.dependent) || !nodes.contains_key(&edge.dependency) {
                 return Err(CargoUnitGraphError::MissingEdgeNode(Box::new(edge.clone())));
@@ -243,6 +248,13 @@ impl HostCargoUnitGraph {
             validate_edge(edge)?;
             if !edges.insert(edge.clone()) {
                 return Err(CargoUnitGraphError::DuplicateEdge(Box::new(edge.clone())));
+            }
+            if edge.dependency.compile_mode != CargoCompileMode::RunCustomBuild
+                && !extern_names.insert((edge.dependent.clone(), edge.extern_crate_name.clone()))
+            {
+                return Err(CargoUnitGraphError::AmbiguousExternCrateName(Box::new(
+                    edge.clone(),
+                )));
             }
         }
         validate_acyclic(&nodes, &edges)?;
@@ -519,6 +531,11 @@ fn validate_acyclic(
 }
 
 fn validate_edge(edge: &CargoUnitEdge) -> Result<(), CargoUnitGraphError> {
+    if !valid_cargo_name(&edge.extern_crate_name) {
+        return Err(CargoUnitGraphError::InvalidSelector(
+            "invalid `extern-crate-name`".into(),
+        ));
+    }
     let expected_domain = match edge.dependency.compilation_kind {
         CargoCompilationKind::BuildHost => CargoTargetEvaluationDomain::BuildHost,
         CargoCompilationKind::Target => CargoTargetEvaluationDomain::Target,
@@ -532,6 +549,15 @@ fn validate_edge(edge: &CargoUnitEdge) -> Result<(), CargoUnitGraphError> {
         )));
     }
     Ok(())
+}
+
+fn valid_cargo_name(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value.as_bytes()[0].is_ascii_alphabetic()
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
 }
 
 fn validate_source(field: &'static str, value: &str) -> Result<(), CargoUnitGraphError> {
@@ -656,6 +682,7 @@ mod tests {
             edges: vec![CargoUnitEdge {
                 dependent: target,
                 dependency: build,
+                extern_crate_name: "build_script_build".into(),
                 dependency_kind: CargoDependencyKind::Build,
                 target_evaluation_domain: CargoTargetEvaluationDomain::BuildHost,
             }],
@@ -754,6 +781,15 @@ mod tests {
             wrong_domain.normalize(),
             Err(CargoUnitGraphError::EdgeDomainMismatch(_))
         ));
+
+        for invalid_name in ["", "0dependency", "dependency name", "dependency!"] {
+            let mut invalid = graph();
+            invalid.edges[0].extern_crate_name = invalid_name.into();
+            assert!(matches!(
+                invalid.normalize(),
+                Err(CargoUnitGraphError::InvalidSelector(_))
+            ));
+        }
     }
 
     #[test]
@@ -779,10 +815,35 @@ mod tests {
             Err(CargoUnitGraphError::DuplicateEdge(_))
         ));
 
+        let mut ambiguous_extern = graph();
+        let second_dependency = selector(
+            "second-helper",
+            CargoCrateKind::Library,
+            CargoCompilationKind::Target,
+        );
+        ambiguous_extern.nodes.push(CargoUnit {
+            selector: second_dependency.clone(),
+            features: vec![],
+            build_script: false,
+            proc_macro: false,
+        });
+        ambiguous_extern.edges.push(CargoUnitEdge {
+            dependent: ambiguous_extern.edges[0].dependent.clone(),
+            dependency: second_dependency,
+            extern_crate_name: ambiguous_extern.edges[0].extern_crate_name.clone(),
+            dependency_kind: CargoDependencyKind::Normal,
+            target_evaluation_domain: CargoTargetEvaluationDomain::Target,
+        });
+        assert!(matches!(
+            ambiguous_extern.normalize(),
+            Err(CargoUnitGraphError::AmbiguousExternCrateName(_))
+        ));
+
         let mut cyclic = graph();
         let reverse = CargoUnitEdge {
             dependent: cyclic.edges[0].dependency.clone(),
             dependency: cyclic.edges[0].dependent.clone(),
+            extern_crate_name: "shared_helper".into(),
             dependency_kind: CargoDependencyKind::Normal,
             target_evaluation_domain: CargoTargetEvaluationDomain::Target,
         };
@@ -793,6 +854,15 @@ mod tests {
         ));
 
         let planned = graph().normalize().unwrap();
+        let mut renamed = graph();
+        renamed.edges[0].extern_crate_name = "renamed_build_script".into();
+        let renamed = renamed.normalize().unwrap();
+        assert_ne!(planned.digest(), renamed.digest());
+        assert!(matches!(
+            planned.verify_observation(&renamed),
+            Err(CargoUnitGraphError::ObservationDrift)
+        ));
+
         let mut observed = graph();
         observed.nodes[0].features.push("z-extra".into());
         let observed = observed.normalize().unwrap();

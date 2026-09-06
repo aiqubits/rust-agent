@@ -1837,8 +1837,21 @@ mod tests {
             )
         }));
         assert_eq!(
+            normalized
+                .edges()
+                .iter()
+                .map(|edge| edge.extern_crate_name.as_str())
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([
+                "build_helper",
+                "build_script_build",
+                "git_helper",
+                "macro_helper",
+            ])
+        );
+        assert_eq!(
             normalized.digest(),
-            "169c997ed7c500fec5535444ac032716291e55c81827959bc23edb7aa33a76e7"
+            "ea323e36c4950d10e3713ab79daa14dfdb0fd5eaf2db58e2b5ef770b708954df"
         );
 
         let mut reordered = semantics;

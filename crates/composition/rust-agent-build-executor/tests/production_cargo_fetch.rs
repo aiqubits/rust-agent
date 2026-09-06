@@ -816,6 +816,7 @@ fn main() {
     let mut graph_edges = vec![CargoUnitEdge {
         dependent: graph_nodes[0].selector.clone(),
         dependency: graph_nodes[1].selector.clone(),
+        extern_crate_name: "generated_agent".into(),
         dependency_kind: CargoDependencyKind::Normal,
         target_evaluation_domain: CargoTargetEvaluationDomain::Target,
     }];
@@ -824,36 +825,42 @@ fn main() {
             CargoUnitEdge {
                 dependent: graph_nodes[1].selector.clone(),
                 dependency: graph_nodes[3].selector.clone(),
+                extern_crate_name: "build_script_build".into(),
                 dependency_kind: CargoDependencyKind::Build,
                 target_evaluation_domain: CargoTargetEvaluationDomain::BuildHost,
             },
             CargoUnitEdge {
                 dependent: graph_nodes[1].selector.clone(),
                 dependency: graph_nodes[4].selector.clone(),
+                extern_crate_name: "macro_helper".into(),
                 dependency_kind: CargoDependencyKind::Normal,
                 target_evaluation_domain: CargoTargetEvaluationDomain::BuildHost,
             },
             CargoUnitEdge {
                 dependent: graph_nodes[1].selector.clone(),
                 dependency: graph_nodes[5].selector.clone(),
+                extern_crate_name: "shared_helper".into(),
                 dependency_kind: CargoDependencyKind::Normal,
                 target_evaluation_domain: CargoTargetEvaluationDomain::Target,
             },
             CargoUnitEdge {
                 dependent: graph_nodes[2].selector.clone(),
                 dependency: graph_nodes[6].selector.clone(),
+                extern_crate_name: "shared_helper".into(),
                 dependency_kind: CargoDependencyKind::Build,
                 target_evaluation_domain: CargoTargetEvaluationDomain::BuildHost,
             },
             CargoUnitEdge {
                 dependent: graph_nodes[3].selector.clone(),
                 dependency: graph_nodes[2].selector.clone(),
+                extern_crate_name: "build_script_build".into(),
                 dependency_kind: CargoDependencyKind::Build,
                 target_evaluation_domain: CargoTargetEvaluationDomain::BuildHost,
             },
             CargoUnitEdge {
                 dependent: graph_nodes[4].selector.clone(),
                 dependency: graph_nodes[6].selector.clone(),
+                extern_crate_name: "shared_helper".into(),
                 dependency_kind: CargoDependencyKind::Normal,
                 target_evaluation_domain: CargoTargetEvaluationDomain::BuildHost,
             },
@@ -862,6 +869,7 @@ fn main() {
         graph_edges.push(CargoUnitEdge {
             dependent: graph_nodes[0].selector.clone(),
             dependency: graph_nodes[2].selector.clone(),
+            extern_crate_name: "foo".into(),
             dependency_kind: CargoDependencyKind::Normal,
             target_evaluation_domain: CargoTargetEvaluationDomain::Target,
         });

@@ -1173,6 +1173,7 @@ mod tests {
         let added_edge = CargoUnitEdge {
             dependent: selector(),
             dependency: added_selector.clone(),
+            extern_crate_name: "feature_activated_helper".into(),
             dependency_kind: CargoDependencyKind::Normal,
             target_evaluation_domain: CargoTargetEvaluationDomain::Target,
         };
@@ -1239,6 +1240,7 @@ mod tests {
             edges: vec![CargoUnitEdge {
                 dependent: product,
                 dependency: selector(),
+                extern_crate_name: "shared_helper".into(),
                 dependency_kind: CargoDependencyKind::Normal,
                 target_evaluation_domain: CargoTargetEvaluationDomain::Target,
             }],
