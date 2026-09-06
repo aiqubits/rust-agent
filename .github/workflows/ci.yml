@@ -82,6 +82,19 @@ jobs:
       - name: Verify real namespace and descendant escape matrix
         run: cargo test -p rust-agent-build-executor --test linux_namespace_backend -- --ignored --test-threads=1
       - name: Verify trusted fetch planner build Host and WASM pipelines
-        run: cargo test -p rust-agent-build-executor --test production_cargo_fetch -- --ignored --test-threads=1
+        shell: bash
+        run: |
+          set -o pipefail
+          log_file="$(mktemp)"
+          trap 'rm -f "$log_file"' EXIT
+          if cargo test -p rust-agent-build-executor --test production_cargo_fetch -- --ignored --test-threads=1 2>&1 | tee "$log_file"; then
+            exit 0
+          fi
+          failure="$(tail -n 80 "$log_file")"
+          failure="${failure//'%'/'%25'}"
+          failure="${failure//$'\r'/'%0D'}"
+          failure="${failure//$'\n'/'%0A'}"
+          printf '::error title=Phase 1B trusted pipeline failure::%s\n' "$failure"
+          exit 1
         env:
           RUST_AGENT_CLI_BIN: ${{ github.workspace }}/target/debug/rust-agent
