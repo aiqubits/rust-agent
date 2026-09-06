@@ -727,6 +727,7 @@ fn verify_build_script_message(
         .filter(|selector| {
             selector.compile_mode == CargoCompileMode::RunCustomBuild
                 && package_id_matches(package_id, &selector.package)
+                && build_script_out_dir_matches_selector(out_dir, selector, planned)
         })
         .cloned()
         .collect::<Vec<_>>();
@@ -737,6 +738,35 @@ fn verify_build_script_message(
         return Err(TrustedCargoBuildError::InvalidCargoMessages);
     }
     Ok(())
+}
+
+fn build_script_out_dir_matches_selector(
+    out_dir: &str,
+    selector: &crate::CargoUnitSelector,
+    planned: &NormalizedHostCargoUnitGraph,
+) -> bool {
+    let profile = if selector.profile == "dev" {
+        "debug"
+    } else {
+        &selector.profile
+    };
+    if !canonical_path_component(profile) {
+        return false;
+    }
+    let root = match selector.cargo_target_context {
+        crate::CargoUnitTargetContext::BuildHost => format!("{LOGICAL_TARGET}/{profile}"),
+        crate::CargoUnitTargetContext::CompositionTarget => {
+            let Some(target) = Path::new(planned.composition_target())
+                .file_stem()
+                .and_then(|target| target.to_str())
+                .filter(|target| canonical_path_component(target))
+            else {
+                return false;
+            };
+            format!("{LOGICAL_TARGET}/{target}/{profile}")
+        }
+    };
+    logical_descendant(out_dir, &root)
 }
 
 fn match_message_selector(
@@ -2200,6 +2230,92 @@ mod tests {
                 Err(TrustedCargoBuildError::InvalidCargoMessages)
             ));
         }
+    }
+
+    #[test]
+    fn build_script_out_dirs_distinguish_host_and_target_contexts() {
+        let mut host_selector = selector("fixture");
+        host_selector.compilation_kind = CargoCompilationKind::BuildHost;
+        host_selector.compilation_target = "build-host".into();
+        host_selector.cargo_target_context = crate::CargoUnitTargetContext::BuildHost;
+        host_selector.compile_mode = CargoCompileMode::RunCustomBuild;
+        host_selector.crate_kind = CargoCrateKind::CustomBuild;
+        let mut target_selector = host_selector.clone();
+        target_selector.cargo_target_context = crate::CargoUnitTargetContext::CompositionTarget;
+        let graph = HostCargoUnitGraph {
+            schema: 2,
+            planner: CargoUnitGraphPlannerIdentity {
+                interface: "cargo-unit-graph-v1".into(),
+                cargo_version: "1.97.1".into(),
+                cargo_digest: "1".repeat(64),
+                rustc_version: "1.97.1".into(),
+                rustc_digest: "2".repeat(64),
+            },
+            build_triple: "build-host".into(),
+            composition_target: "test-target".into(),
+            profile: "debug".into(),
+            nodes: [&host_selector, &target_selector]
+                .into_iter()
+                .map(|selector| CargoUnit {
+                    selector: selector.clone(),
+                    features: vec![],
+                    build_script: true,
+                    proc_macro: false,
+                })
+                .collect(),
+            edges: vec![],
+        }
+        .normalize()
+        .unwrap();
+        let message = |out_dir: &str| {
+            json!({
+                "reason": "build-script-executed",
+                "package_id": "path+file:///rust-agent/closure/fixture#fixture@1.0.0",
+                "linked_libs": [],
+                "linked_paths": [],
+                "cfgs": [],
+                "env": [],
+                "out_dir": out_dir
+            })
+        };
+        let host_out = "/rust-agent/target/debug/build/fixture-host/out";
+        let target_out = "/rust-agent/target/test-target/debug/build/fixture-target/out";
+        let mut observed = BTreeSet::new();
+        verify_build_script_message(
+            message(host_out).as_object().unwrap(),
+            &graph,
+            &mut observed,
+        )
+        .unwrap();
+        verify_build_script_message(
+            message(target_out).as_object().unwrap(),
+            &graph,
+            &mut observed,
+        )
+        .unwrap();
+        assert_eq!(observed, BTreeSet::from([host_selector, target_selector]));
+
+        for invalid in [
+            "/rust-agent/target/other-target/debug/build/fixture/out",
+            "/rust-agent/target/debug/../test-target/debug/build/fixture/out",
+        ] {
+            assert!(matches!(
+                verify_build_script_message(
+                    message(invalid).as_object().unwrap(),
+                    &graph,
+                    &mut BTreeSet::new(),
+                ),
+                Err(TrustedCargoBuildError::InvalidCargoMessages)
+            ));
+        }
+        assert!(matches!(
+            verify_build_script_message(
+                message(host_out).as_object().unwrap(),
+                &graph,
+                &mut observed,
+            ),
+            Err(TrustedCargoBuildError::InvalidCargoMessages)
+        ));
     }
 
     #[test]
