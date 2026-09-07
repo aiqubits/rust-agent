@@ -373,18 +373,10 @@ fn validate_component(
             });
         }
         match capability.binding {
-            BindingKind::Registry if requirement.key.is_none() => {
-                return Err(CatalogError::InvalidBinding(
-                    spec.id.clone(),
-                    format!(
-                        "registry requirement `{}` needs a key",
-                        requirement.capability
-                    ),
-                ));
-            }
-            BindingKind::Registry => {
+            BindingKind::Registry if requirement.key.is_some() => {
                 validate_id(requirement.key.as_deref().unwrap(), "provider key")?;
             }
+            BindingKind::Registry => {}
             _ if requirement.key.is_some() => {
                 return Err(CatalogError::InvalidBinding(
                     spec.id.clone(),

@@ -1,11 +1,314 @@
 //! Effect-free runtime primitives and shared lifecycle protocol types.
 
-use std::{fmt, sync::Arc};
+use std::{
+    any::Any,
+    collections::BTreeMap,
+    fmt,
+    future::Future,
+    num::{NonZeroU64, NonZeroUsize},
+    pin::Pin,
+    sync::{
+        Arc, RwLock,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+    },
+    time::{Duration, Instant},
+};
 
 pub use rust_agent_core::{
-    AgentLifecycleOperationId, AgentLifecycleOperationIdKind, AgentOperationRecoveryKey,
-    CompositionHash, Digest, SessionId,
+    AgentId, AgentLifecycleOperationId, AgentLifecycleOperationIdKind, AgentOperationRecoveryKey,
+    CompositionHash, Digest, MaybeSendSync, RequestId, SessionId,
 };
+
+/// Cloneable cooperative cancellation signal owned by a runtime scope.
+#[derive(Clone, Default)]
+pub struct CancellationToken(Arc<AtomicBool>);
+
+impl CancellationToken {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn cancel(&self) -> bool {
+        !self.0.swap(true, Ordering::AcqRel)
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.0.load(Ordering::Acquire)
+    }
+}
+
+impl fmt::Debug for CancellationToken {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CancellationToken")
+            .field("cancelled", &self.is_cancelled())
+            .finish()
+    }
+}
+
+/// Monotonic identity of one in-process Agent incarnation.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct AgentLifecycleNonce(NonZeroU64);
+
+impl AgentLifecycleNonce {
+    #[doc(hidden)]
+    pub const fn from_nonzero(value: NonZeroU64) -> Self {
+        Self(value)
+    }
+
+    pub const fn get(self) -> u64 {
+        self.0.get()
+    }
+}
+
+/// Identity sealed into one generated model-caller scope.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ModelCallScopeIdentity {
+    agent_id: AgentId,
+    lifecycle: AgentLifecycleNonce,
+    session_id: Option<SessionId>,
+    composition: CompositionHash,
+    catalog: Digest,
+}
+
+impl ModelCallScopeIdentity {
+    #[doc(hidden)]
+    pub const fn for_generated_agent(
+        agent_id: AgentId,
+        lifecycle: AgentLifecycleNonce,
+        session_id: Option<SessionId>,
+        composition: CompositionHash,
+        catalog: Digest,
+    ) -> Self {
+        Self {
+            agent_id,
+            lifecycle,
+            session_id,
+            composition,
+            catalog,
+        }
+    }
+
+    pub const fn agent_id(&self) -> AgentId {
+        self.agent_id
+    }
+
+    pub const fn lifecycle(&self) -> AgentLifecycleNonce {
+        self.lifecycle
+    }
+
+    pub const fn session_id(&self) -> Option<SessionId> {
+        self.session_id
+    }
+
+    pub const fn composition(&self) -> CompositionHash {
+        self.composition
+    }
+
+    pub const fn catalog(&self) -> Digest {
+        self.catalog
+    }
+}
+
+/// Immutable, provider-neutral projection written before a model side effect.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ModelCallJournalProjection {
+    request_id: RequestId,
+    plan_digest: Digest,
+    request_digest: Digest,
+    route_digest: Digest,
+}
+
+impl ModelCallJournalProjection {
+    #[doc(hidden)]
+    pub const fn from_model_plan(
+        request_id: RequestId,
+        plan_digest: Digest,
+        request_digest: Digest,
+        route_digest: Digest,
+    ) -> Self {
+        Self {
+            request_id,
+            plan_digest,
+            request_digest,
+            route_digest,
+        }
+    }
+
+    pub const fn request_id(&self) -> RequestId {
+        self.request_id
+    }
+
+    pub const fn plan_digest(&self) -> Digest {
+        self.plan_digest
+    }
+
+    pub const fn request_digest(&self) -> Digest {
+        self.request_digest
+    }
+
+    pub const fn route_digest(&self) -> Digest {
+        self.route_digest
+    }
+}
+
+struct ModelJournalAuthorityWitness {
+    tag: NonZeroU64,
+    scope: ModelCallScopeIdentity,
+}
+
+/// The owned half of a generated request-journal authority.
+///
+/// It is deliberately neither `Clone` nor serializable.
+#[allow(missing_debug_implementations)]
+pub struct ModelRequestJournalIssuer {
+    witness: Arc<ModelJournalAuthorityWitness>,
+    next_record: AtomicU64,
+}
+
+/// The cloneable read-only half sealed into one model consumer binding.
+#[derive(Clone)]
+#[allow(missing_debug_implementations)]
+pub struct ModelRequestJournalVerifier {
+    witness: Arc<ModelJournalAuthorityWitness>,
+}
+
+/// Opaque proof that the exact model request reached its required journal level.
+#[allow(missing_debug_implementations)]
+pub struct RequestJournalProof {
+    witness: Arc<ModelJournalAuthorityWitness>,
+    record_sequence: NonZeroU64,
+    projection: ModelCallJournalProjection,
+    record_digest: Digest,
+    cancellation: CancellationToken,
+    deadline: Option<Instant>,
+    output_budget: NonZeroUsize,
+}
+
+impl RequestJournalProof {
+    pub const fn request_id(&self) -> RequestId {
+        self.projection.request_id()
+    }
+
+    pub fn cancellation(&self) -> CancellationToken {
+        self.cancellation.clone()
+    }
+
+    pub const fn deadline(&self) -> Option<Instant> {
+        self.deadline
+    }
+
+    pub const fn output_budget(&self) -> NonZeroUsize {
+        self.output_budget
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum JournalAuthorityError {
+    AuthorityExhausted,
+    RecordSequenceExhausted,
+}
+
+impl fmt::Display for JournalAuthorityError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::AuthorityExhausted => formatter.write_str("model journal authority exhausted"),
+            Self::RecordSequenceExhausted => {
+                formatter.write_str("model journal record sequence exhausted")
+            }
+        }
+    }
+}
+
+impl std::error::Error for JournalAuthorityError {}
+
+static NEXT_MODEL_JOURNAL_AUTHORITY: AtomicU64 = AtomicU64::new(1);
+
+#[derive(Debug)]
+pub struct ModelRequestJournalAuthority;
+
+impl ModelRequestJournalAuthority {
+    #[doc(hidden)]
+    pub fn issue_for_generated_scope(
+        scope: ModelCallScopeIdentity,
+    ) -> Result<(ModelRequestJournalIssuer, ModelRequestJournalVerifier), JournalAuthorityError>
+    {
+        let tag = NEXT_MODEL_JOURNAL_AUTHORITY
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| {
+                value.checked_add(1)
+            })
+            .map_err(|_| JournalAuthorityError::AuthorityExhausted)
+            .and_then(|value| {
+                NonZeroU64::new(value).ok_or(JournalAuthorityError::AuthorityExhausted)
+            })?;
+        let witness = Arc::new(ModelJournalAuthorityWitness { tag, scope });
+        Ok((
+            ModelRequestJournalIssuer {
+                witness: Arc::clone(&witness),
+                next_record: AtomicU64::new(1),
+            },
+            ModelRequestJournalVerifier { witness },
+        ))
+    }
+}
+
+impl ModelRequestJournalIssuer {
+    #[doc(hidden)]
+    pub fn seal_committed_record(
+        &self,
+        projection: ModelCallJournalProjection,
+        record_digest: Digest,
+        cancellation: CancellationToken,
+        deadline: Option<Instant>,
+        output_budget: NonZeroUsize,
+    ) -> Result<RequestJournalProof, JournalAuthorityError> {
+        let record_sequence = self
+            .next_record
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| {
+                value.checked_add(1)
+            })
+            .map_err(|_| JournalAuthorityError::RecordSequenceExhausted)
+            .and_then(|value| {
+                NonZeroU64::new(value).ok_or(JournalAuthorityError::RecordSequenceExhausted)
+            })?;
+        Ok(RequestJournalProof {
+            witness: Arc::clone(&self.witness),
+            record_sequence,
+            projection,
+            record_digest,
+            cancellation,
+            deadline,
+            output_budget,
+        })
+    }
+
+    #[doc(hidden)]
+    pub fn scope(&self) -> &ModelCallScopeIdentity {
+        &self.witness.scope
+    }
+}
+
+impl ModelRequestJournalVerifier {
+    #[doc(hidden)]
+    pub fn verifies(
+        &self,
+        proof: &RequestJournalProof,
+        projection: &ModelCallJournalProjection,
+        record_digest: Digest,
+    ) -> bool {
+        Arc::ptr_eq(&self.witness, &proof.witness)
+            && self.witness.tag == proof.witness.tag
+            && self.witness.scope == proof.witness.scope
+            && proof.record_sequence.get() != 0
+            && &proof.projection == projection
+            && proof.record_digest == record_digest
+    }
+
+    #[doc(hidden)]
+    pub fn scope(&self) -> &ModelCallScopeIdentity {
+        &self.witness.scope
+    }
+}
 
 /// Host-owned resource wrapper used by audited shared-handle App Components.
 ///
@@ -289,10 +592,11 @@ impl RuntimeAdapterIdentity {
 }
 
 /// An owned runtime primitive bundle. Phase 1A fixtures carry identity only.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone)]
 pub struct RuntimePrimitives {
     adapter: RuntimeAdapterIdentity,
     bundle_identity: Arc<RuntimePrimitiveBundleIdentity>,
+    owner: Option<Arc<dyn Any + Send + Sync>>,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -303,6 +607,18 @@ impl RuntimePrimitives {
         Self {
             adapter,
             bundle_identity: Arc::new(RuntimePrimitiveBundleIdentity),
+            owner: None,
+        }
+    }
+
+    pub fn new_owned<T>(adapter: RuntimeAdapterIdentity, owner: Arc<T>) -> Self
+    where
+        T: Any + Send + Sync,
+    {
+        Self {
+            adapter,
+            bundle_identity: Arc::new(RuntimePrimitiveBundleIdentity),
+            owner: Some(owner),
         }
     }
 
@@ -313,12 +629,41 @@ impl RuntimePrimitives {
     pub fn same_bundle_identity(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.bundle_identity, &other.bundle_identity)
     }
+
+    pub fn has_owned_driver(&self) -> bool {
+        self.owner.is_some()
+    }
 }
+
+impl fmt::Debug for RuntimePrimitives {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RuntimePrimitives")
+            .field("adapter", &self.adapter)
+            .field("has_owned_driver", &self.has_owned_driver())
+            .finish_non_exhaustive()
+    }
+}
+
+impl PartialEq for RuntimePrimitives {
+    fn eq(&self, other: &Self) -> bool {
+        self.adapter == other.adapter
+            && Arc::ptr_eq(&self.bundle_identity, &other.bundle_identity)
+            && match (&self.owner, &other.owner) {
+                (Some(left), Some(right)) => Arc::ptr_eq(left, right),
+                (None, None) => true,
+                _ => false,
+            }
+    }
+}
+
+impl Eq for RuntimePrimitives {}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RuntimePrimitiveError {
     InvalidAdapterIdentity,
     AdapterMismatch { expected: String, actual: String },
+    DriverConstructionFailed,
 }
 
 impl fmt::Display for RuntimePrimitiveError {
@@ -330,6 +675,9 @@ impl fmt::Display for RuntimePrimitiveError {
                     formatter,
                     "runtime adapter mismatch: expected {expected}, got {actual}"
                 )
+            }
+            Self::DriverConstructionFailed => {
+                formatter.write_str("runtime driver construction failed")
             }
         }
     }
@@ -570,25 +918,598 @@ pub enum AgentOperationAllocationError {
     UnsupportedRecovery,
 }
 
+impl fmt::Display for AgentOperationAllocationError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "{}",
+            match self {
+                Self::UnsupportedIntent => "unsupported lifecycle operation intent",
+                Self::AppClosed => "App is closed",
+                Self::OwnerClosed => "operation owner is closed",
+                Self::OwnerMismatch => "operation owner does not match",
+                Self::StoreUnavailable => "lifecycle store is unavailable",
+                Self::IssuerStateCorrupt => "lifecycle issuer state is corrupt",
+                Self::CounterExhausted => "lifecycle operation counter is exhausted",
+                Self::ReservationConflict =>
+                    "lifecycle reservation conflicts with an existing request",
+                Self::OperationConflict => "lifecycle operation conflicts with an existing request",
+                Self::OperationNotFound => "lifecycle operation was not found",
+                Self::ReservationStatusUnknown => "lifecycle reservation status is unknown",
+                Self::UnsupportedRecovery => "lifecycle operation cannot be recovered",
+            }
+        )
+    }
+}
+
+impl std::error::Error for AgentOperationAllocationError {}
+
+#[derive(Debug)]
+struct VolatileLifecycleWitness {
+    generation: NonZeroU64,
+}
+
+/// An unforgeable capability for one process-bound lifecycle operation.
+///
+/// The canonical id is observable, but this capability is not cloneable or
+/// serializable and is required to consume the allocation.
+#[allow(missing_debug_implementations)]
+pub struct VolatileLifecycleOperation {
+    id: AgentLifecycleOperationId,
+    witness: Arc<VolatileLifecycleWitness>,
+}
+
+impl VolatileLifecycleOperation {
+    pub const fn id(&self) -> AgentLifecycleOperationId {
+        self.id
+    }
+}
+
+/// Process-local, monotonic lifecycle operation issuer.
+#[allow(missing_debug_implementations)]
+pub struct VolatileLifecycleOperationIssuer {
+    witness: Arc<VolatileLifecycleWitness>,
+    next: AtomicU64,
+}
+
+static NEXT_VOLATILE_ISSUER_GENERATION: AtomicU64 = AtomicU64::new(1);
+
+impl VolatileLifecycleOperationIssuer {
+    #[doc(hidden)]
+    pub fn for_generated_app() -> Result<Self, AgentOperationAllocationError> {
+        let generation = NEXT_VOLATILE_ISSUER_GENERATION
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| {
+                value.checked_add(1)
+            })
+            .map_err(|_| AgentOperationAllocationError::CounterExhausted)
+            .and_then(|value| {
+                NonZeroU64::new(value).ok_or(AgentOperationAllocationError::IssuerStateCorrupt)
+            })?;
+        Ok(Self {
+            witness: Arc::new(VolatileLifecycleWitness { generation }),
+            next: AtomicU64::new(1),
+        })
+    }
+
+    #[doc(hidden)]
+    pub fn allocate(&self) -> Result<VolatileLifecycleOperation, AgentOperationAllocationError> {
+        let counter = self
+            .next
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| {
+                value.checked_add(1)
+            })
+            .map_err(|_| AgentOperationAllocationError::CounterExhausted)
+            .and_then(|value| {
+                NonZeroU64::new(value).ok_or(AgentOperationAllocationError::IssuerStateCorrupt)
+            })?;
+        let mut bytes = [0_u8; AgentLifecycleOperationId::ENCODED_LEN];
+        bytes[0] = AgentLifecycleOperationId::VERSION;
+        bytes[1] = 1;
+        bytes[2..24].copy_from_slice(b"rust-agent-volatile-v1");
+        bytes[26..34].copy_from_slice(&self.witness.generation.get().to_be_bytes());
+        bytes[34..42].copy_from_slice(&self.witness.generation.get().to_be_bytes());
+        bytes[42..50].copy_from_slice(&counter.get().to_be_bytes());
+        let id = AgentLifecycleOperationId::from_canonical_v1_bytes(bytes)
+            .map_err(|_| AgentOperationAllocationError::IssuerStateCorrupt)?;
+        Ok(VolatileLifecycleOperation {
+            id,
+            witness: Arc::clone(&self.witness),
+        })
+    }
+
+    #[doc(hidden)]
+    pub fn owns(&self, operation: &VolatileLifecycleOperation) -> bool {
+        Arc::ptr_eq(&self.witness, &operation.witness)
+            && operation.id.kind() == AgentLifecycleOperationIdKind::Volatile
+    }
+}
+
 /// Bounded public event-feed cursor.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
-pub struct AgentEventCursor(u64);
+pub struct AgentEventCursor {
+    agent_id: AgentId,
+    lifecycle: AgentLifecycleNonce,
+    sequence: NonZeroU64,
+}
 
 impl AgentEventCursor {
-    pub const fn initial() -> Self {
-        Self(0)
+    #[doc(hidden)]
+    pub const fn from_parts(
+        agent_id: AgentId,
+        lifecycle: AgentLifecycleNonce,
+        sequence: NonZeroU64,
+    ) -> Self {
+        Self {
+            agent_id,
+            lifecycle,
+            sequence,
+        }
+    }
+
+    pub const fn agent_id(self) -> AgentId {
+        self.agent_id
+    }
+
+    pub const fn lifecycle(self) -> AgentLifecycleNonce {
+        self.lifecycle
     }
 
     pub const fn value(self) -> u64 {
-        self.0
+        self.sequence.get()
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AgentEventFeedBudgetResource {
+    SubscriberCount,
+    BufferedEvents,
+    BufferedBytes,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum AgentEventFeedError {
-    Lagged { next_available: AgentEventCursor },
+    StaleLifecycle,
+    CursorFromDifferentAgent,
+    CursorExpired {
+        oldest_available: Option<AgentEventCursor>,
+    },
+    InvalidLimit,
+    AdmissionBudgetExceeded {
+        resource: AgentEventFeedBudgetResource,
+        requested: u64,
+        limit: u64,
+    },
+    UnsupportedReplay,
     Closed,
-    InvalidCursor,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AgentPublicStatus {
+    Ready,
+    Closing,
+    RecoveryRequired,
+    Closed,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AgentEventKind {
+    RequestStarted,
+    OutputDelta,
+    RequestCompleted,
+    RequestCancelled,
+    StatusChanged,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AgentEventEnvelope {
+    pub cursor: AgentEventCursor,
+    pub kind: AgentEventKind,
+    pub payload: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PublishedSessionMode {
+    Sessionless,
+    Ephemeral,
+    Durable,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PublicationState {
+    PublishedAdmissionClosed,
+    Ready,
+    Closing,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PublicationEntry {
+    agent_id: AgentId,
+    lifecycle: AgentLifecycleNonce,
+    session_id: Option<SessionId>,
+    mode: PublishedSessionMode,
+    state: PublicationState,
+}
+
+impl PublicationEntry {
+    pub const fn agent_id(&self) -> AgentId {
+        self.agent_id
+    }
+
+    pub const fn lifecycle(&self) -> AgentLifecycleNonce {
+        self.lifecycle
+    }
+
+    pub const fn session_id(&self) -> Option<SessionId> {
+        self.session_id
+    }
+
+    pub const fn mode(&self) -> PublishedSessionMode {
+        self.mode
+    }
+
+    pub const fn state(&self) -> PublicationState {
+        self.state
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PublicationSnapshot {
+    generation: u64,
+    entries: Arc<[PublicationEntry]>,
+}
+
+impl PublicationSnapshot {
+    pub const fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    pub fn entries(&self) -> &[PublicationEntry] {
+        &self.entries
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PublicationCandidate {
+    entry: PublicationEntry,
+}
+
+impl PublicationCandidate {
+    #[doc(hidden)]
+    pub const fn for_generated_agent(
+        agent_id: AgentId,
+        lifecycle: AgentLifecycleNonce,
+        session_id: Option<SessionId>,
+        mode: PublishedSessionMode,
+    ) -> Self {
+        Self {
+            entry: PublicationEntry {
+                agent_id,
+                lifecycle,
+                session_id,
+                mode,
+                state: PublicationState::PublishedAdmissionClosed,
+            },
+        }
+    }
+
+    pub const fn agent_id(&self) -> AgentId {
+        self.entry.agent_id
+    }
+
+    pub const fn session_id(&self) -> Option<SessionId> {
+        self.entry.session_id
+    }
+
+    pub const fn mode(&self) -> PublishedSessionMode {
+        self.entry.mode
+    }
+}
+
+#[derive(Debug)]
+pub struct PublicationTransactionView<'a> {
+    previous: &'a PublicationSnapshot,
+    candidate: &'a PublicationCandidate,
+}
+
+impl PublicationTransactionView<'_> {
+    pub const fn previous(&self) -> &PublicationSnapshot {
+        self.previous
+    }
+
+    pub const fn candidate(&self) -> &PublicationCandidate {
+        self.candidate
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PublicationEvent {
+    pub generation: u64,
+    pub entry: PublicationEntry,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DisposalEvent {
+    pub generation: u64,
+    pub entry: PublicationEntry,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum PublicationDirectoryError {
+    AlreadyPublished,
+    NotPublished,
+    StaleLifecycle,
+    GenerationExhausted,
+    SessionModeMismatch,
+}
+
+impl fmt::Display for PublicationDirectoryError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::AlreadyPublished => "Agent is already published",
+            Self::NotPublished => "Agent is not published",
+            Self::StaleLifecycle => "Agent lifecycle is stale",
+            Self::GenerationExhausted => "publication generation is exhausted",
+            Self::SessionModeMismatch => "publication Session mode does not match its identity",
+        })
+    }
+}
+
+impl std::error::Error for PublicationDirectoryError {}
+
+#[derive(Debug, Default)]
+struct PublicationDirectoryState {
+    generation: u64,
+    entries: BTreeMap<AgentId, PublicationEntry>,
+}
+
+#[derive(Clone, Debug)]
+pub struct PublicationDirectory {
+    state: Arc<RwLock<PublicationDirectoryState>>,
+}
+
+pub struct PublicationDirectoryWriteHandle {
+    state: Arc<RwLock<PublicationDirectoryState>>,
+}
+
+impl fmt::Debug for PublicationDirectoryWriteHandle {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("PublicationDirectoryWriteHandle(<opaque>)")
+    }
+}
+
+#[doc(hidden)]
+pub fn new_publication_directory() -> (PublicationDirectory, PublicationDirectoryWriteHandle) {
+    let state = Arc::new(RwLock::new(PublicationDirectoryState::default()));
+    (
+        PublicationDirectory {
+            state: Arc::clone(&state),
+        },
+        PublicationDirectoryWriteHandle { state },
+    )
+}
+
+impl PublicationDirectory {
+    pub fn snapshot(&self) -> PublicationSnapshot {
+        let state = self
+            .state
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        PublicationSnapshot {
+            generation: state.generation,
+            entries: state.entries.values().cloned().collect(),
+        }
+    }
+}
+
+impl PublicationDirectoryWriteHandle {
+    #[doc(hidden)]
+    pub fn transaction_view<'a>(
+        &self,
+        previous: &'a PublicationSnapshot,
+        candidate: &'a PublicationCandidate,
+    ) -> PublicationTransactionView<'a> {
+        PublicationTransactionView {
+            previous,
+            candidate,
+        }
+    }
+
+    #[doc(hidden)]
+    pub fn publish(
+        &self,
+        candidate: PublicationCandidate,
+    ) -> Result<(PublicationEvent, PublicationSnapshot), PublicationDirectoryError> {
+        if matches!(candidate.entry.mode, PublishedSessionMode::Sessionless)
+            != candidate.entry.session_id.is_none()
+        {
+            return Err(PublicationDirectoryError::SessionModeMismatch);
+        }
+        let mut state = self
+            .state
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.entries.contains_key(&candidate.entry.agent_id) {
+            return Err(PublicationDirectoryError::AlreadyPublished);
+        }
+        state.generation = state
+            .generation
+            .checked_add(1)
+            .ok_or(PublicationDirectoryError::GenerationExhausted)?;
+        state
+            .entries
+            .insert(candidate.entry.agent_id, candidate.entry.clone());
+        let event = PublicationEvent {
+            generation: state.generation,
+            entry: candidate.entry,
+        };
+        let snapshot = PublicationSnapshot {
+            generation: state.generation,
+            entries: state.entries.values().cloned().collect(),
+        };
+        Ok((event, snapshot))
+    }
+
+    #[doc(hidden)]
+    pub fn mark_ready(
+        &self,
+        agent_id: AgentId,
+        lifecycle: AgentLifecycleNonce,
+    ) -> Result<PublicationSnapshot, PublicationDirectoryError> {
+        self.update(agent_id, lifecycle, Some(PublicationState::Ready))
+            .map(|(_, snapshot)| snapshot)
+    }
+
+    #[doc(hidden)]
+    pub fn mark_closing(
+        &self,
+        agent_id: AgentId,
+        lifecycle: AgentLifecycleNonce,
+    ) -> Result<PublicationSnapshot, PublicationDirectoryError> {
+        self.update(agent_id, lifecycle, Some(PublicationState::Closing))
+            .map(|(_, snapshot)| snapshot)
+    }
+
+    #[doc(hidden)]
+    pub fn remove(
+        &self,
+        agent_id: AgentId,
+        lifecycle: AgentLifecycleNonce,
+    ) -> Result<(DisposalEvent, PublicationSnapshot), PublicationDirectoryError> {
+        let (entry, snapshot) = self.update(agent_id, lifecycle, None)?;
+        Ok((
+            DisposalEvent {
+                generation: snapshot.generation,
+                entry,
+            },
+            snapshot,
+        ))
+    }
+
+    fn update(
+        &self,
+        agent_id: AgentId,
+        lifecycle: AgentLifecycleNonce,
+        next_state: Option<PublicationState>,
+    ) -> Result<(PublicationEntry, PublicationSnapshot), PublicationDirectoryError> {
+        let mut state = self
+            .state
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let entry = state
+            .entries
+            .get(&agent_id)
+            .ok_or(PublicationDirectoryError::NotPublished)?;
+        if entry.lifecycle != lifecycle {
+            return Err(PublicationDirectoryError::StaleLifecycle);
+        }
+        state.generation = state
+            .generation
+            .checked_add(1)
+            .ok_or(PublicationDirectoryError::GenerationExhausted)?;
+        let entry = if let Some(next_state) = next_state {
+            let entry = state
+                .entries
+                .get_mut(&agent_id)
+                .expect("validated entry remains present while holding the write lock");
+            entry.state = next_state;
+            entry.clone()
+        } else {
+            state
+                .entries
+                .remove(&agent_id)
+                .expect("validated entry remains present while holding the write lock")
+        };
+        let snapshot = PublicationSnapshot {
+            generation: state.generation,
+            entries: state.entries.values().cloned().collect(),
+        };
+        Ok((entry, snapshot))
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PublicationVeto {
+    pub reason: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LifecycleObserverError {
+    pub reason: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct LifecycleNotificationContext {
+    cancellation: CancellationToken,
+    deadline: Instant,
+}
+
+impl LifecycleNotificationContext {
+    #[doc(hidden)]
+    pub fn new(cancellation: CancellationToken, deadline: Instant) -> Self {
+        Self {
+            cancellation,
+            deadline,
+        }
+    }
+
+    pub fn cancellation(&self) -> CancellationToken {
+        self.cancellation.clone()
+    }
+
+    pub fn is_expired(&self) -> bool {
+        Instant::now() >= self.deadline
+    }
+
+    pub fn remaining(&self) -> Duration {
+        self.deadline.saturating_duration_since(Instant::now())
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub type LifecycleObserverFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<(), LifecycleObserverError>> + Send + 'a>>;
+
+#[cfg(target_arch = "wasm32")]
+pub type LifecycleObserverFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<(), LifecycleObserverError>> + 'a>>;
+
+pub trait LifecycleObserver: MaybeSendSync {
+    fn before_publish(
+        &self,
+        event: &PublicationCandidate,
+        view: &PublicationTransactionView<'_>,
+    ) -> Result<(), PublicationVeto>;
+
+    fn published<'a>(
+        &'a self,
+        context: LifecycleNotificationContext,
+        event: &'a PublicationEvent,
+        snapshot: &'a PublicationSnapshot,
+    ) -> LifecycleObserverFuture<'a>;
+
+    fn disposed<'a>(
+        &'a self,
+        context: LifecycleNotificationContext,
+        event: &'a DisposalEvent,
+        snapshot: &'a PublicationSnapshot,
+    ) -> LifecycleObserverFuture<'a>;
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CommandAdmissionError {
+    Closed,
+    Busy,
+    StaleLifecycle,
+}
+
+/// Weakly held admission seam used by the command dispatcher without importing
+/// the Agent or Session API crates.
+pub trait CommandAdmissionGate: MaybeSendSync {
+    fn admit_command(
+        &self,
+        agent_id: AgentId,
+        lifecycle: AgentLifecycleNonce,
+    ) -> Result<(), CommandAdmissionError>;
 }
 
 /// Session query cursor shared without importing an Agent API crate.
@@ -782,9 +1703,95 @@ mod tests {
     }
 
     #[test]
-    fn public_cursors_start_at_zero() {
-        assert_eq!(AgentEventCursor::initial().value(), 0);
+    fn public_cursors_are_bound_to_agent_and_lifecycle() {
+        let agent = AgentId::from_nonzero_u128(1).unwrap();
+        let lifecycle = AgentLifecycleNonce::from_nonzero(NonZeroU64::new(2).unwrap());
+        let cursor = AgentEventCursor::from_parts(agent, lifecycle, NonZeroU64::new(3).unwrap());
+        assert_eq!(cursor.agent_id(), agent);
+        assert_eq!(cursor.lifecycle(), lifecycle);
+        assert_eq!(cursor.value(), 3);
         assert_eq!(SessionQueryCursor::initial().value(), 0);
+    }
+
+    fn model_scope() -> ModelCallScopeIdentity {
+        ModelCallScopeIdentity::for_generated_agent(
+            AgentId::from_nonzero_u128(1).unwrap(),
+            AgentLifecycleNonce::from_nonzero(NonZeroU64::new(1).unwrap()),
+            None,
+            CompositionHash::from_digest(Digest::from_bytes([2; 32])),
+            Digest::from_bytes([3; 32]),
+        )
+    }
+
+    fn model_projection() -> ModelCallJournalProjection {
+        ModelCallJournalProjection::from_model_plan(
+            RequestId::from_nonzero_u128(4).unwrap(),
+            Digest::from_bytes([5; 32]),
+            Digest::from_bytes([6; 32]),
+            Digest::from_bytes([7; 32]),
+        )
+    }
+
+    #[test]
+    fn request_journal_proof_is_exact_and_scope_bound() {
+        let (issuer, verifier) =
+            ModelRequestJournalAuthority::issue_for_generated_scope(model_scope()).unwrap();
+        let projection = model_projection();
+        let record_digest = Digest::from_bytes([8; 32]);
+        let proof = issuer
+            .seal_committed_record(
+                projection.clone(),
+                record_digest,
+                CancellationToken::new(),
+                None,
+                NonZeroUsize::new(1024).unwrap(),
+            )
+            .unwrap();
+        assert!(verifier.verifies(&proof, &projection, record_digest));
+        assert!(!verifier.verifies(&proof, &projection, Digest::from_bytes([9; 32])));
+
+        let (_, foreign) =
+            ModelRequestJournalAuthority::issue_for_generated_scope(model_scope()).unwrap();
+        assert!(!foreign.verifies(&proof, &projection, record_digest));
+    }
+
+    #[test]
+    fn volatile_lifecycle_operations_are_unique_and_issuer_bound() {
+        let issuer = VolatileLifecycleOperationIssuer::for_generated_app().unwrap();
+        let first = issuer.allocate().unwrap();
+        let second = issuer.allocate().unwrap();
+        assert_ne!(first.id(), second.id());
+        assert!(issuer.owns(&first));
+        assert!(first.id().to_durable_canonical_v1_bytes().is_err());
+
+        let foreign = VolatileLifecycleOperationIssuer::for_generated_app().unwrap();
+        assert!(!foreign.owns(&first));
+    }
+
+    #[test]
+    fn publication_directory_commits_and_removes_a_whole_entry_atomically() {
+        let (directory, writer) = new_publication_directory();
+        let agent = AgentId::from_nonzero_u128(10).unwrap();
+        let lifecycle = AgentLifecycleNonce::from_nonzero(NonZeroU64::new(11).unwrap());
+        let candidate = PublicationCandidate::for_generated_agent(
+            agent,
+            lifecycle,
+            None,
+            PublishedSessionMode::Sessionless,
+        );
+        let before = directory.snapshot();
+        let view = writer.transaction_view(&before, &candidate);
+        assert!(view.previous().entries().is_empty());
+        assert_eq!(view.candidate().agent_id(), agent);
+
+        let (_, published) = writer.publish(candidate).unwrap();
+        assert_eq!(published.generation(), 1);
+        assert_eq!(published.entries().len(), 1);
+        let ready = writer.mark_ready(agent, lifecycle).unwrap();
+        assert_eq!(ready.entries()[0].state(), PublicationState::Ready);
+        let (_, removed) = writer.remove(agent, lifecycle).unwrap();
+        assert!(removed.entries().is_empty());
+        assert_eq!(removed.generation(), 3);
     }
 
     fn recovery_key() -> AgentOperationRecoveryKey {

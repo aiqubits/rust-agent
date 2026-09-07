@@ -1,0 +1,40 @@
+[package]
+name = "rust-agent-model-replay"
+description = "Deterministic in-memory replay model Component"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[package.metadata.rust-agent]
+schema = 1
+id = "model-replay"
+scope = "app"
+factory = "rust_agent_model_replay::build"
+dependencies-type = "rust_agent_model_replay::Dependencies"
+config-type = "rust_agent_model_replay::Config"
+config-source = "none"
+targets = ["cfg(true)"]
+support = "production"
+lifecycle-effects = []
+provides = [{ capability = "cap:model", key = "replay", priority = 100, effects = [] }]
+requires = []
+conflicts = []
+security = []
+runtime-primitives = []
+build-requirements = { executables = [], read-inputs = [], environment = [] }
+app-coexistence = { mode = "concurrent-independent", evidence = { source = "coexistence-evidence.toml", algorithm = "sha256", digest = "eedb97ca433e7570bac7591411e7a057032ff535eab6782b9c98da2ddf0ae90f", reviewer-policy = "phase-2-runtime-review-v1" } }
+cargo-features = []
+
+[features]
+default = []
+
+[dependencies]
+futures-util = { version = "0.3.34", default-features = false, features = ["alloc"] }
+rust-agent-core = { version = "0.1.0", path = "../../api/rust-agent-core", default-features = false }
+rust-agent-model = { version = "0.1.0", path = "../../api/rust-agent-model", default-features = false }
+rust-agent-runtime-api = { version = "0.1.0", path = "../../api/rust-agent-runtime-api", default-features = false }
+
+[lints]
+workspace = true

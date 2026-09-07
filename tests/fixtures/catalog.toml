@@ -4,6 +4,24 @@ schema = 1
 
 [[capabilities]]
 id = "cap:model"
+api-package = "rust-agent-model"
+rust-api = "rust_agent_model::LanguageModel"
+binding-type = "rust_agent_model::ModelProviderBinding"
+binding-adapter = "rust_agent_model::ModelProviderBinding::from_provider"
+binding = "registry"
+scope = "app"
+
+[[capabilities]]
+id = "cap:agent-driver"
+api-package = "rust-agent-agent"
+rust-api = "rust_agent_agent::AgentDriver"
+binding-type = "rust_agent_agent::AgentDriverBinding"
+binding-adapter = "rust_agent_agent::AgentDriverBinding::from_provider"
+binding = "singleton"
+scope = "agent"
+
+[[capabilities]]
+id = "cap:fixture-model"
 api-package = "rust-agent-fixture-api"
 rust-api = "rust_agent_fixture_api::Model"
 binding-type = "rust_agent_fixture_api::ModelBinding"
@@ -12,7 +30,7 @@ binding = "singleton"
 scope = "app"
 
 [[capabilities]]
-id = "cap:driver"
+id = "cap:fixture-driver"
 api-package = "rust-agent-fixture-api"
 rust-api = "rust_agent_fixture_api::Driver"
 binding-type = "rust_agent_fixture_api::DriverBinding"
@@ -21,7 +39,7 @@ binding = "singleton"
 scope = "app"
 
 [[capabilities]]
-id = "cap:fs-read"
+id = "cap:fixture-fs-read"
 api-package = "rust-agent-fixture-api"
 rust-api = "rust_agent_fixture_api::FileReader"
 binding-type = "rust_agent_fixture_api::FileReaderBinding"
@@ -30,13 +48,77 @@ binding = "singleton"
 scope = "app"
 
 [[capabilities]]
-id = "cap:build-proof"
+id = "cap:fixture-build-proof"
 api-package = "rust-agent-fixture-api"
 rust-api = "rust_agent_fixture_api::BuildProof"
 binding-type = "rust_agent_fixture_api::BuildProofBinding"
 binding-adapter = "rust_agent_fixture_api::BuildProofBinding::from_provider"
 binding = "singleton"
 scope = "app"
+
+[[components]]
+id = "model-replay"
+package = "rust-agent-model-replay"
+package-path = "crates/components/model-replay"
+scope = "app"
+factory = "rust_agent_model_replay::build"
+dependencies-type = "rust_agent_model_replay::Dependencies"
+config-type = "rust_agent_model_replay::Config"
+config-source = "none"
+targets = "cfg(true)"
+support = "production"
+lifecycle-effects = []
+provides = [{ capability = "cap:model", key = "replay", priority = 100, effects = [] }]
+requires = []
+conflicts = []
+security = []
+runtime-primitives = []
+build-requirements = { executables = [], read-inputs = [], environment = [] }
+app-coexistence = { mode = "concurrent-independent", evidence = { source = "coexistence-evidence.toml", algorithm = "sha256", digest = "eedb97ca433e7570bac7591411e7a057032ff535eab6782b9c98da2ddf0ae90f", reviewer-policy = "phase-2-runtime-review-v1" } }
+cargo-features = []
+
+[[components]]
+id = "model-host"
+package = "rust-agent-model-host"
+package-path = "crates/components/model-host"
+scope = "app"
+factory = "rust_agent_model_host::build"
+dependencies-type = "rust_agent_model_host::Dependencies"
+config-type = "rust_agent_model_host::host_api::Config"
+config-source = "host"
+config-key = "model-host"
+host-api = "rust_agent_model_host::host_api"
+targets = "cfg(true)"
+support = "production"
+lifecycle-effects = []
+provides = [{ capability = "cap:model", key = "host", priority = 50, effects = ["host-bridge"] }]
+requires = []
+conflicts = []
+security = ["host-bridge"]
+runtime-primitives = []
+build-requirements = { executables = [], read-inputs = [], environment = [] }
+app-coexistence = { mode = "concurrent-shared-host-handle", host-config-fields = ["model-host.model"], evidence = { source = "coexistence-evidence.toml", algorithm = "sha256", digest = "83721ebf9598ea0de89e530f9bbfc3f04bb8485b53df5852bcba92ace19a8dae", reviewer-policy = "phase-2-runtime-review-v1" } }
+cargo-features = []
+
+[[components]]
+id = "driver-direct"
+package = "rust-agent-driver-direct"
+package-path = "crates/components/driver-direct"
+scope = "agent"
+factory = "rust_agent_driver_direct::build"
+dependencies-type = "rust_agent_driver_direct::Dependencies"
+config-type = "rust_agent_driver_direct::Config"
+config-source = "none"
+targets = "cfg(true)"
+support = "production"
+lifecycle-effects = []
+provides = [{ capability = "cap:agent-driver", priority = 100, effects = [] }]
+requires = [{ capability = "cap:model", mode = "required", field = "model" }]
+conflicts = []
+security = []
+runtime-primitives = []
+build-requirements = { executables = [], read-inputs = [], environment = [] }
+cargo-features = []
 
 [[components]]
 id = "fixture-model"
@@ -50,7 +132,7 @@ config-source = "none"
 targets = "cfg(true)"
 support = "production"
 lifecycle-effects = []
-provides = [{ capability = "cap:model", priority = 100, effects = [] }]
+provides = [{ capability = "cap:fixture-model", priority = 100, effects = [] }]
 requires = []
 conflicts = []
 security = []
@@ -73,7 +155,7 @@ host-api = "rust_agent_fixture_model_shared::host_api"
 targets = "cfg(not(target_arch = \"wasm32\"))"
 support = "production"
 lifecycle-effects = []
-provides = [{ capability = "cap:model", priority = 50, effects = [] }]
+provides = [{ capability = "cap:fixture-model", priority = 50, effects = [] }]
 requires = []
 conflicts = []
 security = []
@@ -94,7 +176,7 @@ config-source = "none"
 targets = "cfg(true)"
 support = "production"
 lifecycle-effects = []
-provides = [{ capability = "cap:model", priority = 200, effects = [] }]
+provides = [{ capability = "cap:fixture-model", priority = 200, effects = [] }]
 requires = []
 conflicts = ["fixture-driver"]
 security = []
@@ -115,8 +197,8 @@ config-source = "none"
 targets = "cfg(true)"
 support = "production"
 lifecycle-effects = []
-provides = [{ capability = "cap:driver", priority = 100, effects = [] }]
-requires = [{ capability = "cap:model", mode = "required", field = "model" }]
+provides = [{ capability = "cap:fixture-driver", priority = 100, effects = [] }]
+requires = [{ capability = "cap:fixture-model", mode = "required", field = "model" }]
 conflicts = []
 security = []
 runtime-primitives = []
@@ -136,7 +218,7 @@ config-source = "none"
 targets = "cfg(not(target_arch = \"wasm32\"))"
 support = "production"
 lifecycle-effects = []
-provides = [{ capability = "cap:fs-read", priority = 100, effects = ["read-local"] }]
+provides = [{ capability = "cap:fixture-fs-read", priority = 100, effects = ["read-local"] }]
 requires = []
 conflicts = []
 security = ["read-local"]
@@ -157,7 +239,7 @@ config-source = "none"
 targets = "cfg(true)"
 support = "production"
 lifecycle-effects = []
-provides = [{ capability = "cap:build-proof", priority = 100, effects = [] }]
+provides = [{ capability = "cap:fixture-build-proof", priority = 100, effects = [] }]
 requires = []
 conflicts = []
 security = []
@@ -165,6 +247,18 @@ runtime-primitives = []
 build-requirements = { executables = ["fixture-codegen"], read-inputs = ["fixture-sdk"], environment = [] }
 app-coexistence = { mode = "requires-stop" }
 cargo-features = []
+
+[[runtime-adapters]]
+id = "runtime-tokio"
+package = "rust-agent-runtime-tokio"
+package-path = "crates/runtime/rust-agent-runtime-tokio"
+constructor = "rust_agent_runtime_tokio::create_runtime_primitives"
+targets = "cfg(not(target_arch = \"wasm32\"))"
+support = "production"
+primitives = []
+security = []
+app-coexistence = { mode = "concurrent-independent", evidence = { source = "coexistence-evidence.toml", algorithm = "sha256", digest = "f642016b020fb815f750ab5e5441f6c951aa3b4eb16ee8f2e66a75e74e9b1299", reviewer-policy = "phase-2-runtime-review-v1" } }
+build-requirements = { executables = [], read-inputs = [], environment = [] }
 
 [[runtime-adapters]]
 id = "fixture-runtime"

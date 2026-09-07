@@ -1,16 +1,16 @@
-error[E0423]: cannot initialize a tuple struct which contains private fields
+error[E0423]: expected function, tuple struct or tuple variant, found struct `AgentEventCursor`
  --> tests/ui/forge_event_cursor.rs:4:19
   |
 4 |     let _forged = AgentEventCursor(42);
-  |                   ^^^^^^^^^^^^^^^^
+  |                   ^^^^^^^^^^^^^^^^^^^^
   |
-note: constructor is not visible here due to private fields
- --> src/lib.rs
+ ::: src/lib.rs
   |
-  | pub struct AgentEventCursor(u64);
-  |                             ^^^ private field
-help: you might have meant to use the `initial` associated function
+  | pub struct AgentEventCursor {
+  | --------------------------- `AgentEventCursor` defined here
+  |
+help: you might have meant to use the `from_parts` associated function
   |
 4 -     let _forged = AgentEventCursor(42);
-4 +     let _forged = AgentEventCursor::initial();
+4 +     let _forged = AgentEventCursor::from_parts(_, _, _);
   |

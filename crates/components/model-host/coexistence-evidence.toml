@@ -1,0 +1,6 @@
+schema = 1
+owner = "model-host"
+mode = "concurrent-shared-host-handle"
+rule-set = "phase-1a-shared-handle-v1"
+claims = ["no-reopen", "same-host-handle-identity", "two-app-in-process"]
+tests = ["rust_agent_model_host::tests::host_service_identity_is_reused_without_reopen"]

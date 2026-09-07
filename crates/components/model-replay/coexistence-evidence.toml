@@ -1,0 +1,6 @@
+schema = 1
+owner = "model-replay"
+mode = "concurrent-independent"
+rule-set = "phase-1a-independent-v1"
+claims = ["boundary-config", "different-config", "identical-config", "independent-real-resources", "two-app-in-process"]
+tests = ["rust_agent_model_replay::tests::instances_are_independent_for_identical_and_boundary_construction"]

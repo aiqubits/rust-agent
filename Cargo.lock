@@ -766,6 +766,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "rust-agent-agent"
+version = "0.1.0"
+dependencies = [
+ "futures-core",
+ "rust-agent-commands",
+ "rust-agent-core",
+ "rust-agent-model",
+ "rust-agent-runtime-api",
+ "rust-agent-session",
+ "sha2",
+]
+
+[[package]]
 name = "rust-agent-build-executor"
 version = "0.1.0"
 dependencies = [
@@ -809,6 +822,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "rust-agent-commands"
+version = "0.1.0"
+dependencies = [
+ "rust-agent-core",
+ "rust-agent-runtime-api",
+]
+
+[[package]]
 name = "rust-agent-composition"
 version = "0.1.0"
 dependencies = [
@@ -829,6 +850,16 @@ dependencies = [
 [[package]]
 name = "rust-agent-core"
 version = "0.1.0"
+
+[[package]]
+name = "rust-agent-driver-direct"
+version = "0.1.0"
+dependencies = [
+ "rust-agent-agent",
+ "rust-agent-core",
+ "rust-agent-model",
+ "rust-agent-runtime-api",
+]
 
 [[package]]
 name = "rust-agent-fixture-api"
@@ -922,11 +953,57 @@ name = "rust-agent-fixture-target-wasm"
 version = "0.1.0"
 
 [[package]]
+name = "rust-agent-model"
+version = "0.1.0"
+dependencies = [
+ "futures-core",
+ "futures-util",
+ "rust-agent-core",
+ "rust-agent-runtime-api",
+ "sha2",
+ "trybuild",
+]
+
+[[package]]
+name = "rust-agent-model-host"
+version = "0.1.0"
+dependencies = [
+ "rust-agent-model",
+ "rust-agent-runtime-api",
+]
+
+[[package]]
+name = "rust-agent-model-replay"
+version = "0.1.0"
+dependencies = [
+ "futures-util",
+ "rust-agent-core",
+ "rust-agent-model",
+ "rust-agent-runtime-api",
+]
+
+[[package]]
 name = "rust-agent-runtime-api"
 version = "0.1.0"
 dependencies = [
  "rust-agent-core",
  "trybuild",
+]
+
+[[package]]
+name = "rust-agent-runtime-tokio"
+version = "0.1.0"
+dependencies = [
+ "rust-agent-runtime-api",
+ "tokio",
+]
+
+[[package]]
+name = "rust-agent-session"
+version = "0.1.0"
+dependencies = [
+ "rust-agent-core",
+ "rust-agent-runtime-api",
 ]
 
 [[package]]
@@ -1200,6 +1277,15 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.4",
+]
+
+[[package]]
+name = "tokio"
+version = "1.53.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "202caea871b69668250d242070849eb495be178ed697a3e98aebce5bc81a0bed"
+dependencies = [
+ "pin-project-lite",
 ]
 
 [[package]]

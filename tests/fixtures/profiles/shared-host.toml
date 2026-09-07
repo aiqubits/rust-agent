@@ -17,4 +17,4 @@ fixture-fs-read = "disabled"
 fixture-build-proof = "disabled"
 
 [bindings]
-model = "fixture-model-shared"
+fixture-model = "fixture-model-shared"

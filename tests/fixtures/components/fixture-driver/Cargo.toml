@@ -18,8 +18,8 @@ config-source = "none"
 targets = ["cfg(true)"]
 support = "production"
 lifecycle-effects = []
-provides = [{ capability = "cap:driver", priority = 100, effects = [] }]
-requires = [{ capability = "cap:model", mode = "required", field = "model" }]
+provides = [{ capability = "cap:fixture-driver", priority = 100, effects = [] }]
+requires = [{ capability = "cap:fixture-model", mode = "required", field = "model" }]
 conflicts = []
 security = []
 runtime-primitives = []

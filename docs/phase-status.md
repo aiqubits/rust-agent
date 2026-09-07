@@ -8,7 +8,7 @@ represented in `docs/invariant-tests.md` and all applicable gates pass.
 | 0 — repository and contract | Complete | Rust/Cargo 1.97.1 synchronization, workspace/deny/ADR gates, effect-free core/runtime contracts, checked lifecycle identities, closed target-fact/custom-target records, globally bounded catalog owners and symbolic per-target support analysis, resource-namespace bootstrap contracts, Host/runtime metadata, canonical Host Cargo unit-graph schemas and privacy fixtures are implemented. Production composition discovers schema-owned Capability/Component/runtime/Host and direct-root build-requirement metadata from workspace package manifests through bounded, timed, offline, isolated `cargo metadata`; package/path ownership is derived from the exact workspace-member result, unknown/mixed/spoofed metadata and default-feature drift fail closed, and a real discovery round-trip is checked against the test-only catalog fixture. All 12 Phase 0 acceptance criteria have exact non-wildcard mappings, and the mapping/CI gate passes. |
 | 1A — generated graph proof | Complete | The development-only generator/resolver/build path, path-free compose rustc executable/version/full-sysroot provenance, canonical target-fact and custom-spec snapshots with rustc/Cargo before/after drift checks, schema-owned Cargo package-metadata discovery, bounded/shared target-support analysis, direct-serde-bounded metadata/profile/trust/diagnostic/composition/security/Cargo-source collections, an identity-bound normalized catalog/trust-policy/evidence-byte/root-requirement generator-input commitment with resolver/attribution/generated-source/source-closure rederivation, selected-evidence snapshot verification, conservative aggregate App handoff, generated namespaced host APIs and required-field HostBindings builders, shared-host Config-field type/identity sealing with a real two-App same-identity/no-reopen external Host fixture, committed-built-in-fact Cargo target-dependency rewriting with transitive active path-package snapshots, composition-wide source entry/byte preflight before copy or hash, checked canonical resolution/manifests, exact Cargo.lock source projection, Cargo-config ancestor rejection, source snapshots, real graph presence/absence, integration verification, topology fixtures, target matrix and WASM packaging are implemented. A checked-in custom target now completes compose, lockfile generation and locked offline development build with the real pinned Rust/Cargo 1.97.1 toolchain. All 10 Phase 1A acceptance criteria have exact non-wildcard mappings, and every applicable local gate passes. Phase 1A artifacts remain `deployable=false`; immutable production mounted-view enforcement remains a Phase 1B gate. |
 | 1B — Linux production build | Complete | All 12 acceptance criteria have exact non-wildcard mappings. GitHub run `34059521196` at commit `2dd4a21` passed the 20-step Quality job and the 15-step Ubuntu 24.04 Phase 1B Linux production job. The latter passed the real Landlock ABI 2 and namespace escape gates and all nine serial trusted fetch/planner/build, standalone, Host integration and pinned-WASM production fixtures, including signed `deployable=true` publication and inspection. |
-| 2 — minimal runtime spine | Not started | The Phase 1A gate has passed; implementation must provide real minimal runtime behavior and must not be represented by empty product crates. |
+| 2 — minimal runtime spine | Complete | The lightweight Session API independently compiles in normal/development/all-feature modes without Agent or a backend. The model, commands and Agent contracts plus replay/Host model, direct driver and Tokio runtime Components implement the sessionless `Request → LanguageModel → Response` path with exact proof-before-provider authorization, transactional publication/rollback, process-bound lifecycle operations, targeted cancellation and bounded lifecycle-scoped event feeds. `minimal-pure` deterministically composes, locks, builds and executes the generated request path while graph-absence tests exclude Session/persistence/query/heavy/Host providers. Every Phase 2 acceptance contract has exact named evidence and every applicable local gate passes. The development artifact remains `deployable=false`; durable Session providers remain Phase 5. |
 | 3 — tool execution plane | Not started | The Phase 1A contract is stable; no Phase 3 implementation has started. |
 | 4 — local execution providers | Not started | Real-target security regressions required. |
 | 5 — session plane | Not started | Exact composition/catalog durable compatibility required. |
@@ -100,7 +100,8 @@ Named tests cover:
 - Linux, WASM, Android, iOS, macOS and Windows product-neutral library cross-compilation;
 - development artifact/integration production rejection and end-to-end CLI mutation checks.
 
-No test result above is evidence for Phase 1B deployability or for a Phase 2+ runtime capability.
+No test result above, by itself, is evidence for Phase 1B deployability or Phase 2 runtime
+completion; the separate closing evidence follows.
 
 ## Phase 1B evidence
 
@@ -316,3 +317,34 @@ standalone publication, Host integration and the exact pinned
 this closes Phase 1B. The local host's Landlock ABI 1 cannot supply `Refer` enforcement, so the
 matching Ubuntu runner remains the authoritative real-target evidence rather than a skipped local
 claim.
+
+## Phase 2 evidence
+
+- `rust-agent-session` owns the backend-neutral persistence, query, journal and read-store seams and
+  compiles independently before its Agent consumer. CI checks the `core → runtime-api → session →
+  agent` sequence in normal, development and all-feature modes, while an architecture test inspects
+  all three Session dependency graphs and rejects any Agent dependency;
+- model routing creates an opaque plan, the Agent-owned volatile journal commits its exact
+  projection, and only the matching process- and scope-bound proof can create a
+  `PreparedModelCall`. Compile-fail fixtures protect the proof, context and prepared envelope;
+  foreign proof and missing-route tests reject before any provider callback;
+- generated App/Agent ownership constructs App-scoped model providers and Agent-scoped drivers,
+  publishes an Agent atomically, marks it ready, and removes it during shutdown. Observer veto or
+  panic rolls back before publication and before model effects; the native observer worker has
+  bounded reservation capacity, callback deadlines, cancellation and shutdown joining;
+- sessionless turns admit one active request, allocate lifecycle-bound request identities, preserve
+  the first targeted cancellation cause, and retain a bounded terminal-result window. Public event
+  feeds validate Agent/lifecycle/high-water cursors, enforce per-feed and aggregate budgets, release
+  reservations on drop, report only the last event actually delivered when lagging, and terminate
+  with an explicit closed status;
+- the empty Phase 2 command dispatcher performs lifecycle and admission checks before returning an
+  unknown-command result. Replay, shared Host model and Tokio runtime Components have explicit
+  independent/shared-handle ownership evidence and no ambient service locator;
+- `minimal-pure` resolves exactly `driver-direct + model-replay + runtime-tokio`, snapshots only the
+  required lightweight APIs and selected Components, excludes Session Components and persistence,
+  query, network, heavy and Host providers from both path closure and Cargo.lock, regenerates
+  identically, and passes locked offline generated tests plus the development build runner and CLI
+  end-to-end request. Its build manifest is intentionally `deployable=false`.
+
+These tests close only the Phase 2 minimal sessionless runtime spine. They do not claim Phase 3 tool
+execution, Phase 5 durable Session behavior, or any additional production deployment support.

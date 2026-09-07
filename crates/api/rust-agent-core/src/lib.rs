@@ -2,6 +2,51 @@
 
 use std::{fmt, str::FromStr};
 
+/// Cross-target marker used by all dynamically dispatched capability traits.
+#[cfg(not(target_arch = "wasm32"))]
+pub trait MaybeSendSync: Send + Sync {}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl<T: ?Sized + Send + Sync> MaybeSendSync for T {}
+
+/// Browser-local capabilities do not require `Send` or `Sync`.
+#[cfg(target_arch = "wasm32")]
+pub trait MaybeSendSync {}
+
+#[cfg(target_arch = "wasm32")]
+impl<T: ?Sized> MaybeSendSync for T {}
+
+/// Provider-neutral message role.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MessageRole {
+    System,
+    User,
+    Assistant,
+    Tool,
+}
+
+/// Provider-neutral content carried across capability APIs.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ContentBlock {
+    Text(String),
+    ImageReference { uri: String },
+    Structured { media_type: String, value: String },
+}
+
+/// A wire-neutral message.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Message {
+    pub role: MessageRole,
+    pub content: Vec<ContentBlock>,
+}
+
+/// Provider-neutral token accounting.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct Usage {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+}
+
 /// Error returned when a canonical identifier is malformed.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum IdentifierError {
@@ -438,6 +483,73 @@ impl std::error::Error for RecoveryKeyEncodingError {}
 
 pub type AgentOperationRecoveryKeyEncodingError = RecoveryKeyEncodingError;
 
+/// Error returned when a compact runtime identity is not canonical.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RuntimeIdentityEncodingError {
+    UnknownVersion(u8),
+    ZeroPayload,
+}
+
+impl fmt::Display for RuntimeIdentityEncodingError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::UnknownVersion(version) => {
+                write!(formatter, "unknown runtime identity version {version}")
+            }
+            Self::ZeroPayload => formatter.write_str("runtime identity payload must not be zero"),
+        }
+    }
+}
+
+impl std::error::Error for RuntimeIdentityEncodingError {}
+
+macro_rules! compact_runtime_identity {
+    ($name:ident, $description:literal) => {
+        #[doc = $description]
+        #[derive(Clone, Copy, Eq, Hash, Ord, PartialEq, PartialOrd)]
+        pub struct $name([u8; Self::ENCODED_LEN]);
+
+        impl $name {
+            pub const VERSION: u8 = 1;
+            pub const ENCODED_LEN: usize = 17;
+
+            pub fn from_canonical_v1_bytes(
+                bytes: [u8; Self::ENCODED_LEN],
+            ) -> Result<Self, RuntimeIdentityEncodingError> {
+                if bytes[0] != Self::VERSION {
+                    return Err(RuntimeIdentityEncodingError::UnknownVersion(bytes[0]));
+                }
+                if bytes[1..].iter().all(|byte| *byte == 0) {
+                    return Err(RuntimeIdentityEncodingError::ZeroPayload);
+                }
+                Ok(Self(bytes))
+            }
+
+            #[doc(hidden)]
+            pub fn from_nonzero_u128(value: u128) -> Result<Self, RuntimeIdentityEncodingError> {
+                let mut bytes = [0_u8; Self::ENCODED_LEN];
+                bytes[0] = Self::VERSION;
+                bytes[1..].copy_from_slice(&value.to_be_bytes());
+                Self::from_canonical_v1_bytes(bytes)
+            }
+
+            pub const fn to_canonical_v1_bytes(self) -> [u8; Self::ENCODED_LEN] {
+                self.0
+            }
+        }
+
+        impl fmt::Debug for $name {
+            fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str(concat!(stringify!($name), "(<canonical>)"))
+            }
+        }
+    };
+}
+
+compact_runtime_identity!(AgentId, "A canonical Agent identity.");
+compact_runtime_identity!(RequestId, "A canonical model or runtime request identity.");
+compact_runtime_identity!(CallId, "A canonical provider call identity.");
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -545,5 +657,26 @@ mod tests {
         ))
         .unwrap();
         assert!(SessionId::from_persistent_operation(volatile).is_err());
+    }
+
+    #[test]
+    fn compact_runtime_identities_are_versioned_and_nonzero() {
+        let agent = AgentId::from_nonzero_u128(7).unwrap();
+        assert_eq!(
+            AgentId::from_canonical_v1_bytes(agent.to_canonical_v1_bytes()).unwrap(),
+            agent
+        );
+        assert_eq!(
+            RequestId::from_nonzero_u128(0),
+            Err(RuntimeIdentityEncodingError::ZeroPayload)
+        );
+        let mut invalid = CallId::from_nonzero_u128(1)
+            .unwrap()
+            .to_canonical_v1_bytes();
+        invalid[0] = 9;
+        assert_eq!(
+            CallId::from_canonical_v1_bytes(invalid),
+            Err(RuntimeIdentityEncodingError::UnknownVersion(9))
+        );
     }
 }

@@ -571,6 +571,100 @@ fn compose_build_inspect_emit_verify_end_to_end() {
 }
 
 #[test]
+fn minimal_pure_compose_lock_build_and_request_flow_end_to_end() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../..")
+        .canonicalize()
+        .unwrap();
+    let binary = PathBuf::from(env!("CARGO_BIN_EXE_rust-agent"));
+    let rustc = tool("rustc");
+    let cargo = tool("cargo");
+    let linker = tool("cc");
+    let registry = registry_cache();
+    let temp = TempDir::new().unwrap();
+    let compositions = temp.path().join("compositions");
+
+    assert_success(&run(
+        &binary,
+        &[
+            "compose".into(),
+            "--workspace".into(),
+            root.as_os_str().into(),
+            "--profile".into(),
+            root.join("tests/fixtures/profiles/minimal-pure.toml")
+                .into_os_string(),
+            "--catalog-trust-policy".into(),
+            root.join("tests/fixtures/catalog-trust.toml")
+                .into_os_string(),
+            "--output".into(),
+            compositions.as_os_str().into(),
+            "--rustc".into(),
+            rustc.as_os_str().into(),
+            "--cargo".into(),
+            cargo.as_os_str().into(),
+            "--registry-cache".into(),
+            registry.as_os_str().into(),
+        ],
+    ));
+    let composition = fs::read_dir(&compositions)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    assert!(composition.join("Cargo.lock").is_file());
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(composition.join("rust-agent-composition.json")).unwrap())
+            .unwrap();
+    assert_eq!(
+        manifest["selected-components"],
+        serde_json::json!(["driver-direct", "model-replay"])
+    );
+    let lock = fs::read_to_string(composition.join("Cargo.lock")).unwrap();
+    for forbidden in [
+        "reqwest",
+        "redb",
+        "opentelemetry",
+        "rust-agent-model-host",
+        "rust-agent-session-local",
+    ] {
+        assert!(!lock.contains(&format!("name = {forbidden:?}")));
+    }
+
+    let artifacts = temp.path().join("artifacts");
+    assert_success(&run(
+        &binary,
+        &[
+            "build".into(),
+            "--composition".into(),
+            composition.as_os_str().into(),
+            "--artifact-dir".into(),
+            artifacts.as_os_str().into(),
+            "--rustc".into(),
+            rustc.as_os_str().into(),
+            "--cargo".into(),
+            cargo.as_os_str().into(),
+            "--linker".into(),
+            linker.as_os_str().into(),
+            "--registry-cache".into(),
+            registry.as_os_str().into(),
+            "--development-build".into(),
+            "--run-generated-tests".into(),
+        ],
+    ));
+    assert!(
+        artifacts
+            .join("librust_agent_generated_composition.rlib")
+            .is_file()
+    );
+    let build: serde_json::Value =
+        serde_json::from_slice(&fs::read(artifacts.join("rust-agent-build.json")).unwrap())
+            .unwrap();
+    assert_eq!(build["mode"], "development");
+    assert_eq!(build["deployable"], false);
+}
+
+#[test]
 fn pinned_toolchain_custom_target_compose_lock_build_end_to_end() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../..")

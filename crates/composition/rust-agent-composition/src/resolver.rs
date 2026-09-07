@@ -10,7 +10,7 @@ use crate::{
     catalog::NormalizedCatalog,
     diagnostics::{Diagnostic, MAX_DIAGNOSTIC_REASONS},
     metadata::{
-        AppCoexistence, BindingKind, BuildRequirements, ComponentSpec, HostBoundaryKind,
+        AppCoexistence, BuildRequirements, ComponentSpec, HostBoundaryKind,
         MAX_BUILD_REQUIREMENT_ENTRIES_PER_KIND, MAX_CATALOG_DOCUMENT_BYTES, MAX_CATALOG_OWNERS,
         RequirementMode, ScopeKind, SupportTier, TargetSupport,
     },
@@ -1710,9 +1710,11 @@ impl Resolver<'_> {
         capability: &str,
         key: Option<&str>,
     ) -> Result<Vec<String>, BranchFailure> {
-        let spec = self.catalog.capabilities.get(capability).ok_or_else(|| {
-            BranchFailure::Constraint(format!("unknown capability `{capability}`"))
-        })?;
+        if !self.catalog.capabilities.contains_key(capability) {
+            return Err(BranchFailure::Constraint(format!(
+                "unknown capability `{capability}`"
+            )));
+        }
         let suffix = capability.strip_prefix("cap:").unwrap_or(capability);
         let explicit = self.profile.bindings.get(suffix);
         let preferred = self.profile.preferred_providers.get(suffix);
@@ -1721,7 +1723,10 @@ impl Resolver<'_> {
             let priority = component
                 .provides
                 .iter()
-                .filter(|provide| provide.capability == capability && provide.key.as_deref() == key)
+                .filter(|provide| {
+                    provide.capability == capability
+                        && (key.is_none() || provide.key.as_deref() == key)
+                })
                 .map(|provide| provide.priority)
                 .max();
             if let Some(priority) = priority
@@ -1734,11 +1739,6 @@ impl Resolver<'_> {
                     component.id.clone(),
                 ));
             }
-        }
-        if spec.binding == BindingKind::Registry && key.is_none() {
-            return Err(BranchFailure::Constraint(format!(
-                "registry capability `{capability}` requires a key"
-            )));
         }
         candidates.sort_by(|left, right| {
             right
@@ -1761,7 +1761,10 @@ impl Resolver<'_> {
             self.catalog.components[id]
                 .provides
                 .iter()
-                .any(|provide| provide.capability == capability && provide.key.as_deref() == key)
+                .any(|provide| {
+                    provide.capability == capability
+                        && (key.is_none() || provide.key.as_deref() == key)
+                })
                 .then_some(id.as_str())
         })
     }
@@ -1777,14 +1780,15 @@ impl Resolver<'_> {
             .iter()
             .find(|provide| {
                 provide.capability == requirement.capability
-                    && provide.key.as_deref() == requirement.key.as_deref()
+                    && (requirement.key.is_none()
+                        || provide.key.as_deref() == requirement.key.as_deref())
             })
             .expect("candidate provider has the requested provide");
         let mut effects = self.catalog.components[provider].lifecycle_effects.clone();
         effects.extend(provide.effects.iter().cloned());
         ResolvedBinding {
             capability: requirement.capability.clone(),
-            key: requirement.key.clone(),
+            key: provide.key.clone(),
             provider: provider.to_owned(),
             consumer: consumer.id.clone(),
             field: requirement.field.clone(),
@@ -2571,7 +2575,7 @@ mod tests {
         let mut conflicting_profile_binding = profile.clone();
         conflicting_profile_binding
             .bindings
-            .insert("model".into(), "fixture-driver".into());
+            .insert("fixture-model".into(), "fixture-driver".into());
         assert!(matches!(
             resolution.verify_canonical_semantics(&conflicting_profile_binding, &target),
             Err(ResolutionError::InvalidResolutionRoute {

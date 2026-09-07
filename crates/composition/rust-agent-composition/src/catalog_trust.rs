@@ -699,12 +699,18 @@ mod tests {
                 .unwrap();
 
         commitment.validate(&catalog).unwrap();
-        assert_eq!(commitment.normalized_policy.reviewer_policies.len(), 1);
+        assert_eq!(commitment.normalized_policy.reviewer_policies.len(), 2);
         assert!(
             commitment
                 .normalized_policy
                 .reviewer_policies
                 .contains_key("phase-1a-fixture-review-v1")
+        );
+        assert!(
+            commitment
+                .normalized_policy
+                .reviewer_policies
+                .contains_key("phase-2-runtime-review-v1")
         );
         for record in &commitment.evidence {
             let path = fixture_root()

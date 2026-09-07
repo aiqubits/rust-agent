@@ -18,7 +18,7 @@ config-source = "none"
 targets = ['cfg(not(target_arch = "wasm32"))']
 support = "production"
 lifecycle-effects = []
-provides = [{ capability = "cap:fs-read", priority = 100, effects = ["read-local"] }]
+provides = [{ capability = "cap:fixture-fs-read", priority = 100, effects = ["read-local"] }]
 requires = []
 conflicts = []
 security = ["read-local"]

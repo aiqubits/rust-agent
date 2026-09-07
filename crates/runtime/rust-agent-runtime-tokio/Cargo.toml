@@ -1,0 +1,29 @@
+[package]
+name = "rust-agent-runtime-tokio"
+description = "Owned Tokio runtime adapter for native rust-agent compositions"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[package.metadata.rust-agent.runtime-adapter]
+schema = 1
+id = "runtime-tokio"
+constructor = "rust_agent_runtime_tokio::create_runtime_primitives"
+targets = ["cfg(not(target_arch = \"wasm32\"))"]
+support = "production"
+primitives = []
+security = []
+app-coexistence = { mode = "concurrent-independent", evidence = { source = "coexistence-evidence.toml", algorithm = "sha256", digest = "f642016b020fb815f750ab5e5441f6c951aa3b4eb16ee8f2e66a75e74e9b1299", reviewer-policy = "phase-2-runtime-review-v1" } }
+build-requirements = { executables = [], read-inputs = [], environment = [] }
+
+[features]
+default = []
+
+[dependencies]
+rust-agent-runtime-api = { version = "0.1.0", path = "../../api/rust-agent-runtime-api", default-features = false }
+tokio = { version = "1.47.1", default-features = false, features = ["rt", "time"] }
+
+[lints]
+workspace = true

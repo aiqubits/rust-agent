@@ -11,7 +11,7 @@ implementation exists.
 |---|---|
 | `P0-AC-01` | `architecture::workspace_has_no_product_dependency` |
 | `P0-AC-02` | `architecture::api_dependency_direction_is_acyclic`, `architecture::mandatory_api_crates_have_an_exact_effect_free_dependency_closure` |
-| `P0-AC-03` | `architecture::phase_zero_exposes_no_session_api_with_an_agent_dependency` |
+| `P0-AC-03` | `architecture::phase_two_session_public_closure_is_agent_free_in_every_feature_mode` |
 | `P0-AC-04` | `generator::tests::minimal_golden_is_fresh`, `generator::tests::javascript_wasm_golden_is_fresh`, `generator::tests::golden_rebinding_allows_only_exact_toolchain_input_drift`, `canonical::tests::map_keys_use_rfc_8949_deterministic_order`, `canonical::tests::domain_separation_changes_hash` |
 | `P0-AC-05` | `catalog::tests::unknown_fields_fail_closed`, `catalog::tests::lifecycle_and_provide_effect_fields_are_required`, `target::tests::malformed_facts_fail_closed` |
 | `P0-AC-06` | `catalog::tests::app_coexistence_is_scope_bound` |
@@ -20,7 +20,7 @@ implementation exists.
 | `P0-AC-09` | `catalog::tests::unknown_fields_fail_closed`, `topology_matrix::framework_neutral_host_topology_matrix` |
 | `P0-AC-10` | `architecture::mandatory_api_crates_have_an_exact_effect_free_dependency_closure`, `architecture::phase_one_a_generated_graph_uses_only_minimal_api_and_fixtures` |
 | `P0-AC-11` | `controlled_policy::build_requirements_need_exact_policy_kind_but_never_expand_runtime_effects` |
-| `P0-AC-12` | `architecture::phase_zero_one_a_and_one_b_acceptance_mappings_are_exact_complete_and_runnable` |
+| `P0-AC-12` | `architecture::phase_zero_through_two_acceptance_mappings_are_exact_complete_and_runnable` |
 
 ### Detailed invariant evidence
 
@@ -31,7 +31,7 @@ implementation exists.
 | Pinned formatting, compile, lint, test, documentation and dependency-policy gates | `.github/workflows/ci.yml::quality` |
 | Reference repositories and product crates are absent from the dependency graph | `architecture::workspace_has_no_product_dependency` |
 | Core/shared lifecycle APIs form an effect-free one-way dependency closure and do not import Agent/Session owners | `architecture::api_dependency_direction_is_acyclic`, `architecture::mandatory_api_crates_have_an_exact_effect_free_dependency_closure` |
-| Phase 0 exposes no Session public API closure containing an Agent type/dependency; Phase 2 must replace the absence guard with a transitive closure check | `architecture::phase_zero_exposes_no_session_api_with_an_agent_dependency` |
+| The lightweight Session public API closure contains no Agent type/dependency in normal, development or all-feature graphs | `architecture::phase_two_session_public_closure_is_agent_free_in_every_feature_mode`, `.github/workflows/ci.yml::quality::Verify Phase 2 API dependency closures` |
 | Core IDs, recovery keys and lifecycle/Session identities have canonical checked encodings | `rust_agent_core::tests::canonical_ids_accept_only_normalized_kebab_case`, `rust_agent_core::tests::capability_prefix_is_checked_once`, `rust_agent_core::tests::digest_hex_round_trip_is_canonical`, `rust_agent_core::tests::recovery_key_checks_version_and_zero_value`, `rust_agent_core::tests::lifecycle_identity_rejects_unknown_and_zero_fields`, `rust_agent_core::tests::only_persistent_operations_derive_durable_session_ids` |
 | Lifecycle reservation drafts bind the exact projected request and cannot be forged | `rust_agent_runtime_api::tests::persistent_create_reservation_binds_all_projected_fields`, `rust_agent_runtime_api::tests::resume_keeps_exact_existing_session_and_volatile_paths_fail_closed`, `privacy::private_protocol_fields_cannot_be_forged` |
 | Unknown metadata/framework fields fail closed | `catalog::tests::unknown_fields_fail_closed`, `discovery::tests::unknown_spoofed_and_mixed_package_metadata_fail_closed` |
@@ -187,6 +187,23 @@ not omissions: the dedicated `Phase 1B Linux production gate` executes every one
 runner with Landlock ABI 2, real user/mount/network namespaces, bubblewrap, pinned Cargo/rustc and
 pinned wasm-bindgen. A host lacking those kernel facilities may establish compile/local-contract
 evidence but cannot make a Linux production-support claim.
+
+## Phase 2
+
+### Minimal runtime spine acceptance
+
+| Contract | Automated evidence |
+|---|---|
+| The lightweight Session API owns persistence/query/journal/read-store DTOs and traits without selecting a backend, and its normal/development/all-feature public closure is `session → runtime-api → core`, never Agent | `rust_agent_session::tests::lightweight_api_types_do_not_need_a_backend`, `architecture::phase_two_session_public_closure_is_agent_free_in_every_feature_mode`, `.github/workflows/ci.yml::quality::Verify Phase 2 API dependency closures` |
+| Model routing produces an opaque planned call; only an exact committed journal proof can produce `PreparedModelCall`, and a foreign proof is rejected before provider side effects; callers cannot construct proof/context/prepared envelopes | `rust_agent_model::tests::journal_proof_is_verified_before_provider_side_effect`, `rust_agent_model::tests::explicit_routing_rejects_missing_route_before_provider`, `privacy::model_call_authority_types_cannot_be_forged`, `privacy::private_protocol_fields_cannot_be_forged` |
+| The minimal App/Agent ownership path executes `Request → LanguageModel → Response` and removes the Agent from the publication directory on shutdown | `rust_agent_agent::tests::request_language_model_response_and_publication_lifecycle`, `generator::tests::minimal_pure_composes_locks_builds_and_regenerates_deterministically`, `e2e::minimal_pure_compose_lock_build_and_request_flow_end_to_end` |
+| Publication is transactional: observer veto/panic occurs before publication and leaves the directory unchanged with no model side effect | `rust_agent_agent::tests::observer_veto_rolls_back_without_publication_or_model_side_effect`, `rust_agent_runtime_api::tests::publication_directory_commits_and_removes_a_whole_entry_atomically` |
+| Volatile lifecycle operations and journal authorities are process-bound opaque issuers with exact owner/scope verification | `rust_agent_runtime_api::tests::volatile_lifecycle_operations_are_unique_and_issuer_bound`, `rust_agent_runtime_api::tests::request_journal_proof_is_exact_and_scope_bound` |
+| Targeted cancellation checks exact Agent/lifecycle/request identity, is idempotent, and preserves the first cause | `rust_agent_agent::tests::targeted_cancel_is_exact_idempotent_and_preserves_first_cause` |
+| Sessionless event feeds bind Agent/lifecycle cursors, reject future/foreign/stale cursors, impose per-feed and aggregate admission bounds, release reservations on drop, terminate slow readers with `Lagged`, and terminate shutdown with `Closed` | `rust_agent_agent::event::tests::feed_admission_is_aggregate_bounded_and_drop_releases_capacity`, `rust_agent_agent::event::tests::lagged_cursor_reports_only_events_delivered_to_the_host`, `rust_agent_agent::event::tests::cursor_scope_replay_and_close_are_fail_closed` |
+| The Phase 2 commands surface is an empty guarded dispatcher whose lifecycle and admission checks precede unknown-command handling | `rust_agent_commands::tests::empty_dispatcher_checks_lifecycle_and_admission_before_lookup` |
+| Replay/model-host/runtime providers satisfy their declared App coexistence ownership modes | `rust_agent_model_replay::tests::instances_are_independent_for_identical_and_boundary_construction`, `rust_agent_model_host::tests::host_service_identity_is_reused_without_reopen`, `rust_agent_runtime_tokio::tests::every_bundle_owns_an_independent_runtime` |
+| `minimal-pure` deterministically composes and locks, executes its generated `Request → model-replay → Response` test under locked offline Cargo and the development build runner, includes only lightweight Session API, and excludes Session/persistence/query/heavy/network/Host providers | `generator::tests::minimal_pure_composes_locks_builds_and_regenerates_deterministically`, `e2e::minimal_pure_compose_lock_build_and_request_flow_end_to_end` |
 
 ## Accepted ADR amendments
 

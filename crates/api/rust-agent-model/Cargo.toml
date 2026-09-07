@@ -1,0 +1,39 @@
+[package]
+name = "rust-agent-model"
+description = "Streaming language-model capability and guarded registry binding"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[package.metadata.rust-agent.build-requirements]
+schema = 1
+executables = []
+read-inputs = []
+environment = []
+
+[[package.metadata.rust-agent.capability]]
+id = "cap:model"
+api = "rust_agent_model::LanguageModel"
+binding-type = "rust_agent_model::ModelProviderBinding"
+binding-adapter = "rust_agent_model::ModelProviderBinding::from_provider"
+binding = "registry"
+scope = "app"
+
+[features]
+default = []
+development = []
+
+[dependencies]
+futures-core = "0.3.34"
+futures-util = { version = "0.3.34", default-features = false, features = ["alloc"] }
+rust-agent-core = { version = "0.1.0", path = "../rust-agent-core", default-features = false }
+rust-agent-runtime-api = { version = "0.1.0", path = "../rust-agent-runtime-api", default-features = false }
+sha2 = "0.10.9"
+
+[dev-dependencies]
+trybuild = "1.0.110"
+
+[lints]
+workspace = true

@@ -1,0 +1,5 @@
+error: cannot construct `ModelCallContext` with struct literal syntax due to private fields
+ --> tests/ui/forge_model_call_context.rs:4:19
+  |
+4 |     let _forged = ModelCallContext {};
+  |                   ^^^^^^^^^^^^^^^^

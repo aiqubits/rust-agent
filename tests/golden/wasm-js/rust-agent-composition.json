@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "algorithm": "sha256-rust-agent-composition-v1",
-  "composition-hash": "da41d5d5ffa3a133cc097c16d22eb8d780ece67cc7cac1be4a3625005c1ff4a0",
+  "composition-hash": "362787d6cf4be8d68fae6e9869cf9503b20f5c5624be7efc6190ddd9cfb43293",
   "build-kind": "wasm",
   "profile-name": "fixture-wasm-js",
   "normalized-profile": {
@@ -181,7 +181,16 @@
       "schema": 1,
       "capabilities": [
         {
-          "id": "cap:build-proof",
+          "id": "cap:agent-driver",
+          "api-package": "rust-agent-agent",
+          "rust-api": "rust_agent_agent::AgentDriver",
+          "binding-type": "rust_agent_agent::AgentDriverBinding",
+          "binding-adapter": "rust_agent_agent::AgentDriverBinding::from_provider",
+          "binding": "singleton",
+          "scope": "agent"
+        },
+        {
+          "id": "cap:fixture-build-proof",
           "api-package": "rust-agent-fixture-api",
           "rust-api": "rust_agent_fixture_api::BuildProof",
           "binding-type": "rust_agent_fixture_api::BuildProofBinding",
@@ -190,7 +199,7 @@
           "scope": "app"
         },
         {
-          "id": "cap:driver",
+          "id": "cap:fixture-driver",
           "api-package": "rust-agent-fixture-api",
           "rust-api": "rust_agent_fixture_api::Driver",
           "binding-type": "rust_agent_fixture_api::DriverBinding",
@@ -199,7 +208,7 @@
           "scope": "app"
         },
         {
-          "id": "cap:fs-read",
+          "id": "cap:fixture-fs-read",
           "api-package": "rust-agent-fixture-api",
           "rust-api": "rust_agent_fixture_api::FileReader",
           "binding-type": "rust_agent_fixture_api::FileReaderBinding",
@@ -208,16 +217,77 @@
           "scope": "app"
         },
         {
-          "id": "cap:model",
+          "id": "cap:fixture-model",
           "api-package": "rust-agent-fixture-api",
           "rust-api": "rust_agent_fixture_api::Model",
           "binding-type": "rust_agent_fixture_api::ModelBinding",
           "binding-adapter": "rust_agent_fixture_api::ModelBinding::from_provider",
           "binding": "singleton",
           "scope": "app"
+        },
+        {
+          "id": "cap:model",
+          "api-package": "rust-agent-model",
+          "rust-api": "rust_agent_model::LanguageModel",
+          "binding-type": "rust_agent_model::ModelProviderBinding",
+          "binding-adapter": "rust_agent_model::ModelProviderBinding::from_provider",
+          "binding": "registry",
+          "scope": "app"
         }
       ],
       "components": [
+        {
+          "id": "driver-direct",
+          "package": "rust-agent-driver-direct",
+          "package-path": "crates/components/driver-direct",
+          "scope": "agent",
+          "factory": "rust_agent_driver_direct::build",
+          "dependencies-type": "rust_agent_driver_direct::Dependencies",
+          "config-type": "rust_agent_driver_direct::Config",
+          "config-source": "none",
+          "config-key": null,
+          "resource-namespace-preparer": null,
+          "prepared-config-type": null,
+          "targets": "cfg(true)",
+          "target-support": [
+            {
+              "predicate": "cfg(true)",
+              "tier": "production"
+            }
+          ],
+          "lifecycle-effects": [],
+          "provides": [
+            {
+              "capability": "cap:agent-driver",
+              "key": null,
+              "priority": 100,
+              "order": 0,
+              "layer": "provider",
+              "resource-namespace": {
+                "mode": "none"
+              },
+              "effects": []
+            }
+          ],
+          "requires": [
+            {
+              "capability": "cap:model",
+              "mode": "required",
+              "field": "model",
+              "key": null
+            }
+          ],
+          "conflicts": [],
+          "security": [],
+          "runtime-primitives": [],
+          "build-requirements": {
+            "executables": [],
+            "read-inputs": [],
+            "environment": []
+          },
+          "app-coexistence": null,
+          "cargo-features": []
+        },
         {
           "id": "fixture-build-proof",
           "package": "rust-agent-fixture-build-proof",
@@ -240,7 +310,7 @@
           "lifecycle-effects": [],
           "provides": [
             {
-              "capability": "cap:build-proof",
+              "capability": "cap:fixture-build-proof",
               "key": null,
               "priority": 100,
               "order": 0,
@@ -291,7 +361,7 @@
           "lifecycle-effects": [],
           "provides": [
             {
-              "capability": "cap:driver",
+              "capability": "cap:fixture-driver",
               "key": null,
               "priority": 100,
               "order": 0,
@@ -304,7 +374,7 @@
           ],
           "requires": [
             {
-              "capability": "cap:model",
+              "capability": "cap:fixture-model",
               "mode": "required",
               "field": "model",
               "key": null
@@ -351,7 +421,7 @@
           "lifecycle-effects": [],
           "provides": [
             {
-              "capability": "cap:fs-read",
+              "capability": "cap:fixture-fs-read",
               "key": null,
               "priority": 100,
               "order": 0,
@@ -402,7 +472,7 @@
           "lifecycle-effects": [],
           "provides": [
             {
-              "capability": "cap:model",
+              "capability": "cap:fixture-model",
               "key": null,
               "priority": 100,
               "order": 0,
@@ -455,7 +525,7 @@
           "lifecycle-effects": [],
           "provides": [
             {
-              "capability": "cap:model",
+              "capability": "cap:fixture-model",
               "key": null,
               "priority": 200,
               "order": 0,
@@ -505,7 +575,7 @@
           "lifecycle-effects": [],
           "provides": [
             {
-              "capability": "cap:model",
+              "capability": "cap:fixture-model",
               "key": null,
               "priority": 50,
               "order": 0,
@@ -538,6 +608,120 @@
             ]
           },
           "cargo-features": []
+        },
+        {
+          "id": "model-host",
+          "package": "rust-agent-model-host",
+          "package-path": "crates/components/model-host",
+          "scope": "app",
+          "factory": "rust_agent_model_host::build",
+          "dependencies-type": "rust_agent_model_host::Dependencies",
+          "config-type": "rust_agent_model_host::host_api::Config",
+          "config-source": "host",
+          "config-key": "model-host",
+          "host-api": "rust_agent_model_host::host_api",
+          "resource-namespace-preparer": null,
+          "prepared-config-type": null,
+          "targets": "cfg(true)",
+          "target-support": [
+            {
+              "predicate": "cfg(true)",
+              "tier": "production"
+            }
+          ],
+          "lifecycle-effects": [],
+          "provides": [
+            {
+              "capability": "cap:model",
+              "key": "host",
+              "priority": 50,
+              "order": 0,
+              "layer": "provider",
+              "resource-namespace": {
+                "mode": "none"
+              },
+              "effects": [
+                "host-bridge"
+              ]
+            }
+          ],
+          "requires": [],
+          "conflicts": [],
+          "security": [
+            "host-bridge"
+          ],
+          "runtime-primitives": [],
+          "build-requirements": {
+            "executables": [],
+            "read-inputs": [],
+            "environment": []
+          },
+          "app-coexistence": {
+            "mode": "concurrent-shared-host-handle",
+            "evidence": {
+              "source": "coexistence-evidence.toml",
+              "algorithm": "sha256",
+              "digest": "83721ebf9598ea0de89e530f9bbfc3f04bb8485b53df5852bcba92ace19a8dae",
+              "reviewer-policy": "phase-2-runtime-review-v1"
+            },
+            "host-config-fields": [
+              "model-host.model"
+            ]
+          },
+          "cargo-features": []
+        },
+        {
+          "id": "model-replay",
+          "package": "rust-agent-model-replay",
+          "package-path": "crates/components/model-replay",
+          "scope": "app",
+          "factory": "rust_agent_model_replay::build",
+          "dependencies-type": "rust_agent_model_replay::Dependencies",
+          "config-type": "rust_agent_model_replay::Config",
+          "config-source": "none",
+          "config-key": null,
+          "resource-namespace-preparer": null,
+          "prepared-config-type": null,
+          "targets": "cfg(true)",
+          "target-support": [
+            {
+              "predicate": "cfg(true)",
+              "tier": "production"
+            }
+          ],
+          "lifecycle-effects": [],
+          "provides": [
+            {
+              "capability": "cap:model",
+              "key": "replay",
+              "priority": 100,
+              "order": 0,
+              "layer": "provider",
+              "resource-namespace": {
+                "mode": "none"
+              },
+              "effects": []
+            }
+          ],
+          "requires": [],
+          "conflicts": [],
+          "security": [],
+          "runtime-primitives": [],
+          "build-requirements": {
+            "executables": [],
+            "read-inputs": [],
+            "environment": []
+          },
+          "app-coexistence": {
+            "mode": "concurrent-independent",
+            "evidence": {
+              "source": "coexistence-evidence.toml",
+              "algorithm": "sha256",
+              "digest": "eedb97ca433e7570bac7591411e7a057032ff535eab6782b9c98da2ddf0ae90f",
+              "reviewer-policy": "phase-2-runtime-review-v1"
+            }
+          },
+          "cargo-features": []
         }
       ],
       "runtime-adapters": [
@@ -562,6 +746,35 @@
               "algorithm": "sha256",
               "digest": "0b037cd6be4a6c7b558f75fcb370fb3485114e7beab7fd8971b2073208dce86d",
               "reviewer-policy": "phase-1a-fixture-review-v1"
+            }
+          },
+          "build-requirements": {
+            "executables": [],
+            "read-inputs": [],
+            "environment": []
+          }
+        },
+        {
+          "id": "runtime-tokio",
+          "package": "rust-agent-runtime-tokio",
+          "package-path": "crates/runtime/rust-agent-runtime-tokio",
+          "constructor": "rust_agent_runtime_tokio::create_runtime_primitives",
+          "targets": "cfg(not(target_arch = \"wasm32\"))",
+          "target-support": [
+            {
+              "predicate": "cfg(not(target_arch = \"wasm32\"))",
+              "tier": "production"
+            }
+          ],
+          "primitives": [],
+          "security": [],
+          "app-coexistence": {
+            "mode": "concurrent-independent",
+            "evidence": {
+              "source": "coexistence-evidence.toml",
+              "algorithm": "sha256",
+              "digest": "f642016b020fb815f750ab5e5441f6c951aa3b4eb16ee8f2e66a75e74e9b1299",
+              "reviewer-policy": "phase-2-runtime-review-v1"
             }
           },
           "build-requirements": {
@@ -632,7 +845,7 @@
         }
       ]
     },
-    "normalized-catalog-digest": "05262656d13865efd85c9b00fd1f8e69bec354e8421f90b7ca971539ce7c8305",
+    "normalized-catalog-digest": "dd4893792c4de85de48cdafd571914f21ca7edad180e09844e3e7e2a8ba096ef",
     "catalog-trust-input": {
       "schema": 1,
       "normalized-policy": {
@@ -644,10 +857,17 @@
               "phase-1a-independent-v1",
               "phase-1a-shared-handle-v1"
             ]
+          },
+          "phase-2-runtime-review-v1": {
+            "evidence-schema": 1,
+            "rule-sets": [
+              "phase-1a-independent-v1",
+              "phase-1a-shared-handle-v1"
+            ]
           }
         }
       },
-      "normalized-policy-digest": "df355b959d2cf726f30baa81ac05d445f7dec143eb28be8a867f4f9f4c1ff86c",
+      "normalized-policy-digest": "cb8a2607997f91b3131149ab2d20fa540e8727604d3c906db7a3a72a10ce01fa",
       "evidence": [
         {
           "owner-kind": "component",
@@ -729,6 +949,58 @@
           "bytes-hex": "736368656d61203d20310a6f776e6572203d2022666978747572652d6d6f64656c2d736861726564220a6d6f6465203d2022636f6e63757272656e742d7368617265642d686f73742d68616e646c65220a72756c652d736574203d202270686173652d31612d7368617265642d68616e646c652d7631220a636c61696d73203d205b226e6f2d72656f70656e222c202273616d652d686f73742d68616e646c652d6964656e74697479222c202274776f2d6170702d696e2d70726f63657373225d0a7465737473203d205b22746f706f6c6f67795f6d61747269783a3a7368617265645f686f73745f68616e646f66665f757365735f73616d655f74797065645f6964656e746974795f776974686f75745f72656f70656e225d0a"
         },
         {
+          "owner-kind": "component",
+          "owner": "model-host",
+          "package": "rust-agent-model-host",
+          "package-path": "crates/components/model-host",
+          "source": "coexistence-evidence.toml",
+          "algorithm": "sha256",
+          "digest": "83721ebf9598ea0de89e530f9bbfc3f04bb8485b53df5852bcba92ace19a8dae",
+          "reviewer-policy": "phase-2-runtime-review-v1",
+          "document": {
+            "schema": 1,
+            "owner": "model-host",
+            "mode": "concurrent-shared-host-handle",
+            "rule-set": "phase-1a-shared-handle-v1",
+            "claims": [
+              "no-reopen",
+              "same-host-handle-identity",
+              "two-app-in-process"
+            ],
+            "tests": [
+              "rust_agent_model_host::tests::host_service_identity_is_reused_without_reopen"
+            ]
+          },
+          "bytes-hex": "736368656d61203d20310a6f776e6572203d20226d6f64656c2d686f7374220a6d6f6465203d2022636f6e63757272656e742d7368617265642d686f73742d68616e646c65220a72756c652d736574203d202270686173652d31612d7368617265642d68616e646c652d7631220a636c61696d73203d205b226e6f2d72656f70656e222c202273616d652d686f73742d68616e646c652d6964656e74697479222c202274776f2d6170702d696e2d70726f63657373225d0a7465737473203d205b22727573745f6167656e745f6d6f64656c5f686f73743a3a74657374733a3a686f73745f736572766963655f6964656e746974795f69735f7265757365645f776974686f75745f72656f70656e225d0a"
+        },
+        {
+          "owner-kind": "component",
+          "owner": "model-replay",
+          "package": "rust-agent-model-replay",
+          "package-path": "crates/components/model-replay",
+          "source": "coexistence-evidence.toml",
+          "algorithm": "sha256",
+          "digest": "eedb97ca433e7570bac7591411e7a057032ff535eab6782b9c98da2ddf0ae90f",
+          "reviewer-policy": "phase-2-runtime-review-v1",
+          "document": {
+            "schema": 1,
+            "owner": "model-replay",
+            "mode": "concurrent-independent",
+            "rule-set": "phase-1a-independent-v1",
+            "claims": [
+              "boundary-config",
+              "different-config",
+              "identical-config",
+              "independent-real-resources",
+              "two-app-in-process"
+            ],
+            "tests": [
+              "rust_agent_model_replay::tests::instances_are_independent_for_identical_and_boundary_construction"
+            ]
+          },
+          "bytes-hex": "736368656d61203d20310a6f776e6572203d20226d6f64656c2d7265706c6179220a6d6f6465203d2022636f6e63757272656e742d696e646570656e64656e74220a72756c652d736574203d202270686173652d31612d696e646570656e64656e742d7631220a636c61696d73203d205b22626f756e646172792d636f6e666967222c2022646966666572656e742d636f6e666967222c20226964656e746963616c2d636f6e666967222c2022696e646570656e64656e742d7265616c2d7265736f7572636573222c202274776f2d6170702d696e2d70726f63657373225d0a7465737473203d205b22727573745f6167656e745f6d6f64656c5f7265706c61793a3a74657374733a3a696e7374616e6365735f6172655f696e646570656e64656e745f666f725f6964656e746963616c5f616e645f626f756e646172795f636f6e737472756374696f6e225d0a"
+        },
+        {
           "owner-kind": "runtime-adapter",
           "owner": "fixture-runtime",
           "package": "rust-agent-fixture-runtime",
@@ -754,11 +1026,48 @@
             ]
           },
           "bytes-hex": "736368656d61203d20310a6f776e6572203d2022666978747572652d72756e74696d65220a6d6f6465203d2022636f6e63757272656e742d696e646570656e64656e74220a72756c652d736574203d202270686173652d31612d696e646570656e64656e742d7631220a636c61696d73203d205b22626f756e646172792d636f6e666967222c2022646966666572656e742d636f6e666967222c20226964656e746963616c2d636f6e666967222c2022696e646570656e64656e742d7265616c2d7265736f7572636573222c202274776f2d6170702d696e2d70726f63657373225d0a7465737473203d205b22727573745f6167656e745f666978747572655f72756e74696d653a3a74657374733a3a74776f5f72756e74696d655f62756e646c65735f6172655f696e646570656e64656e746c795f6f776e6564225d0a"
+        },
+        {
+          "owner-kind": "runtime-adapter",
+          "owner": "runtime-tokio",
+          "package": "rust-agent-runtime-tokio",
+          "package-path": "crates/runtime/rust-agent-runtime-tokio",
+          "source": "coexistence-evidence.toml",
+          "algorithm": "sha256",
+          "digest": "f642016b020fb815f750ab5e5441f6c951aa3b4eb16ee8f2e66a75e74e9b1299",
+          "reviewer-policy": "phase-2-runtime-review-v1",
+          "document": {
+            "schema": 1,
+            "owner": "runtime-tokio",
+            "mode": "concurrent-independent",
+            "rule-set": "phase-1a-independent-v1",
+            "claims": [
+              "boundary-config",
+              "different-config",
+              "identical-config",
+              "independent-real-resources",
+              "two-app-in-process"
+            ],
+            "tests": [
+              "rust_agent_runtime_tokio::tests::every_bundle_owns_an_independent_runtime"
+            ]
+          },
+          "bytes-hex": "736368656d61203d20310a6f776e6572203d202272756e74696d652d746f6b696f220a6d6f6465203d2022636f6e63757272656e742d696e646570656e64656e74220a72756c652d736574203d202270686173652d31612d696e646570656e64656e742d7631220a636c61696d73203d205b22626f756e646172792d636f6e666967222c2022646966666572656e742d636f6e666967222c20226964656e746963616c2d636f6e666967222c2022696e646570656e64656e742d7265616c2d7265736f7572636573222c202274776f2d6170702d696e2d70726f63657373225d0a7465737473203d205b22727573745f6167656e745f72756e74696d655f746f6b696f3a3a74657374733a3a65766572795f62756e646c655f6f776e735f616e5f696e646570656e64656e745f72756e74696d65225d0a"
         }
       ],
-      "identity-digest": "5a4bf46685fc40433ad37956cb666fa836fba2947c8d4fde2257f9f33451dad0"
+      "identity-digest": "5c02e1740d48843ca7fbbe5825452181a505f8c607e177de4c675dfa50796210"
     },
     "root-build-requirements": {
+      "rust-agent-agent": {
+        "executables": [],
+        "read-inputs": [],
+        "environment": []
+      },
+      "rust-agent-commands": {
+        "executables": [],
+        "read-inputs": [],
+        "environment": []
+      },
       "rust-agent-core": {
         "executables": [],
         "read-inputs": [],
@@ -769,13 +1078,23 @@
         "read-inputs": [],
         "environment": []
       },
+      "rust-agent-model": {
+        "executables": [],
+        "read-inputs": [],
+        "environment": []
+      },
       "rust-agent-runtime-api": {
+        "executables": [],
+        "read-inputs": [],
+        "environment": []
+      },
+      "rust-agent-session": {
         "executables": [],
         "read-inputs": [],
         "environment": []
       }
     },
-    "identity-digest": "a29a8db37f78d8d9b918eca6080aad9b6d552ad602dae0b2c4d60a2afa4743b5"
+    "identity-digest": "6fac3071784bf03bbaf8a8a4cd68fba385d7e5e1f31ce75130262d6264ba7bdf"
   },
   "custom-target-spec": null,
   "selected-components": [
@@ -850,7 +1169,7 @@
     ],
     "bindings": [
       {
-        "capability": "cap:model",
+        "capability": "cap:fixture-model",
         "key": null,
         "provider": "fixture-model",
         "consumer": "fixture-driver",
@@ -925,6 +1244,13 @@
     "explored-decisions": 2,
     "diagnostics": [
       {
+        "component": "driver-direct",
+        "conclusion": "excluded",
+        "reasons": [
+          "NotRequired"
+        ]
+      },
+      {
         "component": "fixture-build-proof",
         "conclusion": "excluded",
         "reasons": [
@@ -949,7 +1275,7 @@
         "component": "fixture-model",
         "conclusion": "selected",
         "reasons": [
-          "CandidateFor(cap:model) required by fixture-driver"
+          "CandidateFor(cap:fixture-model) required by fixture-driver"
         ]
       },
       {
@@ -965,6 +1291,20 @@
         "reasons": [
           "NotRequired"
         ]
+      },
+      {
+        "component": "model-host",
+        "conclusion": "excluded",
+        "reasons": [
+          "NotRequired"
+        ]
+      },
+      {
+        "component": "model-replay",
+        "conclusion": "excluded",
+        "reasons": [
+          "NotRequired"
+        ]
       }
     ]
   },
@@ -973,14 +1313,14 @@
       "id": "fixture-api",
       "package": "rust-agent-fixture-api",
       "logical-path": "tests/fixtures/api/fixture-api",
-      "tree-digest": "cc28976dd1c90d4c8e0f25da38f98b1bdd4531424b4a4b02b164f418c3756ebd",
+      "tree-digest": "fec43a57c03d3269a77db8d6160b2e8978e540a3e4500ecb305163f15253cbd0",
       "tree-entries": [
         {
           "path": "Cargo.toml",
           "kind": {
             "kind": "regular-file",
-            "sha256": "666a0969cd4da274ba686a38073ca25b271f324368886e0e9bc8b01efb1138df",
-            "bytes": 1580
+            "sha256": "7555ede9347cfac62ae10ce08343ea1589d02a0c8c571d5fb9d13e3c373bee53",
+            "bytes": 1612
           },
           "metadata": {
             "contract": "read-only-epoch-v1",
@@ -1045,14 +1385,14 @@
       "id": "fixture-driver",
       "package": "rust-agent-fixture-driver",
       "logical-path": "tests/fixtures/components/fixture-driver",
-      "tree-digest": "976470b6d736dda347f6e68b89408c166c28b9b100e384d5a7462db9e8ad1f59",
+      "tree-digest": "f3c63910574d77f7ecbb6473fbd2acec9fb78db6ff0669b9baf25a2eef3f962e",
       "tree-entries": [
         {
           "path": "Cargo.toml",
           "kind": {
             "kind": "regular-file",
-            "sha256": "3cec3e07d1044bce76f6ddfb267e05b3b88a0e736e915703162ad8f3214f1b54",
-            "bytes": 1613
+            "sha256": "12821f91cb53cfcb942a65a837a27a0acff9102df14a5569daab91080c60db41",
+            "bytes": 1629
           },
           "metadata": {
             "contract": "read-only-epoch-v1",
@@ -1211,14 +1551,14 @@
       "id": "fixture-model",
       "package": "rust-agent-fixture-model",
       "logical-path": "tests/fixtures/components/fixture-model",
-      "tree-digest": "8d76808a523a7dda48907617c830241d0ca5ad12e01f55ae1fd83cc349daf3c0",
+      "tree-digest": "46c77ce843496d252fbeab19ae95e44811804c605bbdf535a459d01ca08f45d6",
       "tree-entries": [
         {
           "path": "Cargo.toml",
           "kind": {
             "kind": "regular-file",
-            "sha256": "b635b0a17d4a8fff36239d4c738b6d38bbf161d9409b445df5c2791045e0ac60",
-            "bytes": 1388
+            "sha256": "3f025e19c6b7424bd775c87bbfc5364fa62a4a7f3c1e724ff5e967290a71016d",
+            "bytes": 1396
           },
           "metadata": {
             "contract": "read-only-epoch-v1",
@@ -1471,7 +1811,7 @@
       "id": "rust-agent-core",
       "package": "rust-agent-core",
       "logical-path": "crates/api/rust-agent-core",
-      "tree-digest": "235e05a66b2bafb4055f5f6af5e914ae9875a12557fc9412e99439d10da98ab9",
+      "tree-digest": "8ba5a1fe678ff383bc6a6cf53f7f791c8fe4bb70e7633f25a4f53b34b0f1b835",
       "tree-entries": [
         {
           "path": "Cargo.toml",
@@ -1519,8 +1859,8 @@
           "path": "src/lib.rs",
           "kind": {
             "kind": "regular-file",
-            "sha256": "88fa65b11a16c8be1e558b5eefa9654b7ab9cdc6cb6c90cfaf373f66d8cbaff4",
-            "bytes": 17179
+            "sha256": "9331628ed5b56e578cec06c2f9cad46641476ef7ff4e624676fdc93cc271623f",
+            "bytes": 21497
           },
           "metadata": {
             "contract": "read-only-epoch-v1",
@@ -1543,7 +1883,7 @@
       "id": "rust-agent-runtime-api",
       "package": "rust-agent-runtime-api",
       "logical-path": "crates/api/rust-agent-runtime-api",
-      "tree-digest": "cefe145d8dae34a8a2a0ba7326224fad6ac2dccc70904ecfe6831670e469ae5f",
+      "tree-digest": "0521504bc0beddb8665fe8a00b652d359185ce6967344ba0b4bc8b391c1606ea",
       "tree-entries": [
         {
           "path": "Cargo.toml",
@@ -1591,8 +1931,8 @@
           "path": "src/lib.rs",
           "kind": {
             "kind": "regular-file",
-            "sha256": "1f2388108a93ce938f4482f3898dc7c2dad9dacd8c2be59a5d5b3e70b932211d",
-            "bytes": 28160
+            "sha256": "68e039d8553c847f64b34eb4708406a86310591c4e26f3d6eef1dc67f04cd737",
+            "bytes": 58121
           },
           "metadata": {
             "contract": "read-only-epoch-v1",
@@ -1697,8 +2037,8 @@
           "path": "tests/ui/forge_event_cursor.stderr",
           "kind": {
             "kind": "regular-file",
-            "sha256": "bbbb7de5cf0a2026fa096216af8912ea720748fc078adf31de5d2f3074614b72",
-            "bytes": 548
+            "sha256": "0166b2be0ca782aa45ff0517583ea737f745ef192228475d4c68752e69a4bb6c",
+            "bytes": 538
           },
           "metadata": {
             "contract": "read-only-epoch-v1",
@@ -1787,6 +2127,50 @@
             "kind": "regular-file",
             "sha256": "b20238fccf51fc53d8a4763469ba1a1c2dfbf6e8aa826a486344f3cb8838dd06",
             "bytes": 532
+          },
+          "metadata": {
+            "contract": "read-only-epoch-v1",
+            "mode": 292,
+            "uid": 0,
+            "gid": 0,
+            "atime-nanos": 0,
+            "mtime-nanos": 0,
+            "ctime-nanos": 0,
+            "birthtime-nanos": 0,
+            "link-count": 1,
+            "device": 0,
+            "inode": 0,
+            "generation": 0
+          }
+        },
+        {
+          "path": "tests/ui/forge_request_journal_proof.rs",
+          "kind": {
+            "kind": "regular-file",
+            "sha256": "f8b2ca711aa49fc271974ea9cb5346ea794aaa74a0e18474da086a8eafe30bcf",
+            "bytes": 106
+          },
+          "metadata": {
+            "contract": "read-only-epoch-v1",
+            "mode": 292,
+            "uid": 0,
+            "gid": 0,
+            "atime-nanos": 0,
+            "mtime-nanos": 0,
+            "ctime-nanos": 0,
+            "birthtime-nanos": 0,
+            "link-count": 1,
+            "device": 0,
+            "inode": 0,
+            "generation": 0
+          }
+        },
+        {
+          "path": "tests/ui/forge_request_journal_proof.stderr",
+          "kind": {
+            "kind": "regular-file",
+            "sha256": "e4987f1a9245e408912329d7f63e2119e0b4181218cab34dff374f999c853542",
+            "bytes": 237
           },
           "metadata": {
             "contract": "read-only-epoch-v1",
@@ -1961,13 +2345,13 @@
     },
     {
       "path": "generator-inputs.json",
-      "digest": "c698d01dec3a1ed684112de7fe066ab3caee4a6664cb5064b79b1c5fb861ac8f",
-      "bytes": 21647
+      "digest": "6adbad48b18a297e9c833c0e165b77bae7c2f03c682a562cc2d79f941dee790b",
+      "bytes": 33663
     },
     {
       "path": "src/lib.rs",
-      "digest": "148d9f86c88b65b0722ee533dc663eb940ddd76ed27d026bd7bb250a885008d8",
-      "bytes": 3618
+      "digest": "300ed9b1afe201ab45812b4446618585bc23e001a6e3d35ae6a055e2f58a2e4e",
+      "bytes": 3650
     },
     {
       "path": "src/wasm.rs",

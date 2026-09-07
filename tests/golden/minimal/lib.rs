@@ -7,7 +7,7 @@ pub use rust_agent_fixture_api::FixtureApp;
 pub use rust_agent_runtime_api::{AppHandoffError, AppHandoffMode, BuildError, RuntimePrimitives};
 pub use rust_agent_fixture_runtime::create_runtime_primitives as create_runtime_primitives;
 
-pub const CATALOG_DIGEST: &str = "05262656d13865efd85c9b00fd1f8e69bec354e8421f90b7ca971539ce7c8305";
+pub const CATALOG_DIGEST: &str = "dd4893792c4de85de48cdafd571914f21ca7edad180e09844e3e7e2a8ba096ef";
 
 #[derive(Default)]
 pub struct RuntimeConfig {
@@ -76,18 +76,18 @@ pub fn build(runtime_config: RuntimeConfig, host_bindings: HostBindings, runtime
         fixture_model_dependencies,
         rust_agent_runtime_api::RuntimePrimitiveBindings::none(),
     )?;
-    let binding_model_fixture_model: rust_agent_fixture_api::ModelBinding = rust_agent_fixture_api::ModelBinding::from_provider(fixture_model_output.service().clone());
+    let binding_fixture_model_fixture_model: rust_agent_fixture_api::ModelBinding = rust_agent_fixture_api::ModelBinding::from_provider(fixture_model_output.service().clone());
     let fixture_driver_config: rust_agent_fixture_driver::Config = Default::default();
     let fixture_driver_dependencies = rust_agent_fixture_driver::Dependencies {
-        model: binding_model_fixture_model.clone(),
+        model: binding_fixture_model_fixture_model.clone(),
     };
     let fixture_driver_output = rust_agent_fixture_driver::build(
         &fixture_driver_config,
         fixture_driver_dependencies,
         rust_agent_runtime_api::RuntimePrimitiveBindings::none(),
     )?;
-    let binding_driver_fixture_driver: rust_agent_fixture_api::DriverBinding = rust_agent_fixture_api::DriverBinding::from_provider(fixture_driver_output.service().clone());
-    Ok(rust_agent_fixture_api::FixtureApp::new(binding_driver_fixture_driver, None, handoff))
+    let binding_fixture_driver_fixture_driver: rust_agent_fixture_api::DriverBinding = rust_agent_fixture_api::DriverBinding::from_provider(fixture_driver_output.service().clone());
+    Ok(rust_agent_fixture_api::FixtureApp::new(binding_fixture_driver_fixture_driver, None, handoff))
 }
 
 #[cfg(test)]

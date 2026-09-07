@@ -2,6 +2,14 @@
 members = [
     "crates/api/rust-agent-core",
     "crates/api/rust-agent-runtime-api",
+    "crates/api/rust-agent-session",
+    "crates/api/rust-agent-model",
+    "crates/api/rust-agent-commands",
+    "crates/api/rust-agent-agent",
+    "crates/components/model-replay",
+    "crates/components/model-host",
+    "crates/components/driver-direct",
+    "crates/runtime/rust-agent-runtime-tokio",
     "crates/composition/rust-agent-composition",
     "crates/composition/rust-agent-build-executor",
     "crates/control/rust-agent-cli",
@@ -21,6 +29,14 @@ members = [
 default-members = [
     "crates/api/rust-agent-core",
     "crates/api/rust-agent-runtime-api",
+    "crates/api/rust-agent-session",
+    "crates/api/rust-agent-model",
+    "crates/api/rust-agent-commands",
+    "crates/api/rust-agent-agent",
+    "crates/components/model-replay",
+    "crates/components/model-host",
+    "crates/components/driver-direct",
+    "crates/runtime/rust-agent-runtime-tokio",
     "crates/composition/rust-agent-composition",
     "crates/composition/rust-agent-build-executor",
     "crates/control/rust-agent-cli",
@@ -39,6 +55,8 @@ anyhow = "1.0.99"
 clap = { version = "4.5.46", features = ["derive"] }
 ed25519-dalek = "2.2.0"
 flate2 = { version = "1.1.2", default-features = false, features = ["rust_backend"] }
+futures-core = "0.3.34"
+futures-util = { version = "0.3.34", default-features = false, features = ["alloc"] }
 git2 = { version = "0.21.0", default-features = false }
 hex = "0.4.3"
 landlock = "0.4.7"
@@ -55,6 +73,7 @@ sha2 = "0.10.9"
 tempfile = "3.21.0"
 tar = { version = "0.4.44", default-features = false }
 thiserror = "2.0.16"
+tokio = { version = "1.47.1", default-features = false, features = ["rt", "time"] }
 toml = "0.9.5"
 trybuild = "1.0.110"
 walkdir = "2.5.0"

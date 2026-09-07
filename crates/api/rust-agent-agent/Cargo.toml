@@ -1,0 +1,38 @@
+[package]
+name = "rust-agent-agent"
+description = "Owned Agent handles, factories, admission, cancellation and event feeds"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[package.metadata.rust-agent.build-requirements]
+schema = 1
+executables = []
+read-inputs = []
+environment = []
+
+[[package.metadata.rust-agent.capability]]
+id = "cap:agent-driver"
+api = "rust_agent_agent::AgentDriver"
+binding-type = "rust_agent_agent::AgentDriverBinding"
+binding-adapter = "rust_agent_agent::AgentDriverBinding::from_provider"
+binding = "singleton"
+scope = "agent"
+
+[features]
+default = []
+development = []
+
+[dependencies]
+futures-core = "0.3.34"
+rust-agent-commands = { version = "0.1.0", path = "../rust-agent-commands", default-features = false }
+rust-agent-core = { version = "0.1.0", path = "../rust-agent-core", default-features = false }
+rust-agent-model = { version = "0.1.0", path = "../rust-agent-model", default-features = false }
+rust-agent-runtime-api = { version = "0.1.0", path = "../rust-agent-runtime-api", default-features = false }
+rust-agent-session = { version = "0.1.0", path = "../rust-agent-session", default-features = false }
+sha2 = "0.10.9"
+
+[lints]
+workspace = true

@@ -17,8 +17,13 @@ pub const GENERATOR_INPUT_SCHEMA: u32 = 2;
 
 const NORMALIZED_CATALOG_IDENTITY_DOMAIN: &[u8] = b"rust-agent-normalized-catalog-v1\0";
 const GENERATOR_INPUT_IDENTITY_DOMAIN: &[u8] = b"rust-agent-generator-input-v2\0";
-const PHASE_1A_MANDATORY_ROOT_PACKAGES: [&str; 2] = ["rust-agent-core", "rust-agent-runtime-api"];
-const MAX_GENERATOR_ROOT_BUILD_REQUIREMENTS: usize = MAX_CATALOG_OWNERS + 2;
+const MANDATORY_ROOT_PACKAGES: [&str; 4] = [
+    "rust-agent-commands",
+    "rust-agent-core",
+    "rust-agent-runtime-api",
+    "rust-agent-session",
+];
+const MAX_GENERATOR_ROOT_BUILD_REQUIREMENTS: usize = MAX_CATALOG_OWNERS + 4;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct GeneratorInputCommitment {
@@ -267,7 +272,7 @@ fn validate_exact_root_build_requirement_owners(
     catalog: &NormalizedCatalog,
     requirements: &BTreeMap<String, BuildRequirements>,
 ) -> Result<(), GeneratorInputError> {
-    let expected = PHASE_1A_MANDATORY_ROOT_PACKAGES
+    let expected = MANDATORY_ROOT_PACKAGES
         .into_iter()
         .map(str::to_owned)
         .chain(
@@ -333,7 +338,8 @@ mod tests {
                 (request.owner, bytes)
             })
             .collect();
-        let roots = BTreeMap::from([
+        let mut roots = BTreeMap::from([
+            ("rust-agent-commands".into(), BuildRequirements::default()),
             ("rust-agent-core".into(), BuildRequirements::default()),
             (
                 "rust-agent-fixture-api".into(),
@@ -343,7 +349,13 @@ mod tests {
                 "rust-agent-runtime-api".into(),
                 BuildRequirements::default(),
             ),
+            ("rust-agent-session".into(), BuildRequirements::default()),
         ]);
+        for capability in catalog.capabilities.values() {
+            roots
+                .entry(capability.api_package.clone())
+                .or_insert_with(BuildRequirements::default);
+        }
         let trust = CatalogTrustInputCommitment::new(
             &catalog,
             &CatalogTrustPolicy::from_toml(include_str!(

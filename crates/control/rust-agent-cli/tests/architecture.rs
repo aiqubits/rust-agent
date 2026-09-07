@@ -58,12 +58,64 @@ fn api_dependency_direction_is_acyclic() {
 }
 
 #[test]
-fn phase_zero_exposes_no_session_api_with_an_agent_dependency() {
-    let session_api = workspace_root().join("crates/api/rust-agent-session");
-    assert!(
-        !session_api.exists(),
-        "Phase 2 must replace this Phase 0 absence check with a transitive public-API closure check before introducing rust-agent-session"
-    );
+fn phase_two_session_public_closure_is_agent_free_in_every_feature_mode() {
+    let root = workspace_root();
+    let session_manifest =
+        fs::read_to_string(root.join("crates/api/rust-agent-session/Cargo.toml")).unwrap();
+    let agent_manifest =
+        fs::read_to_string(root.join("crates/api/rust-agent-agent/Cargo.toml")).unwrap();
+    assert!(session_manifest.contains("rust-agent-runtime-api"));
+    assert!(session_manifest.contains("rust-agent-core"));
+    assert!(!session_manifest.contains("rust-agent-agent"));
+    assert!(agent_manifest.contains("rust-agent-session"));
+    assert!(!agent_manifest.contains("rust-agent-extension-api"));
+
+    for arguments in [
+        vec![
+            "tree",
+            "-p",
+            "rust-agent-session",
+            "--edges",
+            "normal",
+            "--no-default-features",
+        ],
+        vec![
+            "tree",
+            "-p",
+            "rust-agent-session",
+            "--edges",
+            "normal",
+            "--no-default-features",
+            "--features",
+            "development",
+        ],
+        vec![
+            "tree",
+            "-p",
+            "rust-agent-session",
+            "--edges",
+            "normal",
+            "--all-features",
+        ],
+    ] {
+        let output = Command::new("cargo")
+            .args(arguments)
+            .current_dir(&root)
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let tree = String::from_utf8(output.stdout).unwrap();
+        assert!(tree.contains("rust-agent-session"));
+        assert!(tree.contains("rust-agent-runtime-api"));
+        assert!(tree.contains("rust-agent-core"));
+        assert!(!tree.contains("rust-agent-agent"));
+    }
+
+    let session_source =
+        fs::read_to_string(root.join("crates/api/rust-agent-session/src/lib.rs")).unwrap();
+    assert!(session_source.contains("pub trait SessionPersistenceAdmin"));
+    assert!(session_source.contains("rust_agent_runtime_api"));
+    assert!(!session_source.contains("rust_agent_agent"));
 }
 
 #[test]
@@ -159,12 +211,28 @@ fn rust_toolchain_version_is_pinned_and_synchronized() {
     assert!(ci.contains(
         "cargo fetch --locked --manifest-path \"$(rustc --print sysroot)/lib/rustlib/src/rust/library/Cargo.toml\""
     ));
-    assert!(ci.contains("Verify exact Phase 0/1A/1B acceptance mappings"));
+    assert!(ci.contains("Verify exact Phase 0/1A/1B/2 acceptance mappings"));
     assert!(ci.contains(
-        "phase_zero_one_a_and_one_b_acceptance_mappings_are_exact_complete_and_runnable -- --exact"
+        "phase_zero_through_two_acceptance_mappings_are_exact_complete_and_runnable -- --exact"
     ));
     assert!(ci.contains("Build pinned-toolchain custom-target composition"));
     assert!(ci.contains("pinned_toolchain_custom_target_compose_lock_build_end_to_end -- --exact"));
+    assert!(ci.contains("Verify Phase 2 API dependency closures"));
+    for command in [
+        "cargo check -p rust-agent-core --no-default-features",
+        "cargo check -p rust-agent-runtime-api --no-default-features",
+        "cargo check -p rust-agent-session --no-default-features",
+        "cargo check -p rust-agent-agent --no-default-features",
+        "cargo check -p rust-agent-session --no-default-features --features development",
+        "cargo check -p rust-agent-agent --no-default-features --features development",
+        "cargo check -p rust-agent-session --all-features",
+        "cargo check -p rust-agent-agent --all-features",
+    ] {
+        assert!(
+            ci.contains(command),
+            "missing Phase 2 CI command: {command}"
+        );
+    }
 
     let golden: Value =
         toml::from_str(&fs::read_to_string(root.join("tests/golden/minimal/Cargo.toml")).unwrap())
@@ -222,7 +290,7 @@ fn phase_one_a_generated_graph_uses_only_minimal_api_and_fixtures() {
 }
 
 #[test]
-fn phase_zero_one_a_and_one_b_acceptance_mappings_are_exact_complete_and_runnable() {
+fn phase_zero_through_two_acceptance_mappings_are_exact_complete_and_runnable() {
     let root = workspace_root();
     let architecture = fs::read_to_string(root.join("ARCHITECTURE.md")).unwrap();
     let invariant_map = fs::read_to_string(root.join("docs/invariant-tests.md")).unwrap();
