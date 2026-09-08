@@ -47,6 +47,7 @@ pub const MAX_PARALLEL_TOOL_CALLS: usize = 16;
 pub const MAX_ACTIVE_TOOL_SESSIONS: usize = 64;
 pub const MAX_NESTED_TOOL_DEPTH: u8 = 8;
 pub const MAX_NESTED_TOOL_CALLS: usize = 64;
+pub const MAX_NESTED_TOOL_COST_UNITS: usize = 4 * 1024;
 
 #[derive(Clone, Debug)]
 enum ToolRuntimeGuard {
@@ -262,6 +263,7 @@ pub enum ToolExecutionError {
     DeadlineExceeded,
     RuntimeUnavailable,
     CallLimitExceeded,
+    CostLimitExceeded,
     BatchConcurrencyLimitExceeded,
     BatchAuthorityMismatch,
     DuplicateCallId,
@@ -312,6 +314,7 @@ impl fmt::Display for ToolExecutionError {
             Self::DeadlineExceeded => formatter.write_str("tool call deadline exceeded"),
             Self::RuntimeUnavailable => formatter.write_str("tool runtime primitive unavailable"),
             Self::CallLimitExceeded => formatter.write_str("tool call count limit exceeded"),
+            Self::CostLimitExceeded => formatter.write_str("tool call cost limit exceeded"),
             Self::BatchConcurrencyLimitExceeded => {
                 formatter.write_str("tool batch concurrency exceeds its hard ceiling")
             }
@@ -482,8 +485,54 @@ struct SessionIdentity {
 
 #[derive(Debug)]
 struct NestedCallBudget {
-    admitted: Mutex<BTreeSet<CallId>>,
-    limit: usize,
+    state: Mutex<NestedCallBudgetState>,
+    call_limit: usize,
+    cost_limit: usize,
+}
+
+#[derive(Debug)]
+struct NestedCallBudgetState {
+    admitted: BTreeSet<CallId>,
+    consumed_cost: usize,
+}
+
+impl NestedCallBudget {
+    fn new(call_limit: usize, cost_limit: usize) -> Self {
+        Self {
+            state: Mutex::new(NestedCallBudgetState {
+                admitted: BTreeSet::new(),
+                consumed_cost: 0,
+            }),
+            call_limit,
+            cost_limit,
+        }
+    }
+
+    fn admit(
+        &self,
+        root_call_id: Option<CallId>,
+        call_id: CallId,
+        cost: crate::ToolCallCost,
+    ) -> Result<(), ToolExecutionError> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| ToolExecutionError::InternalStateUnavailable)?;
+        if state.admitted.len() >= self.call_limit {
+            return Err(ToolExecutionError::CallLimitExceeded);
+        }
+        if root_call_id == Some(call_id) || state.admitted.contains(&call_id) {
+            return Err(ToolExecutionError::DuplicateCallId);
+        }
+        let consumed_cost = state
+            .consumed_cost
+            .checked_add(cost.units().get())
+            .filter(|cost| *cost <= self.cost_limit)
+            .ok_or(ToolExecutionError::CostLimitExceeded)?;
+        state.admitted.insert(call_id);
+        state.consumed_cost = consumed_cost;
+        Ok(())
+    }
 }
 
 #[derive(Debug)]
@@ -570,19 +619,11 @@ impl BorrowedToolExecutionSession<'_> {
             {
                 return Err(ToolExecutionError::NestedCycleDetected);
             }
-            {
-                let mut admitted = self
-                    .calls
-                    .admitted
-                    .lock()
-                    .map_err(|_| ToolExecutionError::InternalStateUnavailable)?;
-                if admitted.len() >= self.calls.limit {
-                    return Err(ToolExecutionError::CallLimitExceeded);
-                }
-                if self.root_call_id == Some(request.call_id) || !admitted.insert(request.call_id) {
-                    return Err(ToolExecutionError::DuplicateCallId);
-                }
-            }
+            self.calls.admit(
+                self.root_call_id,
+                request.call_id,
+                registered.definition().call_cost(),
+            )?;
 
             let arguments = serde_json::to_vec(request.arguments())
                 .map_err(|_| ToolExecutionError::InvalidRequest("invalid tool arguments"))?;
@@ -759,10 +800,10 @@ pub(crate) fn test_nested_authority() -> Arc<NestedToolAuthority> {
         )),
         root_call_id: CallId::from_nonzero_u128(1).unwrap(),
         depth: 0,
-        calls: Arc::new(NestedCallBudget {
-            admitted: Mutex::new(BTreeSet::new()),
-            limit: MAX_NESTED_TOOL_CALLS,
-        }),
+        calls: Arc::new(NestedCallBudget::new(
+            MAX_NESTED_TOOL_CALLS,
+            MAX_NESTED_TOOL_COST_UNITS,
+        )),
         effect_ceiling: SecurityEffects::empty(),
         chain: Arc::from([]),
         cancellation: CancellationToken::new(),
@@ -987,10 +1028,10 @@ impl ToolExecutionSession {
                 origin: ToolExecutionOrigin::ModelStep(self.step),
                 root_call_id: call.plan.request.call_id,
                 depth: 0,
-                calls: Arc::new(NestedCallBudget {
-                    admitted: Mutex::new(BTreeSet::new()),
-                    limit: MAX_NESTED_TOOL_CALLS,
-                }),
+                calls: Arc::new(NestedCallBudget::new(
+                    MAX_NESTED_TOOL_CALLS,
+                    MAX_NESTED_TOOL_COST_UNITS,
+                )),
                 effect_ceiling: call.plan.classified.effects,
                 chain: Arc::from([Arc::clone(&call.plan.request.tool_name)]),
                 cancellation: cancellation.clone(),
@@ -1389,6 +1430,7 @@ struct CommandGrantView {
     cancellation: CancellationToken,
     deadline: Option<RuntimeInstant>,
     max_calls: NonZeroUsize,
+    max_cost_units: NonZeroUsize,
     max_output_bytes: NonZeroUsize,
     effect_ceiling: SecurityEffects,
     tool_executor_digest: Digest,
@@ -1409,6 +1451,7 @@ impl CommandGrantView {
             cancellation: grant.cancellation(),
             deadline: grant.deadline(),
             max_calls: budget.max_calls(),
+            max_cost_units: budget.max_cost_units(),
             max_output_bytes: budget.max_output_bytes(),
             effect_ceiling: grant.effect_ceiling(),
             tool_executor_digest: grant.tool_executor_digest(),
@@ -1485,10 +1528,10 @@ impl GuardedToolExecutor {
             origin: grant.origin,
             root_call_id: None,
             depth: 0,
-            calls: Arc::new(NestedCallBudget {
-                admitted: Mutex::new(BTreeSet::new()),
-                limit: grant.max_calls.get(),
-            }),
+            calls: Arc::new(NestedCallBudget::new(
+                grant.max_calls.get(),
+                grant.max_cost_units.get(),
+            )),
             effect_ceiling: grant.effect_ceiling,
             chain: Arc::from([]),
             cancellation: grant.cancellation,
@@ -2122,6 +2165,7 @@ mod tests {
         calls: Arc<AtomicUsize>,
         safety: ToolSafety,
         effects: SecurityEffects,
+        call_cost: crate::ToolCallCost,
     }
 
     impl Tool for NamedCountingTool {
@@ -2134,6 +2178,7 @@ mod tests {
                 self.effects,
                 simple_policy(),
             )
+            .map(|definition| definition.with_call_cost(self.call_cost))
             .unwrap()
         }
 
@@ -2450,7 +2495,7 @@ mod tests {
         child_calls: Arc<AtomicUsize>,
         observed_error: Arc<Mutex<Option<ToolExecutionError>>>,
     ) -> ToolProviderBinding {
-        nested_provider_with_cancellation(
+        nested_provider_with_budget(
             target,
             attempts,
             target_safety,
@@ -2458,6 +2503,7 @@ mod tests {
             child_calls,
             observed_error,
             false,
+            crate::ToolCallCost::UNIT,
         )
     }
 
@@ -2469,6 +2515,29 @@ mod tests {
         child_calls: Arc<AtomicUsize>,
         observed_error: Arc<Mutex<Option<ToolExecutionError>>>,
         cancel_before_nested: bool,
+    ) -> ToolProviderBinding {
+        nested_provider_with_budget(
+            target,
+            attempts,
+            target_safety,
+            target_effects,
+            child_calls,
+            observed_error,
+            cancel_before_nested,
+            crate::ToolCallCost::UNIT,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn nested_provider_with_budget(
+        target: &'static str,
+        attempts: usize,
+        target_safety: ToolSafety,
+        target_effects: SecurityEffects,
+        child_calls: Arc<AtomicUsize>,
+        observed_error: Arc<Mutex<Option<ToolExecutionError>>>,
+        cancel_before_nested: bool,
+        call_cost: crate::ToolCallCost,
     ) -> ToolProviderBinding {
         let parent = Arc::new(NestedCallerTool {
             target,
@@ -2482,6 +2551,7 @@ mod tests {
             calls: child_calls,
             safety: target_safety,
             effects: target_effects,
+            call_cost,
         });
         let mut registrations = vec![ToolRegistration::new(parent).unwrap()];
         if target != "parent" {
@@ -2664,6 +2734,7 @@ mod tests {
             cancellation,
             deadline: None,
             max_calls: NonZeroUsize::new(max_calls).unwrap(),
+            max_cost_units: NonZeroUsize::new(MAX_NESTED_TOOL_COST_UNITS).unwrap(),
             max_output_bytes: NonZeroUsize::new(1024).unwrap(),
             effect_ceiling,
             tool_executor_digest: harness.executor.inner.identity_digest,
@@ -3440,10 +3511,38 @@ mod tests {
             MAX_NESTED_TOOL_CALLS + 1
         );
 
+        let cost_calls = Arc::new(AtomicUsize::new(0));
+        let cost_error = Arc::new(Mutex::new(None));
+        let cost_harness = harness(
+            5,
+            &[nested_provider_with_budget(
+                "costly-child",
+                5,
+                ToolSafety::ReadOnly,
+                SecurityEffects::READ_LOCAL,
+                Arc::clone(&cost_calls),
+                Arc::clone(&cost_error),
+                false,
+                crate::ToolCallCost::checked(
+                    NonZeroUsize::new(crate::MAX_TOOL_CALL_COST_UNITS).unwrap(),
+                )
+                .unwrap(),
+            )],
+            PermissionDecision::Allow,
+            None,
+        );
+        assert!(execute_parent(&cost_harness).is_ok());
+        assert_eq!(
+            *cost_error.lock().unwrap(),
+            Some(ToolExecutionError::CostLimitExceeded)
+        );
+        assert_eq!(cost_calls.load(Ordering::SeqCst), 4);
+        assert_eq!(cost_harness.permission_calls.load(Ordering::SeqCst), 5);
+
         let cancelled_calls = Arc::new(AtomicUsize::new(0));
         let cancelled = Arc::new(Mutex::new(None));
         let cancelled_harness = harness(
-            5,
+            6,
             &[nested_provider_with_cancellation(
                 "child",
                 1,
@@ -3529,6 +3628,39 @@ mod tests {
         ));
         assert_eq!(events.lock().unwrap().len(), 5);
 
+        let mut cost_grant = command_grant_view(
+            &harness,
+            CancellationToken::new(),
+            SecurityEffects::READ_LOCAL,
+            2,
+        );
+        cost_grant.max_cost_units = NonZeroUsize::new(1).unwrap();
+        let cost_session = harness.executor.prepare_command_view(cost_grant).unwrap();
+        assert!(
+            run(cost_session.execute(
+                ToolExecutionRequest::new(
+                    CallId::from_nonzero_u128(7_002).unwrap(),
+                    "child",
+                    json!({}),
+                )
+                .unwrap(),
+            ))
+            .is_ok()
+        );
+        assert_eq!(
+            run(cost_session.execute(
+                ToolExecutionRequest::new(
+                    CallId::from_nonzero_u128(7_003).unwrap(),
+                    "child",
+                    json!({}),
+                )
+                .unwrap(),
+            )),
+            Err(ToolExecutionError::CostLimitExceeded)
+        );
+        assert_eq!(child_calls.load(Ordering::SeqCst), 2);
+        assert_eq!(harness.permission_calls.load(Ordering::SeqCst), 2);
+
         let no_effect_session = harness
             .executor
             .prepare_command_view(command_grant_view(
@@ -3541,7 +3673,7 @@ mod tests {
         assert!(matches!(
             run(no_effect_session.execute(
                 ToolExecutionRequest::new(
-                    CallId::from_nonzero_u128(7_002).unwrap(),
+                    CallId::from_nonzero_u128(7_004).unwrap(),
                     "child",
                     json!({}),
                 )
@@ -3549,8 +3681,8 @@ mod tests {
             )),
             Err(ToolExecutionError::EffectCeilingExceeded)
         ));
-        assert_eq!(child_calls.load(Ordering::SeqCst), 1);
-        assert_eq!(harness.permission_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(child_calls.load(Ordering::SeqCst), 2);
+        assert_eq!(harness.permission_calls.load(Ordering::SeqCst), 2);
 
         let mut foreign = command_grant_view(
             &harness,
@@ -3597,10 +3729,10 @@ mod tests {
             origin: ToolExecutionOrigin::ModelStep(step()),
             root_call_id: CallId::from_nonzero_u128(5_001).unwrap(),
             depth: MAX_NESTED_TOOL_DEPTH,
-            calls: Arc::new(NestedCallBudget {
-                admitted: Mutex::new(BTreeSet::new()),
-                limit: MAX_NESTED_TOOL_CALLS,
-            }),
+            calls: Arc::new(NestedCallBudget::new(
+                MAX_NESTED_TOOL_CALLS,
+                MAX_NESTED_TOOL_COST_UNITS,
+            )),
             effect_ceiling: SecurityEffects::READ_LOCAL,
             chain: Arc::from([Arc::from("parent")]),
             cancellation: CancellationToken::new(),

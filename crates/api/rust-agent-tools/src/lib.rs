@@ -8,15 +8,21 @@ mod output;
 mod policy;
 mod registry;
 
-use std::{fmt, future::Future, num::NonZeroU64, pin::Pin, sync::Arc};
+use std::{
+    fmt,
+    future::Future,
+    num::{NonZeroU64, NonZeroUsize},
+    pin::Pin,
+    sync::Arc,
+};
 
 pub use execution::{
     BorrowedToolExecutionSession, GuardedToolExecutor, MAX_ACTIVE_TOOL_SESSIONS,
-    MAX_NESTED_TOOL_CALLS, MAX_NESTED_TOOL_DEPTH, MAX_PARALLEL_TOOL_CALLS, MAX_TOOL_ARGUMENT_BYTES,
-    MAX_TOOL_ARGUMENT_DEPTH, MAX_TOOL_CALLS_PER_STEP, PreparedToolCall, StepId,
-    ToolBatchConcurrency, ToolCallPlan, ToolExecutionBatchResult, ToolExecutionError,
-    ToolExecutionOutcome, ToolExecutionRequest, ToolExecutionResult, ToolExecutionSession,
-    ToolExecutor, ToolExecutorBinding, ToolScope,
+    MAX_NESTED_TOOL_CALLS, MAX_NESTED_TOOL_COST_UNITS, MAX_NESTED_TOOL_DEPTH,
+    MAX_PARALLEL_TOOL_CALLS, MAX_TOOL_ARGUMENT_BYTES, MAX_TOOL_ARGUMENT_DEPTH,
+    MAX_TOOL_CALLS_PER_STEP, PreparedToolCall, StepId, ToolBatchConcurrency, ToolCallPlan,
+    ToolExecutionBatchResult, ToolExecutionError, ToolExecutionOutcome, ToolExecutionRequest,
+    ToolExecutionResult, ToolExecutionSession, ToolExecutor, ToolExecutorBinding, ToolScope,
 };
 pub use middleware::{
     MAX_TOOL_EXECUTION_MIDDLEWARE, MAX_TOOL_MIDDLEWARE_ERROR_BYTES, ToolAroundExecutionPhase,
@@ -49,6 +55,28 @@ pub const MAX_TOOL_SCHEMA_BYTES: usize = 64 * 1024;
 pub const MAX_TOOL_SCHEMA_DEPTH: usize = 16;
 pub const MAX_TOOL_REGISTRATIONS_PER_PROVIDER: usize = 64;
 pub const MAX_TOOL_ERROR_MESSAGE_BYTES: usize = 4 * 1024;
+pub const MAX_TOOL_CALL_COST_UNITS: usize = 1024;
+
+/// Checked, build-reviewed relative cost of one Tool call.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct ToolCallCost(NonZeroUsize);
+
+impl ToolCallCost {
+    pub const UNIT: Self = Self(NonZeroUsize::MIN);
+
+    pub fn checked(units: NonZeroUsize) -> Result<Self, ToolRegistrationError> {
+        if units.get() > MAX_TOOL_CALL_COST_UNITS {
+            return Err(ToolRegistrationError::InvalidDefinition(
+                "tool call cost exceeds its hard ceiling",
+            ));
+        }
+        Ok(Self(units))
+    }
+
+    pub const fn units(self) -> NonZeroUsize {
+        self.0
+    }
+}
 
 #[cfg(not(target_arch = "wasm32"))]
 pub type ToolFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
@@ -63,6 +91,7 @@ pub struct ToolDefinition {
     input_schema: JsonValue,
     static_safety: ToolSafety,
     static_effects: SecurityEffects,
+    call_cost: ToolCallCost,
     call_policy: ToolCallPolicy,
     canonical_schema_bytes: usize,
 }
@@ -117,6 +146,7 @@ impl ToolDefinition {
             input_schema,
             static_safety,
             static_effects,
+            call_cost: ToolCallCost::UNIT,
             call_policy,
             canonical_schema_bytes,
         })
@@ -140,6 +170,16 @@ impl ToolDefinition {
 
     pub const fn static_effects(&self) -> SecurityEffects {
         self.static_effects
+    }
+
+    pub const fn call_cost(&self) -> ToolCallCost {
+        self.call_cost
+    }
+
+    #[must_use]
+    pub fn with_call_cost(mut self, call_cost: ToolCallCost) -> Self {
+        self.call_cost = call_cost;
+        self
     }
 
     pub const fn call_policy(&self) -> &ToolCallPolicy {
@@ -581,6 +621,14 @@ mod tests {
 
     #[test]
     fn definition_and_provider_snapshot_bounds_fail_closed() {
+        assert_eq!(ToolCallCost::UNIT.units().get(), 1);
+        assert!(
+            ToolCallCost::checked(NonZeroUsize::new(MAX_TOOL_CALL_COST_UNITS).unwrap()).is_ok()
+        );
+        assert!(matches!(
+            ToolCallCost::checked(NonZeroUsize::new(MAX_TOOL_CALL_COST_UNITS + 1).unwrap()),
+            Err(ToolRegistrationError::InvalidDefinition(_))
+        ));
         assert!(matches!(
             ToolDefinition::new(
                 "NotCanonical",

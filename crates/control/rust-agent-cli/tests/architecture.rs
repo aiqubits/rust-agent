@@ -129,12 +129,15 @@ fn phase_three_tool_api_dependency_and_privacy_boundary_is_isolated() {
     let middleware =
         fs::read_to_string(root.join("crates/api/rust-agent-tools/src/middleware.rs")).unwrap();
     assert!(source.contains("pub struct ExecutionPermit"));
+    assert!(source.contains("pub const MAX_TOOL_CALL_COST_UNITS: usize = 1024;"));
     assert!(source.contains("pub fn prepare_nested<'a>("));
     assert!(commands.contains("pub struct CommandPermit"));
+    assert!(commands.contains("pub const MAX_COMMAND_TOOL_COST_UNITS: usize = 4 * 1024;"));
     assert!(commands.contains("pub struct CommandToolGrant<'a>"));
     assert!(commands.contains("PhantomData<&'a mut &'a ()>"));
     assert!(execution.contains("fn prepare_command<'a>("));
     assert!(execution.contains("pub const MAX_PARALLEL_TOOL_CALLS: usize = 16;"));
+    assert!(execution.contains("pub const MAX_NESTED_TOOL_COST_UNITS: usize = 4 * 1024;"));
     assert!(execution.contains("pub fn execute_prepared_batch("));
     assert!(execution.contains("fn next_dispatchable_call("));
     assert!(registry.contains("handler: Arc<dyn crate::Tool>"));

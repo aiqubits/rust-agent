@@ -178,8 +178,14 @@ where
                 .bits()
                 .to_be_bytes();
             let ceiling_effect_bytes = effective_ceiling.bits().to_be_bytes();
+            let call_cost_bytes = registration
+                .definition
+                .call_cost()
+                .units()
+                .get()
+                .to_be_bytes();
             let identity_digest = hash_parts(&[
-                b"rust-agent-registered-tool-v1\0",
+                b"rust-agent-registered-tool-v2\0",
                 component_id.as_str().as_bytes(),
                 provider_id.as_str().as_bytes(),
                 &schema_version_bytes,
@@ -188,6 +194,7 @@ where
                 &schema,
                 &[safety_tag(registration.definition.static_safety())],
                 &static_effect_bytes,
+                &call_cost_bytes,
                 &policy,
                 &ceiling_effect_bytes,
             ]);
@@ -466,7 +473,10 @@ impl ToolRegistry {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::{
+        num::NonZeroUsize,
+        sync::atomic::{AtomicU64, Ordering},
+    };
 
     use serde_json::{Value as JsonValue, json};
 
@@ -480,6 +490,7 @@ mod tests {
     struct NoopTool {
         name: String,
         parallel: bool,
+        call_cost: crate::ToolCallCost,
     }
 
     impl Tool for NoopTool {
@@ -498,6 +509,7 @@ mod tests {
                 .build()
                 .unwrap(),
             )
+            .map(|definition| definition.with_call_cost(self.call_cost))
             .unwrap()
         }
 
@@ -516,6 +528,7 @@ mod tests {
         version: AtomicU64,
         variant: AtomicU64,
         policy_variant: AtomicU64,
+        cost_variant: AtomicU64,
     }
 
     impl ToolContribution for MutableContribution {
@@ -533,6 +546,14 @@ mod tests {
                     crate::ToolRegistration::new(Arc::new(NoopTool {
                         name: name.to_owned(),
                         parallel: self.policy_variant.load(Ordering::SeqCst) != 0,
+                        call_cost: crate::ToolCallCost::checked(
+                            NonZeroUsize::new(
+                                usize::try_from(self.cost_variant.load(Ordering::SeqCst)).unwrap()
+                                    + 1,
+                            )
+                            .unwrap(),
+                        )
+                        .unwrap(),
                     }))
                     .unwrap(),
                 ],
@@ -546,6 +567,7 @@ mod tests {
             version: AtomicU64::new(2),
             variant: AtomicU64::new(0),
             policy_variant: AtomicU64::new(0),
+            cost_variant: AtomicU64::new(0),
         });
         let binding = ToolProviderBinding::from_provider(Arc::clone(&contribution));
         let initial = binding.snapshot().unwrap();
@@ -558,6 +580,12 @@ mod tests {
             Err(ToolProviderError::SchemaVersionConflict)
         ));
         contribution.policy_variant.store(0, Ordering::SeqCst);
+        contribution.cost_variant.store(1, Ordering::SeqCst);
+        assert!(matches!(
+            binding.snapshot(),
+            Err(ToolProviderError::SchemaVersionConflict)
+        ));
+        contribution.cost_variant.store(0, Ordering::SeqCst);
         contribution.version.store(1, Ordering::SeqCst);
         assert!(matches!(
             binding.snapshot(),
@@ -576,6 +604,7 @@ mod tests {
             version: AtomicU64::new(1),
             variant: AtomicU64::new(0),
             policy_variant: AtomicU64::new(0),
+            cost_variant: AtomicU64::new(0),
         }));
         assert!(matches!(
             ToolRegistry::from_bindings(&vec![provider.clone(); MAX_TOOL_PROVIDERS + 1]),

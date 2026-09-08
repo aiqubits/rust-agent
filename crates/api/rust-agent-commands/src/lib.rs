@@ -17,6 +17,7 @@ use rust_agent_runtime_api::{
 
 pub const MAX_COMMAND_ARGUMENT_BYTES: usize = 64 * 1024;
 pub const MAX_COMMAND_TOOL_CALLS: usize = 64;
+pub const MAX_COMMAND_TOOL_COST_UNITS: usize = 4 * 1024;
 pub const MAX_COMMAND_TOOL_OUTPUT_BYTES: usize = 256 * 1024;
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -68,33 +69,43 @@ impl CommandInvocationId {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CommandToolBudget {
-    max_calls: NonZeroUsize,
-    max_output_bytes: NonZeroUsize,
+    calls: NonZeroUsize,
+    cost_units: NonZeroUsize,
+    output_bytes: NonZeroUsize,
 }
 
 impl CommandToolBudget {
     pub fn checked(
         max_calls: NonZeroUsize,
+        max_cost_units: NonZeroUsize,
         max_output_bytes: NonZeroUsize,
     ) -> Result<Self, CommandDelegationError> {
         if max_calls.get() > MAX_COMMAND_TOOL_CALLS {
             return Err(CommandDelegationError::BudgetExceeded("max_calls"));
         }
+        if max_cost_units.get() > MAX_COMMAND_TOOL_COST_UNITS {
+            return Err(CommandDelegationError::BudgetExceeded("max_cost_units"));
+        }
         if max_output_bytes.get() > MAX_COMMAND_TOOL_OUTPUT_BYTES {
             return Err(CommandDelegationError::BudgetExceeded("max_output_bytes"));
         }
         Ok(Self {
-            max_calls,
-            max_output_bytes,
+            calls: max_calls,
+            cost_units: max_cost_units,
+            output_bytes: max_output_bytes,
         })
     }
 
     pub const fn max_calls(self) -> NonZeroUsize {
-        self.max_calls
+        self.calls
+    }
+
+    pub const fn max_cost_units(self) -> NonZeroUsize {
+        self.cost_units
     }
 
     pub const fn max_output_bytes(self) -> NonZeroUsize {
-        self.max_output_bytes
+        self.output_bytes
     }
 }
 
@@ -487,6 +498,7 @@ mod tests {
             deadline: None,
             tool_budget: CommandToolBudget::checked(
                 NonZeroUsize::new(4).unwrap(),
+                NonZeroUsize::new(16).unwrap(),
                 NonZeroUsize::new(4096).unwrap(),
             )
             .unwrap(),
@@ -499,14 +511,31 @@ mod tests {
     #[test]
     fn command_tool_budget_and_exact_permit_delegation_are_bounded() {
         assert_eq!(
+            command_authority(CancellationToken::new())
+                .tool_budget
+                .max_cost_units()
+                .get(),
+            16
+        );
+        assert_eq!(
             CommandToolBudget::checked(
                 NonZeroUsize::new(MAX_COMMAND_TOOL_CALLS + 1).unwrap(),
+                NonZeroUsize::new(1).unwrap(),
                 NonZeroUsize::new(1).unwrap(),
             ),
             Err(CommandDelegationError::BudgetExceeded("max_calls"))
         );
         assert_eq!(
             CommandToolBudget::checked(
+                NonZeroUsize::new(1).unwrap(),
+                NonZeroUsize::new(MAX_COMMAND_TOOL_COST_UNITS + 1).unwrap(),
+                NonZeroUsize::new(1).unwrap(),
+            ),
+            Err(CommandDelegationError::BudgetExceeded("max_cost_units"))
+        );
+        assert_eq!(
+            CommandToolBudget::checked(
+                NonZeroUsize::new(1).unwrap(),
                 NonZeroUsize::new(1).unwrap(),
                 NonZeroUsize::new(MAX_COMMAND_TOOL_OUTPUT_BYTES + 1).unwrap(),
             ),
