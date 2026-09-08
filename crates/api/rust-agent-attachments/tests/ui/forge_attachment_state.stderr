@@ -1,0 +1,21 @@
+error[E0451]: fields `provider_key`, `content_digest` and `byte_len` of struct `AttachmentRef` are private
+  --> tests/ui/forge_attachment_state.rs:8:9
+   |
+ 7 |     let _reference = AttachmentRef {
+   |                      ------------- in this type
+ 8 |         provider_key: CanonicalId::new("memory").unwrap(),
+   |         ^^^^^^^^^^^^ private field
+ 9 |         content_digest: Digest::from_bytes([0; 32]),
+   |         ^^^^^^^^^^^^^^ private field
+10 |         byte_len: 1,
+   |         ^^^^^^^^ private field
+
+error[E0451]: fields `start` and `length` of struct `ByteRange` are private
+  --> tests/ui/forge_attachment_state.rs:13:9
+   |
+12 |     let _range = ByteRange {
+   |                  --------- in this type
+13 |         start: 0,
+   |         ^^^^^ private field
+14 |         length: NonZeroUsize::new(1).unwrap(),
+   |         ^^^^^^ private field

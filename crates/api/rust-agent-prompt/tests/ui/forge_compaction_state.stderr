@@ -1,0 +1,23 @@
+error[E0451]: fields `source_digest`, `conversation`, `target_bytes` and `target_tokens` of struct `CompactionInput` are private
+  --> tests/ui/forge_compaction_state.rs:20:9
+   |
+19 |     let _input = CompactionInput {
+   |                  --------------- in this type
+20 |         source_digest: Digest::from_bytes([0; 32]),
+   |         ^^^^^^^^^^^^^ private field
+21 |         conversation,
+   |         ^^^^^^^^^^^^ private field
+22 |         target_bytes: NonZeroUsize::new(1).unwrap(),
+   |         ^^^^^^^^^^^^ private field
+23 |         target_tokens: NonZeroU64::new(1).unwrap(),
+   |         ^^^^^^^^^^^^^ private field
+
+error[E0451]: fields `cancellation` and `deadline` of struct `CompactionContext` are private
+  --> tests/ui/forge_compaction_state.rs:26:9
+   |
+25 |     let _context = CompactionContext {
+   |                    ----------------- in this type
+26 |         cancellation: CancellationToken::new(),
+   |         ^^^^^^^^^^^^ private field
+27 |         deadline: Some(RuntimeInstant::from_monotonic_duration(Duration::from_secs(1))),
+   |         ^^^^^^^^ private field

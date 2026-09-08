@@ -1,0 +1,67 @@
+[package]
+name = "rust-agent-prompt"
+description = "Bounded prompt assembly and compaction capability contracts"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[package.metadata.rust-agent.build-requirements]
+schema = 1
+executables = []
+read-inputs = []
+environment = []
+
+[[package.metadata.rust-agent.capability]]
+id = "cap:prompt-contributor"
+api = "rust_agent_prompt::PromptContributor"
+binding-type = "rust_agent_prompt::PromptContributorBinding"
+binding-adapter = "rust_agent_prompt::PromptContributorBinding::from_provider"
+binding = "ordered-multi"
+scope = "agent"
+
+[[package.metadata.rust-agent.capability]]
+id = "cap:prompt-assembly"
+api = "rust_agent_prompt::PromptAssembly"
+binding-type = "rust_agent_prompt::PromptAssemblyBinding"
+binding-adapter = "rust_agent_prompt::PromptAssemblyBinding::from_provider"
+binding = "singleton"
+scope = "agent"
+
+[[package.metadata.rust-agent.capability]]
+id = "cap:conversation-compaction"
+api = "rust_agent_prompt::Compactor"
+binding-type = "rust_agent_prompt::CompactorBinding"
+binding-adapter = "rust_agent_prompt::CompactorBinding::from_provider"
+binding = "singleton"
+scope = "agent"
+
+[[package.metadata.rust-agent.capability]]
+id = "cap:tool-result-pruner"
+api = "rust_agent_prompt::ToolResultPruner"
+binding-type = "rust_agent_prompt::ToolResultPrunerBinding"
+binding-adapter = "rust_agent_prompt::ToolResultPrunerBinding::from_provider"
+binding = "singleton"
+scope = "agent"
+
+[[package.metadata.rust-agent.capability]]
+id = "cap:token-meter"
+api = "rust_agent_prompt::TokenMeter"
+binding-type = "rust_agent_prompt::TokenMeterBinding"
+binding-adapter = "rust_agent_prompt::TokenMeterBinding::from_provider"
+binding = "singleton"
+scope = "agent"
+
+[features]
+default = []
+
+[dependencies]
+rust-agent-core = { version = "0.1.0", path = "../rust-agent-core", default-features = false }
+rust-agent-runtime-api = { version = "0.1.0", path = "../rust-agent-runtime-api", default-features = false }
+
+[dev-dependencies]
+trybuild.workspace = true
+
+[lints]
+workspace = true

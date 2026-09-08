@@ -829,6 +829,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "rust-agent-attachments"
+version = "0.1.0"
+dependencies = [
+ "rust-agent-core",
+ "rust-agent-runtime-api",
+ "sha2",
+ "trybuild",
+]
+
+[[package]]
 name = "rust-agent-build-executor"
 version = "0.1.0"
 dependencies = [
@@ -1058,6 +1068,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "rust-agent-prompt"
+version = "0.1.0"
+dependencies = [
+ "rust-agent-core",
+ "rust-agent-runtime-api",
+ "trybuild",
+]
+
+[[package]]
 name = "rust-agent-runtime-api"
 version = "0.1.0"
 dependencies = [
@@ -1091,6 +1110,24 @@ version = "0.1.0"
 dependencies = [
  "rust-agent-core",
  "rust-agent-runtime-api",
+ "trybuild",
+]
+
+[[package]]
+name = "rust-agent-spill"
+version = "0.1.0"
+dependencies = [
+ "rust-agent-core",
+ "rust-agent-runtime-api",
+ "sha2",
+ "trybuild",
+]
+
+[[package]]
+name = "rust-agent-telemetry"
+version = "0.1.0"
+dependencies = [
+ "rust-agent-core",
  "trybuild",
 ]
 

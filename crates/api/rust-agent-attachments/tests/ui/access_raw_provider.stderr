@@ -1,0 +1,5 @@
+error[E0616]: field `provider` of struct `AttachmentStoreBinding` is private
+  --> tests/ui/access_raw_provider.rs:36:29
+   |
+36 |     let _provider = binding.provider;
+   |                             ^^^^^^^^ private field

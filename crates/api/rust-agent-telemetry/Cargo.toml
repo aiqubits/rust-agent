@@ -1,0 +1,34 @@
+[package]
+name = "rust-agent-telemetry"
+description = "Structured bounded telemetry capability contracts"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[package.metadata.rust-agent.build-requirements]
+schema = 1
+executables = []
+read-inputs = []
+environment = []
+
+[[package.metadata.rust-agent.capability]]
+id = "cap:telemetry"
+api = "rust_agent_telemetry::Telemetry"
+binding-type = "rust_agent_telemetry::TelemetryBinding"
+binding-adapter = "rust_agent_telemetry::TelemetryBinding::from_provider"
+binding = "ordered-multi"
+scope = "app"
+
+[features]
+default = []
+
+[dependencies]
+rust-agent-core = { version = "0.1.0", path = "../rust-agent-core", default-features = false }
+
+[dev-dependencies]
+trybuild.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,15 @@
+error[E0451]: fields `provider_key`, `owner`, `content_digest`, `byte_len` and `expires_at` of struct `SpillRef` are private
+  --> tests/ui/forge_spill_state.rs:7:9
+   |
+ 6 |     let _reference = SpillRef {
+   |                      -------- in this type
+ 7 |         provider_key: CanonicalId::new("memory").unwrap(),
+   |         ^^^^^^^^^^^^ private field
+ 8 |         owner: AgentId::from_nonzero_u128(1).unwrap(),
+   |         ^^^^^ private field
+ 9 |         content_digest: Digest::from_bytes([0; 32]),
+   |         ^^^^^^^^^^^^^^ private field
+10 |         byte_len: 1,
+   |         ^^^^^^^^ private field
+11 |         expires_at: RuntimeInstant::from_monotonic_duration(std::time::Duration::from_secs(1)),
+   |         ^^^^^^^^^^ private field

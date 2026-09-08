@@ -1,0 +1,17 @@
+error[E0451]: fields `name`, `kind`, `severity`, `agent_id`, `call_id` and `attributes` of struct `TelemetryEvent` are private
+  --> tests/ui/forge_telemetry_state.rs:8:9
+   |
+ 7 |     let _event = TelemetryEvent {
+   |                  -------------- in this type
+ 8 |         name: CanonicalId::new("event").unwrap(),
+   |         ^^^^ private field
+ 9 |         kind: TelemetryEventKind::OperationStarted,
+   |         ^^^^ private field
+10 |         severity: TelemetrySeverity::Info,
+   |         ^^^^^^^^ private field
+11 |         agent_id: None,
+   |         ^^^^^^^^ private field
+12 |         call_id: None,
+   |         ^^^^^^^ private field
+13 |         attributes: Arc::from([]),
+   |         ^^^^^^^^^^ private field

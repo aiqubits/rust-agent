@@ -22,6 +22,24 @@
         "scope": "app"
       },
       {
+        "id": "cap:attachment-store",
+        "api-package": "rust-agent-attachments",
+        "rust-api": "rust_agent_attachments::AttachmentStore",
+        "binding-type": "rust_agent_attachments::AttachmentStoreBinding",
+        "binding-adapter": "rust_agent_attachments::AttachmentStoreBinding::from_provider",
+        "binding": "registry",
+        "scope": "app"
+      },
+      {
+        "id": "cap:conversation-compaction",
+        "api-package": "rust-agent-prompt",
+        "rust-api": "rust_agent_prompt::Compactor",
+        "binding-type": "rust_agent_prompt::CompactorBinding",
+        "binding-adapter": "rust_agent_prompt::CompactorBinding::from_provider",
+        "binding": "singleton",
+        "scope": "agent"
+      },
+      {
         "id": "cap:fixture-build-proof",
         "api-package": "rust-agent-fixture-api",
         "rust-api": "rust_agent_fixture_api::BuildProof",
@@ -81,6 +99,60 @@
         "rust-api": "rust_agent_policy::PermissionPolicy",
         "binding-type": "rust_agent_policy::PermissionPolicyBinding",
         "binding-adapter": "rust_agent_policy::PermissionPolicyBinding::from_provider",
+        "binding": "singleton",
+        "scope": "agent"
+      },
+      {
+        "id": "cap:prompt-assembly",
+        "api-package": "rust-agent-prompt",
+        "rust-api": "rust_agent_prompt::PromptAssembly",
+        "binding-type": "rust_agent_prompt::PromptAssemblyBinding",
+        "binding-adapter": "rust_agent_prompt::PromptAssemblyBinding::from_provider",
+        "binding": "singleton",
+        "scope": "agent"
+      },
+      {
+        "id": "cap:prompt-contributor",
+        "api-package": "rust-agent-prompt",
+        "rust-api": "rust_agent_prompt::PromptContributor",
+        "binding-type": "rust_agent_prompt::PromptContributorBinding",
+        "binding-adapter": "rust_agent_prompt::PromptContributorBinding::from_provider",
+        "binding": "ordered-multi",
+        "scope": "agent"
+      },
+      {
+        "id": "cap:spill-store",
+        "api-package": "rust-agent-spill",
+        "rust-api": "rust_agent_spill::SpillStore",
+        "binding-type": "rust_agent_spill::SpillStoreBinding",
+        "binding-adapter": "rust_agent_spill::SpillStoreBinding::from_provider",
+        "binding": "singleton",
+        "scope": "agent"
+      },
+      {
+        "id": "cap:telemetry",
+        "api-package": "rust-agent-telemetry",
+        "rust-api": "rust_agent_telemetry::Telemetry",
+        "binding-type": "rust_agent_telemetry::TelemetryBinding",
+        "binding-adapter": "rust_agent_telemetry::TelemetryBinding::from_provider",
+        "binding": "ordered-multi",
+        "scope": "app"
+      },
+      {
+        "id": "cap:token-meter",
+        "api-package": "rust-agent-prompt",
+        "rust-api": "rust_agent_prompt::TokenMeter",
+        "binding-type": "rust_agent_prompt::TokenMeterBinding",
+        "binding-adapter": "rust_agent_prompt::TokenMeterBinding::from_provider",
+        "binding": "singleton",
+        "scope": "agent"
+      },
+      {
+        "id": "cap:tool-result-pruner",
+        "api-package": "rust-agent-prompt",
+        "rust-api": "rust_agent_prompt::ToolResultPruner",
+        "binding-type": "rust_agent_prompt::ToolResultPrunerBinding",
+        "binding-adapter": "rust_agent_prompt::ToolResultPrunerBinding::from_provider",
         "binding": "singleton",
         "scope": "agent"
       }
@@ -848,7 +920,7 @@
       }
     ]
   },
-  "normalized-catalog-digest": "ad028d35b783e7da34220de85389476e4383d10c2c162878240b0fd05cb42153",
+  "normalized-catalog-digest": "f8adbdb11f6b4a53cbcd8492ecf06dfc67e0e2f1705302e14183e469686732bb",
   "catalog-trust-input": {
     "schema": 1,
     "normalized-policy": {
@@ -1093,6 +1165,11 @@
       "read-inputs": [],
       "environment": []
     },
+    "rust-agent-attachments": {
+      "executables": [],
+      "read-inputs": [],
+      "environment": []
+    },
     "rust-agent-commands": {
       "executables": [],
       "read-inputs": [],
@@ -1118,6 +1195,11 @@
       "read-inputs": [],
       "environment": []
     },
+    "rust-agent-prompt": {
+      "executables": [],
+      "read-inputs": [],
+      "environment": []
+    },
     "rust-agent-runtime-api": {
       "executables": [],
       "read-inputs": [],
@@ -1127,7 +1209,17 @@
       "executables": [],
       "read-inputs": [],
       "environment": []
+    },
+    "rust-agent-spill": {
+      "executables": [],
+      "read-inputs": [],
+      "environment": []
+    },
+    "rust-agent-telemetry": {
+      "executables": [],
+      "read-inputs": [],
+      "environment": []
     }
   },
-  "identity-digest": "0359eb6f6359cfa797ba2df1980cd83cd268f8c4adc7e6af169607118e05efc6"
+  "identity-digest": "e01149b46ebf4c8ef028f5423f10ba5347ff140ac1cd572741b7f75255e67bdf"
 }

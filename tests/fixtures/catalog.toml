@@ -39,6 +39,78 @@ binding = "singleton"
 scope = "app"
 
 [[capabilities]]
+id = "cap:prompt-contributor"
+api-package = "rust-agent-prompt"
+rust-api = "rust_agent_prompt::PromptContributor"
+binding-type = "rust_agent_prompt::PromptContributorBinding"
+binding-adapter = "rust_agent_prompt::PromptContributorBinding::from_provider"
+binding = "ordered-multi"
+scope = "agent"
+
+[[capabilities]]
+id = "cap:prompt-assembly"
+api-package = "rust-agent-prompt"
+rust-api = "rust_agent_prompt::PromptAssembly"
+binding-type = "rust_agent_prompt::PromptAssemblyBinding"
+binding-adapter = "rust_agent_prompt::PromptAssemblyBinding::from_provider"
+binding = "singleton"
+scope = "agent"
+
+[[capabilities]]
+id = "cap:conversation-compaction"
+api-package = "rust-agent-prompt"
+rust-api = "rust_agent_prompt::Compactor"
+binding-type = "rust_agent_prompt::CompactorBinding"
+binding-adapter = "rust_agent_prompt::CompactorBinding::from_provider"
+binding = "singleton"
+scope = "agent"
+
+[[capabilities]]
+id = "cap:tool-result-pruner"
+api-package = "rust-agent-prompt"
+rust-api = "rust_agent_prompt::ToolResultPruner"
+binding-type = "rust_agent_prompt::ToolResultPrunerBinding"
+binding-adapter = "rust_agent_prompt::ToolResultPrunerBinding::from_provider"
+binding = "singleton"
+scope = "agent"
+
+[[capabilities]]
+id = "cap:token-meter"
+api-package = "rust-agent-prompt"
+rust-api = "rust_agent_prompt::TokenMeter"
+binding-type = "rust_agent_prompt::TokenMeterBinding"
+binding-adapter = "rust_agent_prompt::TokenMeterBinding::from_provider"
+binding = "singleton"
+scope = "agent"
+
+[[capabilities]]
+id = "cap:attachment-store"
+api-package = "rust-agent-attachments"
+rust-api = "rust_agent_attachments::AttachmentStore"
+binding-type = "rust_agent_attachments::AttachmentStoreBinding"
+binding-adapter = "rust_agent_attachments::AttachmentStoreBinding::from_provider"
+binding = "registry"
+scope = "app"
+
+[[capabilities]]
+id = "cap:spill-store"
+api-package = "rust-agent-spill"
+rust-api = "rust_agent_spill::SpillStore"
+binding-type = "rust_agent_spill::SpillStoreBinding"
+binding-adapter = "rust_agent_spill::SpillStoreBinding::from_provider"
+binding = "singleton"
+scope = "agent"
+
+[[capabilities]]
+id = "cap:telemetry"
+api-package = "rust-agent-telemetry"
+rust-api = "rust_agent_telemetry::Telemetry"
+binding-type = "rust_agent_telemetry::TelemetryBinding"
+binding-adapter = "rust_agent_telemetry::TelemetryBinding::from_provider"
+binding = "ordered-multi"
+scope = "app"
+
+[[capabilities]]
 id = "cap:lifecycle-observer"
 api-package = "rust-agent-runtime-api"
 rust-api = "rust_agent_runtime_api::LifecycleObserver"

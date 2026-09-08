@@ -1,0 +1,5 @@
+error[E0616]: field `provider` of struct `SpillStoreBinding` is private
+  --> tests/ui/access_raw_provider.rs:43:29
+   |
+43 |     let _provider = binding.provider;
+   |                             ^^^^^^^^ private field

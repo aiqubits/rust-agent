@@ -188,6 +188,95 @@ fn phase_three_policy_api_and_default_provider_are_dependency_isolated() {
 }
 
 #[test]
+fn phase_three_supporting_capability_contracts_are_bounded_and_dependency_isolated() {
+    let root = workspace_root();
+    let dependencies = |package: &str| {
+        let manifest: Value = toml::from_str(
+            &fs::read_to_string(root.join("crates/api").join(package).join("Cargo.toml")).unwrap(),
+        )
+        .unwrap();
+        manifest["dependencies"]
+            .as_table()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>()
+    };
+    assert_eq!(
+        dependencies("rust-agent-prompt"),
+        ["rust-agent-core", "rust-agent-runtime-api"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
+    );
+    for package in ["rust-agent-attachments", "rust-agent-spill"] {
+        assert_eq!(
+            dependencies(package),
+            ["rust-agent-core", "rust-agent-runtime-api", "sha2"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect()
+        );
+    }
+    assert_eq!(
+        dependencies("rust-agent-telemetry"),
+        ["rust-agent-core"].into_iter().map(str::to_owned).collect()
+    );
+
+    for package in [
+        "rust-agent-prompt",
+        "rust-agent-attachments",
+        "rust-agent-spill",
+        "rust-agent-telemetry",
+    ] {
+        let output = Command::new("cargo")
+            .args([
+                "tree",
+                "-p",
+                package,
+                "--edges",
+                "normal",
+                "--no-default-features",
+            ])
+            .current_dir(&root)
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let tree = String::from_utf8(output.stdout).unwrap();
+        for forbidden in [
+            "AINS",
+            "rust-agent-agent",
+            "rust-agent-commands",
+            "rust-agent-driver-",
+            "rust-agent-model",
+            "rust-agent-policy",
+            "rust-agent-session",
+            "rust-agent-tools",
+            "tokio",
+        ] {
+            assert!(
+                !tree.contains(forbidden),
+                "{package} dependency tree contains forbidden owner {forbidden}:\n{tree}"
+            );
+        }
+        let source =
+            fs::read_to_string(root.join("crates/api").join(package).join("src/lib.rs")).unwrap();
+        assert!(!source.contains("unsafe"));
+    }
+
+    let prompt = fs::read_to_string(root.join("crates/api/rust-agent-prompt/Cargo.toml")).unwrap();
+    for capability in [
+        "cap:prompt-contributor",
+        "cap:prompt-assembly",
+        "cap:conversation-compaction",
+        "cap:tool-result-pruner",
+        "cap:token-meter",
+    ] {
+        assert!(prompt.contains(capability));
+    }
+}
+
+#[test]
 fn phase_two_session_public_closure_is_agent_free_in_every_feature_mode() {
     let root = workspace_root();
     let session_manifest =

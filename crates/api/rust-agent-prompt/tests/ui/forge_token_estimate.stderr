@@ -1,0 +1,11 @@
+error[E0423]: cannot initialize a tuple struct which contains private fields
+ --> tests/ui/forge_token_estimate.rs:4:21
+  |
+4 |     let _estimate = TokenEstimate(1);
+  |                     ^^^^^^^^^^^^^
+  |
+note: constructor is not visible here due to private fields
+ --> src/lib.rs
+  |
+  | pub struct TokenEstimate(u64);
+  |                          ^^^ private field

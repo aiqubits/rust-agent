@@ -1,0 +1,11 @@
+error[E0451]: fields `cancellation`, `deadline` and `byte_budget` of struct `StorageCallContext` are private
+  --> tests/ui/forge_storage_context.rs:8:9
+   |
+ 7 |     let _context = StorageCallContext {
+   |                    ------------------ in this type
+ 8 |         cancellation: CancellationToken::new(),
+   |         ^^^^^^^^^^^^ private field
+ 9 |         deadline: None,
+   |         ^^^^^^^^ private field
+10 |         byte_budget: NonZeroUsize::new(1).unwrap(),
+   |         ^^^^^^^^^^^ private field

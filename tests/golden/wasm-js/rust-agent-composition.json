@@ -1,7 +1,7 @@
 {
   "schema": 2,
   "algorithm": "sha256-rust-agent-composition-v2",
-  "composition-hash": "3e7846d4ecb859068b25f08340437e7509147b439b721ca1a2de5cce9953b71f",
+  "composition-hash": "d3b38e6cbc578130d843d8cf51b082c727a0931af1f54c9c3539a1b6402ff8d5",
   "build-kind": "wasm",
   "profile-name": "fixture-wasm-js",
   "normalized-profile": {
@@ -199,6 +199,24 @@
           "scope": "app"
         },
         {
+          "id": "cap:attachment-store",
+          "api-package": "rust-agent-attachments",
+          "rust-api": "rust_agent_attachments::AttachmentStore",
+          "binding-type": "rust_agent_attachments::AttachmentStoreBinding",
+          "binding-adapter": "rust_agent_attachments::AttachmentStoreBinding::from_provider",
+          "binding": "registry",
+          "scope": "app"
+        },
+        {
+          "id": "cap:conversation-compaction",
+          "api-package": "rust-agent-prompt",
+          "rust-api": "rust_agent_prompt::Compactor",
+          "binding-type": "rust_agent_prompt::CompactorBinding",
+          "binding-adapter": "rust_agent_prompt::CompactorBinding::from_provider",
+          "binding": "singleton",
+          "scope": "agent"
+        },
+        {
           "id": "cap:fixture-build-proof",
           "api-package": "rust-agent-fixture-api",
           "rust-api": "rust_agent_fixture_api::BuildProof",
@@ -258,6 +276,60 @@
           "rust-api": "rust_agent_policy::PermissionPolicy",
           "binding-type": "rust_agent_policy::PermissionPolicyBinding",
           "binding-adapter": "rust_agent_policy::PermissionPolicyBinding::from_provider",
+          "binding": "singleton",
+          "scope": "agent"
+        },
+        {
+          "id": "cap:prompt-assembly",
+          "api-package": "rust-agent-prompt",
+          "rust-api": "rust_agent_prompt::PromptAssembly",
+          "binding-type": "rust_agent_prompt::PromptAssemblyBinding",
+          "binding-adapter": "rust_agent_prompt::PromptAssemblyBinding::from_provider",
+          "binding": "singleton",
+          "scope": "agent"
+        },
+        {
+          "id": "cap:prompt-contributor",
+          "api-package": "rust-agent-prompt",
+          "rust-api": "rust_agent_prompt::PromptContributor",
+          "binding-type": "rust_agent_prompt::PromptContributorBinding",
+          "binding-adapter": "rust_agent_prompt::PromptContributorBinding::from_provider",
+          "binding": "ordered-multi",
+          "scope": "agent"
+        },
+        {
+          "id": "cap:spill-store",
+          "api-package": "rust-agent-spill",
+          "rust-api": "rust_agent_spill::SpillStore",
+          "binding-type": "rust_agent_spill::SpillStoreBinding",
+          "binding-adapter": "rust_agent_spill::SpillStoreBinding::from_provider",
+          "binding": "singleton",
+          "scope": "agent"
+        },
+        {
+          "id": "cap:telemetry",
+          "api-package": "rust-agent-telemetry",
+          "rust-api": "rust_agent_telemetry::Telemetry",
+          "binding-type": "rust_agent_telemetry::TelemetryBinding",
+          "binding-adapter": "rust_agent_telemetry::TelemetryBinding::from_provider",
+          "binding": "ordered-multi",
+          "scope": "app"
+        },
+        {
+          "id": "cap:token-meter",
+          "api-package": "rust-agent-prompt",
+          "rust-api": "rust_agent_prompt::TokenMeter",
+          "binding-type": "rust_agent_prompt::TokenMeterBinding",
+          "binding-adapter": "rust_agent_prompt::TokenMeterBinding::from_provider",
+          "binding": "singleton",
+          "scope": "agent"
+        },
+        {
+          "id": "cap:tool-result-pruner",
+          "api-package": "rust-agent-prompt",
+          "rust-api": "rust_agent_prompt::ToolResultPruner",
+          "binding-type": "rust_agent_prompt::ToolResultPrunerBinding",
+          "binding-adapter": "rust_agent_prompt::ToolResultPrunerBinding::from_provider",
           "binding": "singleton",
           "scope": "agent"
         }
@@ -1025,7 +1097,7 @@
         }
       ]
     },
-    "normalized-catalog-digest": "ad028d35b783e7da34220de85389476e4383d10c2c162878240b0fd05cb42153",
+    "normalized-catalog-digest": "f8adbdb11f6b4a53cbcd8492ecf06dfc67e0e2f1705302e14183e469686732bb",
     "catalog-trust-input": {
       "schema": 1,
       "normalized-policy": {
@@ -1270,6 +1342,11 @@
         "read-inputs": [],
         "environment": []
       },
+      "rust-agent-attachments": {
+        "executables": [],
+        "read-inputs": [],
+        "environment": []
+      },
       "rust-agent-commands": {
         "executables": [],
         "read-inputs": [],
@@ -1295,6 +1372,11 @@
         "read-inputs": [],
         "environment": []
       },
+      "rust-agent-prompt": {
+        "executables": [],
+        "read-inputs": [],
+        "environment": []
+      },
       "rust-agent-runtime-api": {
         "executables": [],
         "read-inputs": [],
@@ -1304,9 +1386,19 @@
         "executables": [],
         "read-inputs": [],
         "environment": []
+      },
+      "rust-agent-spill": {
+        "executables": [],
+        "read-inputs": [],
+        "environment": []
+      },
+      "rust-agent-telemetry": {
+        "executables": [],
+        "read-inputs": [],
+        "environment": []
       }
     },
-    "identity-digest": "0359eb6f6359cfa797ba2df1980cd83cd268f8c4adc7e6af169607118e05efc6"
+    "identity-digest": "e01149b46ebf4c8ef028f5423f10ba5347ff140ac1cd572741b7f75255e67bdf"
   },
   "custom-target-spec": null,
   "selected-components": [
@@ -2660,12 +2752,12 @@
     },
     {
       "path": "generator-inputs.json",
-      "digest": "1f0779c47e3c95848badd3a5f51cc642b1319e34b67aa494c2c614e04966d485",
-      "bytes": 41519
+      "digest": "0c97e5fb0689317bd335b381f28a9b32390dca27b20502f1c567c56dc999724a",
+      "bytes": 44882
     },
     {
       "path": "src/lib.rs",
-      "digest": "2ae056f1e75c3f35cc2423cedb477330a76c75852b285069468ee66bfec57523",
+      "digest": "0ae840002b6adfc2e6df5ff5eff3a16658f599e25622eea6733db39935a10ac6",
       "bytes": 3622
     },
     {
