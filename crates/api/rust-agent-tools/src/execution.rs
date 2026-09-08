@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeSet, VecDeque},
     fmt,
     future::{Future, poll_fn},
     marker::PhantomData,
@@ -43,6 +43,7 @@ use crate::{
 pub const MAX_TOOL_ARGUMENT_BYTES: usize = 64 * 1024;
 pub const MAX_TOOL_ARGUMENT_DEPTH: usize = 16;
 pub const MAX_TOOL_CALLS_PER_STEP: usize = 128;
+pub const MAX_PARALLEL_TOOL_CALLS: usize = 16;
 pub const MAX_ACTIVE_TOOL_SESSIONS: usize = 64;
 pub const MAX_NESTED_TOOL_DEPTH: u8 = 8;
 pub const MAX_NESTED_TOOL_CALLS: usize = 64;
@@ -261,6 +262,8 @@ pub enum ToolExecutionError {
     DeadlineExceeded,
     RuntimeUnavailable,
     CallLimitExceeded,
+    BatchConcurrencyLimitExceeded,
+    BatchAuthorityMismatch,
     DuplicateCallId,
     SessionLimitExceeded,
     NestedAuthorityMismatch,
@@ -309,6 +312,12 @@ impl fmt::Display for ToolExecutionError {
             Self::DeadlineExceeded => formatter.write_str("tool call deadline exceeded"),
             Self::RuntimeUnavailable => formatter.write_str("tool runtime primitive unavailable"),
             Self::CallLimitExceeded => formatter.write_str("tool call count limit exceeded"),
+            Self::BatchConcurrencyLimitExceeded => {
+                formatter.write_str("tool batch concurrency exceeds its hard ceiling")
+            }
+            Self::BatchAuthorityMismatch => {
+                formatter.write_str("tool batch execution lineage does not match")
+            }
             Self::DuplicateCallId => formatter.write_str("duplicate normalized tool call id"),
             Self::SessionLimitExceeded => {
                 formatter.write_str("active tool execution session limit exceeded")
@@ -360,7 +369,61 @@ impl From<ToolProviderError> for ToolExecutionError {
 struct ClassifiedCall {
     safety: ToolSafety,
     effects: SecurityEffects,
+    concurrency: ClassifiedConcurrency,
     concurrency_digest: Digest,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ClassifiedConcurrency {
+    Exclusive,
+    ParallelSafe,
+    ExclusiveKey(Digest),
+}
+
+/// Checked upper bound for one rolling model-origin Tool batch.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ToolBatchConcurrency(NonZeroUsize);
+
+impl ToolBatchConcurrency {
+    pub fn checked(max_in_flight: NonZeroUsize) -> Result<Self, ToolExecutionError> {
+        if max_in_flight.get() > MAX_PARALLEL_TOOL_CALLS {
+            return Err(ToolExecutionError::BatchConcurrencyLimitExceeded);
+        }
+        Ok(Self(max_in_flight))
+    }
+
+    pub const fn max_in_flight(self) -> NonZeroUsize {
+        self.0
+    }
+}
+
+/// One model-ordered Tool outcome returned by the bounded scheduler.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ToolExecutionOutcome {
+    call_id: CallId,
+    result: Result<ToolExecutionResult, ToolExecutionError>,
+}
+
+impl ToolExecutionOutcome {
+    pub const fn call_id(&self) -> CallId {
+        self.call_id
+    }
+
+    pub const fn result(&self) -> &Result<ToolExecutionResult, ToolExecutionError> {
+        &self.result
+    }
+}
+
+/// Bounded Tool outcomes in the original model call order.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ToolExecutionBatchResult {
+    outcomes: Arc<[ToolExecutionOutcome]>,
+}
+
+impl ToolExecutionBatchResult {
+    pub fn outcomes(&self) -> &[ToolExecutionOutcome] {
+        &self.outcomes
+    }
 }
 
 /// Immutable plan produced without touching permission, approval, or raw handlers.
@@ -720,6 +783,49 @@ pub struct ToolExecutionSession {
     planned_calls: Mutex<BTreeSet<CallId>>,
 }
 
+struct PendingPreparedCall {
+    order: usize,
+    call_id: CallId,
+    concurrency: ClassifiedConcurrency,
+    call: PreparedToolCall,
+}
+
+struct ActivePreparedCall<'a> {
+    order: usize,
+    call_id: CallId,
+    concurrency: ClassifiedConcurrency,
+    future: crate::ToolFuture<'a, Result<ToolExecutionResult, ToolExecutionError>>,
+}
+
+fn next_dispatchable_call(
+    pending: &VecDeque<PendingPreparedCall>,
+    active: &[ActivePreparedCall<'_>],
+) -> Option<usize> {
+    if active
+        .iter()
+        .any(|call| call.concurrency == ClassifiedConcurrency::Exclusive)
+    {
+        return None;
+    }
+    for (index, call) in pending.iter().enumerate() {
+        match call.concurrency {
+            ClassifiedConcurrency::Exclusive => {
+                return (index == 0 && active.is_empty()).then_some(index);
+            }
+            ClassifiedConcurrency::ParallelSafe => return Some(index),
+            ClassifiedConcurrency::ExclusiveKey(key) => {
+                let key_is_active = active
+                    .iter()
+                    .any(|active| active.concurrency == ClassifiedConcurrency::ExclusiveKey(key));
+                if !key_is_active {
+                    return Some(index);
+                }
+            }
+        }
+    }
+    None
+}
+
 impl fmt::Debug for ToolExecutionSession {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -807,13 +913,7 @@ impl ToolExecutionSession {
         call: PreparedToolCall,
     ) -> crate::ToolFuture<'_, Result<ToolExecutionResult, ToolExecutionError>> {
         Box::pin(async move {
-            if !Arc::ptr_eq(&self.identity, &call.plan.session_identity)
-                || !self.verifier.verifies(
-                    &call.proof,
-                    &call.plan.journal_projection(),
-                    call.plan.plan_digest,
-                )
-            {
+            if !self.verifies_prepared_call(&call) {
                 return Err(ToolExecutionError::JournalProofMismatch);
             }
             let cancellation = call.proof.cancellation();
@@ -940,6 +1040,115 @@ impl ToolExecutionSession {
                 .await;
             outcome
         })
+    }
+
+    /// Executes one already journal-sealed model batch under a rolling bounded scheduler.
+    pub fn execute_prepared_batch(
+        &self,
+        calls: Vec<PreparedToolCall>,
+        concurrency: ToolBatchConcurrency,
+    ) -> crate::ToolFuture<'_, Result<ToolExecutionBatchResult, ToolExecutionError>> {
+        Box::pin(async move {
+            if calls.len() > MAX_TOOL_CALLS_PER_STEP {
+                return Err(ToolExecutionError::CallLimitExceeded);
+            }
+            let Some(first) = calls.first() else {
+                return Ok(ToolExecutionBatchResult {
+                    outcomes: Arc::from([]),
+                });
+            };
+            if calls.iter().any(|call| {
+                !self.verifies_prepared_call(call)
+                    || !first.proof.same_execution_lineage(&call.proof)
+            }) {
+                return Err(ToolExecutionError::BatchAuthorityMismatch);
+            }
+
+            let cancellation = first.proof.cancellation();
+            let deadline = first.proof.deadline();
+            let runtime = ToolRuntimeGuard::Direct(first.proof.runtime().clone());
+            let call_count = calls.len();
+            let mut pending = calls
+                .into_iter()
+                .enumerate()
+                .map(|(order, call)| PendingPreparedCall {
+                    order,
+                    call_id: call.plan.request.call_id,
+                    concurrency: call.plan.classified.concurrency,
+                    call,
+                })
+                .collect::<VecDeque<_>>();
+            let mut active = Vec::<ActivePreparedCall<'_>>::new();
+            let mut outcomes = std::iter::repeat_with(|| None)
+                .take(call_count)
+                .collect::<Vec<Option<ToolExecutionOutcome>>>();
+
+            while !pending.is_empty() || !active.is_empty() {
+                if !pending.is_empty()
+                    && let Err(error) = check_guard(&cancellation, deadline, &runtime)
+                {
+                    while let Some(call) = pending.pop_front() {
+                        outcomes[call.order] = Some(ToolExecutionOutcome {
+                            call_id: call.call_id,
+                            result: Err(error.clone()),
+                        });
+                    }
+                }
+
+                while active.len() < concurrency.max_in_flight().get() {
+                    let Some(index) = next_dispatchable_call(&pending, &active) else {
+                        break;
+                    };
+                    let call = pending
+                        .remove(index)
+                        .ok_or(ToolExecutionError::InternalStateUnavailable)?;
+                    active.push(ActivePreparedCall {
+                        order: call.order,
+                        call_id: call.call_id,
+                        concurrency: call.concurrency,
+                        future: self.execute_prepared(call.call),
+                    });
+                }
+
+                if active.is_empty() {
+                    if pending.is_empty() {
+                        break;
+                    }
+                    return Err(ToolExecutionError::InternalStateUnavailable);
+                }
+                let (position, result) = poll_fn(|context| {
+                    for (position, call) in active.iter_mut().enumerate() {
+                        if let Poll::Ready(result) = call.future.as_mut().poll(context) {
+                            return Poll::Ready((position, result));
+                        }
+                    }
+                    Poll::Pending
+                })
+                .await;
+                let call = active.swap_remove(position);
+                outcomes[call.order] = Some(ToolExecutionOutcome {
+                    call_id: call.call_id,
+                    result,
+                });
+            }
+
+            let outcomes = outcomes
+                .into_iter()
+                .collect::<Option<Vec<_>>>()
+                .ok_or(ToolExecutionError::InternalStateUnavailable)?;
+            Ok(ToolExecutionBatchResult {
+                outcomes: outcomes.into(),
+            })
+        })
+    }
+
+    fn verifies_prepared_call(&self, call: &PreparedToolCall) -> bool {
+        Arc::ptr_eq(&self.identity, &call.plan.session_identity)
+            && self.verifier.verifies(
+                &call.proof,
+                &call.plan.journal_projection(),
+                call.plan.plan_digest,
+            )
     }
 }
 
@@ -1383,13 +1592,15 @@ fn classify(
             effects |= rule.add_effects();
         }
     }
-    let concurrency_digest = match definition.call_policy().concurrency() {
-        ToolConcurrencyRule::Exclusive => {
-            hash_parts(&[b"rust-agent-tool-concurrency-exclusive-v1\0"])
-        }
-        ToolConcurrencyRule::ParallelSafe => {
-            hash_parts(&[b"rust-agent-tool-concurrency-parallel-v1\0"])
-        }
+    let (concurrency, concurrency_digest) = match definition.call_policy().concurrency() {
+        ToolConcurrencyRule::Exclusive => (
+            ClassifiedConcurrency::Exclusive,
+            hash_parts(&[b"rust-agent-tool-concurrency-exclusive-v1\0"]),
+        ),
+        ToolConcurrencyRule::ParallelSafe => (
+            ClassifiedConcurrency::ParallelSafe,
+            hash_parts(&[b"rust-agent-tool-concurrency-parallel-v1\0"]),
+        ),
         ToolConcurrencyRule::ExclusiveByScalar { prefix, pointer } => {
             let value = arguments
                 .pointer(pointer.as_str())
@@ -1400,16 +1611,18 @@ fn classify(
             let value = serde_json::to_vec(value).map_err(|_| {
                 ToolExecutionError::InvalidRequest("invalid exclusive-key argument")
             })?;
-            hash_parts(&[
+            let digest = hash_parts(&[
                 b"rust-agent-tool-concurrency-key-v1\0",
                 prefix.as_str().as_bytes(),
                 &value,
-            ])
+            ]);
+            (ClassifiedConcurrency::ExclusiveKey(digest), digest)
         }
     };
     Ok(ClassifiedCall {
         safety,
         effects,
+        concurrency,
         concurrency_digest,
     })
 }
@@ -1720,6 +1933,7 @@ mod tests {
         },
         task::{Context, Poll, Wake, Waker},
         thread,
+        time::Duration,
     };
 
     use rust_agent_commands::CommandInvocationId;
@@ -1785,6 +1999,118 @@ mod tests {
                 self.calls.fetch_add(1, Ordering::SeqCst);
                 let mut output = context.output_builder();
                 output.append_text("ok")?;
+                Ok(output.build())
+            })
+        }
+    }
+
+    #[derive(Debug)]
+    struct ScheduledTool {
+        name: &'static str,
+        concurrency: ToolConcurrencyRule,
+        events: Arc<Mutex<Vec<String>>>,
+        active: Arc<AtomicUsize>,
+        max_active: Arc<AtomicUsize>,
+    }
+
+    impl Tool for ScheduledTool {
+        fn definition(&self) -> ToolDefinition {
+            ToolDefinition::new(
+                self.name,
+                "cooperative bounded scheduler fixture",
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "delay": {"type": "integer"},
+                        "key": {"type": "string"},
+                        "label": {"type": "string"}
+                    },
+                    "required": ["delay", "label"],
+                    "additionalProperties": false
+                }),
+                ToolSafety::ReadOnly,
+                SecurityEffects::READ_LOCAL,
+                ToolCallPolicy::builder(self.concurrency.clone())
+                    .build()
+                    .unwrap(),
+            )
+            .unwrap()
+        }
+
+        fn execute<'a>(
+            &'a self,
+            _permit: &'a crate::ExecutionPermit,
+            context: &'a crate::ToolContext,
+            input: JsonValue,
+        ) -> ToolFuture<'a, Result<ToolValue, ToolError>> {
+            let mut delay = input["delay"].as_u64().unwrap();
+            let label = input["label"].as_str().unwrap().to_owned();
+            let mut started = false;
+            Box::pin(std::future::poll_fn(move |poll_context| {
+                if !started {
+                    started = true;
+                    let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+                    self.max_active.fetch_max(active, Ordering::SeqCst);
+                    self.events.lock().unwrap().push(format!("start:{label}"));
+                    poll_context.waker().wake_by_ref();
+                    return Poll::Pending;
+                }
+                if delay > 0 {
+                    delay -= 1;
+                    poll_context.waker().wake_by_ref();
+                    return Poll::Pending;
+                }
+                self.active.fetch_sub(1, Ordering::SeqCst);
+                self.events.lock().unwrap().push(format!("finish:{label}"));
+                let mut output = context.output_builder();
+                output.append_text(label.clone()).unwrap();
+                Poll::Ready(Ok(output.build()))
+            }))
+        }
+    }
+
+    #[derive(Debug)]
+    struct CancellingTool {
+        labels: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl Tool for CancellingTool {
+        fn definition(&self) -> ToolDefinition {
+            ToolDefinition::new(
+                "cancelling",
+                "cancels the shared batch lineage",
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "cancel": {"type": "boolean"},
+                        "label": {"type": "string"}
+                    },
+                    "required": ["cancel", "label"],
+                    "additionalProperties": false
+                }),
+                ToolSafety::ReadOnly,
+                SecurityEffects::READ_LOCAL,
+                simple_policy(),
+            )
+            .unwrap()
+        }
+
+        fn execute<'a>(
+            &'a self,
+            _permit: &'a crate::ExecutionPermit,
+            context: &'a crate::ToolContext,
+            input: JsonValue,
+        ) -> ToolFuture<'a, Result<ToolValue, ToolError>> {
+            Box::pin(async move {
+                self.labels
+                    .lock()
+                    .unwrap()
+                    .push(input["label"].as_str().unwrap().to_owned());
+                if input["cancel"].as_bool().unwrap() {
+                    context.cancellation().cancel();
+                }
+                let mut output = context.output_builder();
+                output.append_text("done")?;
                 Ok(output.build())
             })
         }
@@ -2112,6 +2438,10 @@ mod tests {
         }))
     }
 
+    fn multiple_provider(registrations: Vec<ToolRegistration>) -> ToolProviderBinding {
+        ToolProviderBinding::from_provider(Arc::new(MultipleContribution { registrations }))
+    }
+
     fn nested_provider(
         target: &'static str,
         attempts: usize,
@@ -2239,19 +2569,59 @@ mod tests {
         .unwrap()
     }
 
+    fn scheduled_request(
+        call: u128,
+        tool_name: &str,
+        label: &str,
+        delay: u64,
+        key: Option<&str>,
+    ) -> ToolExecutionRequest {
+        let mut arguments = json!({"delay": delay, "label": label});
+        if let Some(key) = key {
+            arguments["key"] = JsonValue::String(key.to_owned());
+        }
+        ToolExecutionRequest::new(
+            CallId::from_nonzero_u128(call).unwrap(),
+            tool_name,
+            arguments,
+        )
+        .unwrap()
+    }
+
     fn seal(
         issuer: &rust_agent_runtime_api::ToolCallJournalIssuer,
         plan: ToolCallPlan,
         cancellation: CancellationToken,
+    ) -> PreparedToolCall {
+        let runtime =
+            RuntimePrimitives::new(RuntimeAdapterIdentity::checked("test-runtime").unwrap());
+        seal_with_runtime(issuer, plan, cancellation, &runtime)
+    }
+
+    fn seal_with_runtime(
+        issuer: &rust_agent_runtime_api::ToolCallJournalIssuer,
+        plan: ToolCallPlan,
+        cancellation: CancellationToken,
+        runtime: &RuntimePrimitives,
+    ) -> PreparedToolCall {
+        seal_with_guard(issuer, plan, cancellation, None, runtime)
+    }
+
+    fn seal_with_guard(
+        issuer: &rust_agent_runtime_api::ToolCallJournalIssuer,
+        plan: ToolCallPlan,
+        cancellation: CancellationToken,
+        deadline: Option<RuntimeInstant>,
+        runtime: &RuntimePrimitives,
     ) -> PreparedToolCall {
         let proof = issuer
             .seal_committed_record(
                 plan.journal_projection(),
                 plan.record_digest(),
                 cancellation,
-                None,
+                deadline,
                 NonZeroUsize::new(1024).unwrap(),
-                RuntimePrimitives::new(RuntimeAdapterIdentity::checked("test-runtime").unwrap()),
+                runtime.clone(),
             )
             .unwrap();
         plan.seal(proof).unwrap()
@@ -2327,6 +2697,256 @@ mod tests {
         assert_eq!(
             harness.observed_effects.load(Ordering::SeqCst),
             (SecurityEffects::READ_LOCAL | SecurityEffects::NETWORK).bits()
+        );
+    }
+
+    #[test]
+    fn bounded_scheduler_respects_barriers_and_returns_model_order() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let active = Arc::new(AtomicUsize::new(0));
+        let max_active = Arc::new(AtomicUsize::new(0));
+        let registration = |name, concurrency| {
+            ToolRegistration::new(Arc::new(ScheduledTool {
+                name,
+                concurrency,
+                events: Arc::clone(&events),
+                active: Arc::clone(&active),
+                max_active: Arc::clone(&max_active),
+            }))
+            .unwrap()
+        };
+        let provider = multiple_provider(vec![
+            registration("parallel", ToolConcurrencyRule::ParallelSafe),
+            registration("exclusive", ToolConcurrencyRule::Exclusive),
+            registration(
+                "keyed",
+                ToolConcurrencyRule::ExclusiveByScalar {
+                    prefix: crate::BoundedKey::new("fixture").unwrap(),
+                    pointer: crate::BoundedJsonPointer::new("/key").unwrap(),
+                },
+            ),
+        ]);
+        let harness = harness(1, &[provider], PermissionDecision::Allow, None);
+        let session = harness
+            .executor
+            .prepare_model_step(&harness.scope, step())
+            .unwrap();
+        let requests = [
+            scheduled_request(100, "parallel", "parallel-slow", 3, None),
+            scheduled_request(101, "parallel", "parallel-fast", 0, None),
+            scheduled_request(102, "exclusive", "exclusive", 0, None),
+            scheduled_request(103, "keyed", "key-a-first", 2, Some("a")),
+            scheduled_request(104, "keyed", "key-a-second", 0, Some("a")),
+            scheduled_request(105, "keyed", "key-b", 0, Some("b")),
+        ];
+        let cancellation = CancellationToken::new();
+        let runtime =
+            RuntimePrimitives::new(RuntimeAdapterIdentity::checked("test-runtime").unwrap());
+        let calls = requests
+            .into_iter()
+            .map(|request| {
+                let plan = session.plan_call(request).unwrap();
+                seal_with_runtime(&harness.issuer, plan, cancellation.clone(), &runtime)
+            })
+            .collect();
+        let result = run(session.execute_prepared_batch(
+            calls,
+            ToolBatchConcurrency::checked(NonZeroUsize::new(2).unwrap()).unwrap(),
+        ))
+        .unwrap();
+
+        let ids = result
+            .outcomes()
+            .iter()
+            .map(ToolExecutionOutcome::call_id)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            ids,
+            (100..=105)
+                .map(|value| CallId::from_nonzero_u128(value).unwrap())
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            result
+                .outcomes()
+                .iter()
+                .all(|outcome| outcome.result().is_ok())
+        );
+        assert_eq!(max_active.load(Ordering::SeqCst), 2);
+        assert_eq!(active.load(Ordering::SeqCst), 0);
+
+        let events = events.lock().unwrap();
+        let position = |event: &str| events.iter().position(|value| value == event).unwrap();
+        assert!(position("finish:parallel-fast") < position("finish:parallel-slow"));
+        assert!(position("finish:parallel-slow") < position("start:exclusive"));
+        assert!(position("finish:exclusive") < position("start:key-a-first"));
+        assert!(position("start:key-b") < position("finish:key-a-first"));
+        assert!(position("finish:key-a-first") < position("start:key-a-second"));
+    }
+
+    #[test]
+    fn batch_lineage_and_cancellation_fail_before_new_dispatch() {
+        assert_eq!(
+            ToolBatchConcurrency::checked(NonZeroUsize::new(MAX_PARALLEL_TOOL_CALLS + 1).unwrap()),
+            Err(ToolExecutionError::BatchConcurrencyLimitExceeded)
+        );
+        assert_eq!(
+            ToolBatchConcurrency::checked(NonZeroUsize::new(MAX_PARALLEL_TOOL_CALLS).unwrap())
+                .unwrap()
+                .max_in_flight()
+                .get(),
+            MAX_PARALLEL_TOOL_CALLS
+        );
+
+        let tool_calls = Arc::new(AtomicUsize::new(0));
+        let lineage_harness = harness(
+            1,
+            &[provider(Arc::clone(&tool_calls), simple_policy())],
+            PermissionDecision::Allow,
+            None,
+        );
+        let session = lineage_harness
+            .executor
+            .prepare_model_step(&lineage_harness.scope, step())
+            .unwrap();
+        let runtime =
+            RuntimePrimitives::new(RuntimeAdapterIdentity::checked("test-runtime").unwrap());
+        let calls = [request(110, false), request(111, false)]
+            .into_iter()
+            .map(|request| {
+                let plan = session.plan_call(request).unwrap();
+                seal_with_runtime(
+                    &lineage_harness.issuer,
+                    plan,
+                    CancellationToken::new(),
+                    &runtime,
+                )
+            })
+            .collect();
+        assert_eq!(
+            run(session.execute_prepared_batch(
+                calls,
+                ToolBatchConcurrency::checked(NonZeroUsize::new(2).unwrap()).unwrap(),
+            )),
+            Err(ToolExecutionError::BatchAuthorityMismatch)
+        );
+        assert_eq!(tool_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(lineage_harness.permission_calls.load(Ordering::SeqCst), 0);
+
+        let cancellation = CancellationToken::new();
+        let different_runtime =
+            RuntimePrimitives::new(RuntimeAdapterIdentity::checked("test-runtime").unwrap());
+        let calls = [
+            (request(112, false), runtime.clone()),
+            (request(113, false), different_runtime),
+        ]
+        .into_iter()
+        .map(|(request, runtime)| {
+            let plan = session.plan_call(request).unwrap();
+            seal_with_runtime(
+                &lineage_harness.issuer,
+                plan,
+                cancellation.clone(),
+                &runtime,
+            )
+        })
+        .collect();
+        assert_eq!(
+            run(session.execute_prepared_batch(
+                calls,
+                ToolBatchConcurrency::checked(NonZeroUsize::new(2).unwrap()).unwrap(),
+            )),
+            Err(ToolExecutionError::BatchAuthorityMismatch)
+        );
+        assert_eq!(tool_calls.load(Ordering::SeqCst), 0);
+
+        let cancellation = CancellationToken::new();
+        let calls = [
+            (request(114, false), None),
+            (
+                request(115, false),
+                Some(RuntimeInstant::from_monotonic_duration(
+                    Duration::from_secs(10),
+                )),
+            ),
+        ]
+        .into_iter()
+        .map(|(request, deadline)| {
+            let plan = session.plan_call(request).unwrap();
+            seal_with_guard(
+                &lineage_harness.issuer,
+                plan,
+                cancellation.clone(),
+                deadline,
+                &runtime,
+            )
+        })
+        .collect();
+        assert_eq!(
+            run(session.execute_prepared_batch(
+                calls,
+                ToolBatchConcurrency::checked(NonZeroUsize::new(2).unwrap()).unwrap(),
+            )),
+            Err(ToolExecutionError::BatchAuthorityMismatch)
+        );
+        assert_eq!(tool_calls.load(Ordering::SeqCst), 0);
+
+        let empty = run(session.execute_prepared_batch(
+            Vec::new(),
+            ToolBatchConcurrency::checked(NonZeroUsize::new(1).unwrap()).unwrap(),
+        ))
+        .unwrap();
+        assert!(empty.outcomes().is_empty());
+
+        let labels = Arc::new(Mutex::new(Vec::new()));
+        let cancelling = ToolRegistration::new(Arc::new(CancellingTool {
+            labels: Arc::clone(&labels),
+        }))
+        .unwrap();
+        let harness = harness(
+            2,
+            &[multiple_provider(vec![cancelling])],
+            PermissionDecision::Allow,
+            None,
+        );
+        let session = harness
+            .executor
+            .prepare_model_step(&harness.scope, step())
+            .unwrap();
+        let cancellation = CancellationToken::new();
+        let runtime =
+            RuntimePrimitives::new(RuntimeAdapterIdentity::checked("test-runtime").unwrap());
+        let calls = [
+            (120, json!({"cancel": true, "label": "first"})),
+            (121, json!({"cancel": false, "label": "second"})),
+        ]
+        .into_iter()
+        .map(|(call, arguments)| {
+            let plan = session
+                .plan_call(
+                    ToolExecutionRequest::new(
+                        CallId::from_nonzero_u128(call).unwrap(),
+                        "cancelling",
+                        arguments,
+                    )
+                    .unwrap(),
+                )
+                .unwrap();
+            seal_with_runtime(&harness.issuer, plan, cancellation.clone(), &runtime)
+        })
+        .collect();
+        let result = run(session.execute_prepared_batch(
+            calls,
+            ToolBatchConcurrency::checked(NonZeroUsize::new(1).unwrap()).unwrap(),
+        ))
+        .unwrap();
+        assert_eq!(&*labels.lock().unwrap(), &["first"]);
+        assert_eq!(harness.permission_calls.load(Ordering::SeqCst), 1);
+        assert!(
+            result
+                .outcomes()
+                .iter()
+                .all(|outcome| outcome.result() == &Err(ToolExecutionError::Cancelled))
         );
     }
 

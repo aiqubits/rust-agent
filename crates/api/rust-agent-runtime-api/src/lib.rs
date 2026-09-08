@@ -620,6 +620,14 @@ impl ToolCallJournalProof {
     pub fn runtime(&self) -> &RuntimePrimitives {
         &self.runtime
     }
+
+    /// Confirms that two committed calls belong to one scheduler lineage.
+    #[doc(hidden)]
+    pub fn same_execution_lineage(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.cancellation.0, &other.cancellation.0)
+            && self.deadline == other.deadline
+            && self.runtime.same_bundle_identity(&other.runtime)
+    }
 }
 
 /// Allocates paired tool journal authority for generated scope assembly.

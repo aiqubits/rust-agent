@@ -12,10 +12,11 @@ use std::{fmt, future::Future, num::NonZeroU64, pin::Pin, sync::Arc};
 
 pub use execution::{
     BorrowedToolExecutionSession, GuardedToolExecutor, MAX_ACTIVE_TOOL_SESSIONS,
-    MAX_NESTED_TOOL_CALLS, MAX_NESTED_TOOL_DEPTH, MAX_TOOL_ARGUMENT_BYTES, MAX_TOOL_ARGUMENT_DEPTH,
-    MAX_TOOL_CALLS_PER_STEP, PreparedToolCall, StepId, ToolCallPlan, ToolExecutionError,
-    ToolExecutionRequest, ToolExecutionResult, ToolExecutionSession, ToolExecutor,
-    ToolExecutorBinding, ToolScope,
+    MAX_NESTED_TOOL_CALLS, MAX_NESTED_TOOL_DEPTH, MAX_PARALLEL_TOOL_CALLS, MAX_TOOL_ARGUMENT_BYTES,
+    MAX_TOOL_ARGUMENT_DEPTH, MAX_TOOL_CALLS_PER_STEP, PreparedToolCall, StepId,
+    ToolBatchConcurrency, ToolCallPlan, ToolExecutionBatchResult, ToolExecutionError,
+    ToolExecutionOutcome, ToolExecutionRequest, ToolExecutionResult, ToolExecutionSession,
+    ToolExecutor, ToolExecutorBinding, ToolScope,
 };
 pub use middleware::{
     MAX_TOOL_EXECUTION_MIDDLEWARE, MAX_TOOL_MIDDLEWARE_ERROR_BYTES, ToolAroundExecutionPhase,

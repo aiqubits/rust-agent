@@ -134,6 +134,9 @@ fn phase_three_tool_api_dependency_and_privacy_boundary_is_isolated() {
     assert!(commands.contains("pub struct CommandToolGrant<'a>"));
     assert!(commands.contains("PhantomData<&'a mut &'a ()>"));
     assert!(execution.contains("fn prepare_command<'a>("));
+    assert!(execution.contains("pub const MAX_PARALLEL_TOOL_CALLS: usize = 16;"));
+    assert!(execution.contains("pub fn execute_prepared_batch("));
+    assert!(execution.contains("fn next_dispatchable_call("));
     assert!(registry.contains("handler: Arc<dyn crate::Tool>"));
     assert!(!registry.contains("pub handler:"));
     assert!(execution.contains("PhantomData<&'a mut &'a ()>"));
