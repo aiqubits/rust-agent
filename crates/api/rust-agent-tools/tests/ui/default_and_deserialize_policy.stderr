@@ -1,0 +1,65 @@
+error[E0599]: no associated function or constant named `default` found for struct `ToolCallPolicy` in the current scope
+ --> tests/ui/default_and_deserialize_policy.rs:4:36
+  |
+4 |     let _default = ToolCallPolicy::default();
+  |                                    ^^^^^^^ associated function or constant not found in `ToolCallPolicy`
+
+error[E0277]: the trait bound `ToolCallPolicy: serde::Deserialize<'de>` is not satisfied
+ --> tests/ui/default_and_deserialize_policy.rs:5:36
+  |
+5 |     let _decoded: ToolCallPolicy = serde_json::from_str("{}").unwrap();
+  |                                    ^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `serde_core::de::Deserialize<'_>` is not implemented for `ToolCallPolicy`
+  |
+  = note: for local types consider adding `#[derive(serde::Deserialize)]` to your `ToolCallPolicy` type
+  = note: for types from other crates check whether the crate offers a `serde` feature flag
+  = help: the following other types implement trait `serde_core::de::Deserialize<'de>`:
+            &'a Path
+            &'a [u8]
+            &'a str
+            ()
+            (T,)
+            (T0, T1)
+            (T0, T1, T2)
+            (T0, T1, T2, T3)
+          and $N others
+note: required by a bound in `serde_json::from_str`
+ --> $CARGO/serde_json-$VERSION/src/de.rs
+  |
+  | pub fn from_str<'a, T>(s: &'a str) -> Result<T>
+  |        -------- required by a bound in this function
+  | where
+  |     T: de::Deserialize<'a>,
+  |        ^^^^^^^^^^^^^^^^^^^ required by this bound in `from_str`
+
+error[E0599]: no associated function or constant named `default` found for struct `ToolRiskRule` in the current scope
+ --> tests/ui/default_and_deserialize_policy.rs:6:39
+  |
+6 |     let _default_rule = ToolRiskRule::default();
+  |                                       ^^^^^^^ associated function or constant not found in `ToolRiskRule`
+
+error[E0277]: the trait bound `ToolRiskRule: serde::Deserialize<'de>` is not satisfied
+ --> tests/ui/default_and_deserialize_policy.rs:7:39
+  |
+7 |     let _decoded_rule: ToolRiskRule = serde_json::from_str("{}").unwrap();
+  |                                       ^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `serde_core::de::Deserialize<'_>` is not implemented for `ToolRiskRule`
+  |
+  = note: for local types consider adding `#[derive(serde::Deserialize)]` to your `ToolRiskRule` type
+  = note: for types from other crates check whether the crate offers a `serde` feature flag
+  = help: the following other types implement trait `serde_core::de::Deserialize<'de>`:
+            &'a Path
+            &'a [u8]
+            &'a str
+            ()
+            (T,)
+            (T0, T1)
+            (T0, T1, T2)
+            (T0, T1, T2, T3)
+          and $N others
+note: required by a bound in `serde_json::from_str`
+ --> $CARGO/serde_json-$VERSION/src/de.rs
+  |
+  | pub fn from_str<'a, T>(s: &'a str) -> Result<T>
+  |        -------- required by a bound in this function
+  | where
+  |     T: de::Deserialize<'a>,
+  |        ^^^^^^^^^^^^^^^^^^^ required by this bound in `from_str`

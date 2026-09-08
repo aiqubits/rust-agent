@@ -1,0 +1,13 @@
+error[E0451]: fields `rules`, `concurrency`, `canonical_bytes` and `evaluator_steps` of struct `ToolCallPolicy` are private
+ --> tests/ui/forge_tool_policy.rs:5:9
+  |
+4 |     let _forged = ToolCallPolicy {
+  |                   -------------- in this type
+5 |         rules: [].into(),
+  |         ^^^^^ private field
+6 |         concurrency: ToolConcurrencyRule::Exclusive,
+  |         ^^^^^^^^^^^ private field
+7 |         canonical_bytes: 1,
+  |         ^^^^^^^^^^^^^^^ private field
+8 |         evaluator_steps: 1,
+  |         ^^^^^^^^^^^^^^^ private field

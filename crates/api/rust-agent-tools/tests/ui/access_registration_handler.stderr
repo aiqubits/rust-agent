@@ -1,0 +1,5 @@
+error[E0616]: field `handler` of struct `ToolRegistration` is private
+  --> tests/ui/access_registration_handler.rs:39:33
+   |
+39 |     let _handler = registration.handler;
+   |                                 ^^^^^^^ private field

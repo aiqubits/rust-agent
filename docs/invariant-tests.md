@@ -207,6 +207,16 @@ evidence but cannot make a Linux production-support claim.
 | [P2-AC-11] Generated code validates routing before claiming the plan-bound runtime root or constructing Components, then assembles the exact selected providers/metadata-ordered observer identities/primitives, supports closed default and explicit multi-provider routing, and excludes every unselected Session/provider/heavy dependency in native and Experimental WASM compositions | `generator::tests::phase_two_observer_assembly_uses_metadata_order_then_component_id`, `generator::tests::phase_two_multi_provider_routing_and_observer_assembly_are_generated`, `generator::tests::phase_two_generation_rejects_selected_components_without_an_assembly_role`, `generator::tests::phase_two_wasm_runtime_composition_compiles`, `generator::tests::minimal_pure_composes_locks_builds_and_regenerates_deterministically` |
 | [P2-AC-12] `minimal-pure` deterministically composes, locks and builds in isolation and executes publication rollback, proof-before-every-stream and the complete `Request → model-replay → Response` lifecycle | `generator::tests::minimal_pure_composes_locks_builds_and_regenerates_deterministically`, `e2e::minimal_pure_compose_lock_build_and_request_flow_end_to_end` |
 
+## Phase 3 incremental evidence
+
+Phase 3 is not yet complete, so no `P3-AC-*` completion identity is claimed.
+This table records landed runnable evidence for completed internal slices while
+the remaining execution-plane requirements stay open in `docs/phase-status.md`.
+
+| Contract | Automated evidence |
+|---|---|
+| I19/I70 Tool policy state is retained only through bounded builders, definitions are defensively revalidated at registration, raw handlers and `ExecutionPermit` are private, and Tool output is admitted by item/byte/depth bounds before retention | `rust_agent_tools::policy::tests::valid_policy_preserves_canonical_rule_and_predicate_order`, `rust_agent_tools::policy::tests::predicate_count_is_rejected_before_the_candidate_is_retained`, `rust_agent_tools::policy::tests::rule_count_is_rejected_before_the_candidate_is_retained`, `rust_agent_tools::policy::tests::canonical_byte_limit_rejects_before_retaining_the_candidate_rule`, `rust_agent_tools::policy::tests::pointer_scalar_key_and_evaluator_bounds_fail_closed`, `rust_agent_tools::policy::tests::registration_revalidation_rejects_a_rule_below_the_static_floor`, `rust_agent_tools::output::tests::output_budget_is_checked_before_an_item_is_retained`, `rust_agent_tools::output::tests::output_budget_counts_utf8_bytes_and_rejects_deep_json`, `rust_agent_tools::tests::registration_captures_one_validated_definition_without_handler_access`, `rust_agent_tools::tests::definition_and_provider_snapshot_bounds_fail_closed`, `privacy::tool_policy_registration_and_permit_boundaries_cannot_be_bypassed`, `architecture::phase_three_tool_api_dependency_and_privacy_boundary_is_isolated` |
+
 ## Accepted ADR amendments
 
 | Contract | Automated evidence |

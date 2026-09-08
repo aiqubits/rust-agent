@@ -2,6 +2,76 @@
 
 use std::{fmt, str::FromStr};
 
+/// Closed set of runtime effects used by capability bindings and policy decisions.
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct SecurityEffects(u64);
+
+impl SecurityEffects {
+    pub const READ_LOCAL: Self = Self(1 << 0);
+    pub const WRITE_LOCAL: Self = Self(1 << 1);
+    pub const NETWORK: Self = Self(1 << 2);
+    pub const PROCESS_EXEC: Self = Self(1 << 3);
+    pub const REMOTE_EXEC: Self = Self(1 << 4);
+    pub const SECRET_ACCESS: Self = Self(1 << 5);
+    pub const HOST_UI: Self = Self(1 << 6);
+    pub const HOST_BRIDGE: Self = Self(1 << 7);
+    pub const PERSISTENT_STORAGE: Self = Self(1 << 8);
+    pub const CODE_EXEC: Self = Self(1 << 9);
+    pub const MCP_CONNECT: Self = Self(1 << 10);
+    const ALL_BITS: u64 = (1 << 11) - 1;
+
+    pub const fn empty() -> Self {
+        Self(0)
+    }
+
+    pub const fn all() -> Self {
+        Self(Self::ALL_BITS)
+    }
+
+    pub const fn bits(self) -> u64 {
+        self.0
+    }
+
+    pub const fn from_bits(bits: u64) -> Option<Self> {
+        if bits & !Self::ALL_BITS == 0 {
+            Some(Self(bits))
+        } else {
+            None
+        }
+    }
+
+    pub const fn contains(self, other: Self) -> bool {
+        self.0 & other.0 == other.0
+    }
+
+    /// Returns true when every effect in `self` is present in `ceiling`.
+    pub const fn is_subset_of(self, ceiling: Self) -> bool {
+        ceiling.contains(self)
+    }
+}
+
+impl std::ops::BitOr for SecurityEffects {
+    type Output = Self;
+
+    fn bitor(self, rhs: Self) -> Self::Output {
+        Self(self.0 | rhs.0)
+    }
+}
+
+impl std::ops::BitOrAssign for SecurityEffects {
+    fn bitor_assign(&mut self, rhs: Self) {
+        self.0 |= rhs.0;
+    }
+}
+
+impl std::ops::BitAnd for SecurityEffects {
+    type Output = Self;
+
+    fn bitand(self, rhs: Self) -> Self::Output {
+        Self(self.0 & rhs.0)
+    }
+}
+
 /// Cross-target marker used by all dynamically dispatched capability traits.
 #[cfg(not(target_arch = "wasm32"))]
 pub trait MaybeSendSync: Send + Sync {}
@@ -678,5 +748,15 @@ mod tests {
             CallId::from_canonical_v1_bytes(invalid),
             Err(RuntimeIdentityEncodingError::UnknownVersion(9))
         );
+    }
+
+    #[test]
+    fn security_effects_form_a_closed_composable_bitset() {
+        let local = SecurityEffects::READ_LOCAL | SecurityEffects::WRITE_LOCAL;
+        let ceiling = local | SecurityEffects::PROCESS_EXEC;
+        assert!(local.is_subset_of(ceiling));
+        assert!(!SecurityEffects::NETWORK.is_subset_of(ceiling));
+        assert_eq!(SecurityEffects::all().bits(), (1_u64 << 11) - 1);
+        assert!(SecurityEffects::from_bits(1_u64 << 63).is_none());
     }
 }

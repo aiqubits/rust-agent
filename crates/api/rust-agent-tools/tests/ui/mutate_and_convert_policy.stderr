@@ -1,0 +1,31 @@
+error[E0616]: field `all` of struct `ToolRiskRule` is private
+  --> tests/ui/mutate_and_convert_policy.rs:11:10
+   |
+11 |     rule.all = [].into();
+   |          ^^^ private field
+
+error[E0616]: field `rules` of struct `ToolCallPolicy` is private
+  --> tests/ui/mutate_and_convert_policy.rs:15:12
+   |
+15 |     policy.rules = [].into();
+   |            ^^^^^ private field
+
+error[E0277]: the trait bound `ToolRiskRule: From<Vec<ToolArgumentPredicate>>` is not satisfied
+  --> tests/ui/mutate_and_convert_policy.rs:20:47
+   |
+20 |     let _rule_from_collection: ToolRiskRule = vec![predicate].into();
+   |                                               ^^^^^^^^^^^^^^^ ---- required by a bound introduced by this call
+   |                                               |
+   |                                               the trait `From<Vec<ToolArgumentPredicate>>` is not implemented for `ToolRiskRule`
+   |
+   = note: required for `Vec<ToolArgumentPredicate>` to implement `Into<ToolRiskRule>`
+
+error[E0277]: the trait bound `ToolCallPolicy: From<Vec<ToolRiskRule>>` is not satisfied
+  --> tests/ui/mutate_and_convert_policy.rs:21:51
+   |
+21 |     let _policy_from_collection: ToolCallPolicy = vec![rule].into();
+   |                                                   ^^^^^^^^^^ ---- required by a bound introduced by this call
+   |                                                   |
+   |                                                   the trait `From<Vec<ToolRiskRule>>` is not implemented for `ToolCallPolicy`
+   |
+   = note: required for `Vec<ToolRiskRule>` to implement `Into<ToolCallPolicy>`

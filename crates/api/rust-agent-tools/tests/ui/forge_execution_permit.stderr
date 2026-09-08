@@ -1,0 +1,5 @@
+error[E0451]: field `_private` of struct `ExecutionPermit` is private
+ --> tests/ui/forge_execution_permit.rs:4:37
+  |
+4 |     let _forged = ExecutionPermit { _private: () };
+  |                                     ^^^^^^^^ private field

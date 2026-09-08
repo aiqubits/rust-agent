@@ -1,0 +1,11 @@
+error[E0451]: fields `kind`, `category` and `message` of struct `ToolError` are private
+ --> tests/ui/forge_tool_error.rs:7:9
+  |
+6 |     let _forged = ToolError {
+  |                   --------- in this type
+7 |         kind: ToolErrorKind::Provider,
+  |         ^^^^ private field
+8 |         category: Some("provider"),
+  |         ^^^^^^^^ private field
+9 |         message: Arc::from("unbounded"),
+  |         ^^^^^^^ private field

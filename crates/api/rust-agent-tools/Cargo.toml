@@ -1,0 +1,23 @@
+[package]
+name = "rust-agent-tools"
+description = "Bounded tool contracts and guarded tool capability boundary"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+default = []
+
+[dependencies]
+rust-agent-core = { version = "0.1.0", path = "../rust-agent-core", default-features = false }
+rust-agent-runtime-api = { version = "0.1.0", path = "../rust-agent-runtime-api", default-features = false }
+serde_json = "1.0.143"
+
+[dev-dependencies]
+serde = { version = "1.0.219", features = ["derive"] }
+trybuild = "1.0.110"
+
+[lints]
+workspace = true

@@ -64,6 +64,63 @@ fn api_dependency_direction_is_acyclic() {
 }
 
 #[test]
+fn phase_three_tool_api_dependency_and_privacy_boundary_is_isolated() {
+    let root = workspace_root();
+    let manifest: Value = toml::from_str(
+        &fs::read_to_string(root.join("crates/api/rust-agent-tools/Cargo.toml")).unwrap(),
+    )
+    .unwrap();
+    let dependencies = manifest["dependencies"]
+        .as_table()
+        .unwrap()
+        .keys()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        dependencies,
+        ["rust-agent-core", "rust-agent-runtime-api", "serde_json"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
+    );
+
+    let output = Command::new("cargo")
+        .args([
+            "tree",
+            "-p",
+            "rust-agent-tools",
+            "--edges",
+            "normal",
+            "--no-default-features",
+        ])
+        .current_dir(&root)
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let tree = String::from_utf8(output.stdout).unwrap();
+    for forbidden in [
+        "AINS",
+        "rust-agent-agent",
+        "rust-agent-commands",
+        "rust-agent-driver-",
+        "rust-agent-model",
+        "rust-agent-session",
+        "tokio",
+    ] {
+        assert!(
+            !tree.contains(forbidden),
+            "tool API dependency tree contains forbidden owner {forbidden}:\n{tree}"
+        );
+    }
+
+    let source = fs::read_to_string(root.join("crates/api/rust-agent-tools/src/lib.rs")).unwrap();
+    assert!(source.contains("pub struct ExecutionPermit"));
+    assert!(source.contains("handler: Arc<dyn Tool>"));
+    assert!(!source.contains("pub handler:"));
+    assert!(!source.contains("unsafe"));
+}
+
+#[test]
 fn phase_two_session_public_closure_is_agent_free_in_every_feature_mode() {
     let root = workspace_root();
     let session_manifest =

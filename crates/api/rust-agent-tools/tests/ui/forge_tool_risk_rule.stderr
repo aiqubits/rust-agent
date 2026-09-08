@@ -1,0 +1,15 @@
+error[E0451]: fields `all`, `raise_to`, `add_effects`, `canonical_bytes` and `evaluator_steps` of struct `ToolRiskRule` are private
+  --> tests/ui/forge_tool_risk_rule.rs:6:9
+   |
+ 5 |     let _forged = ToolRiskRule {
+   |                   ------------ in this type
+ 6 |         all: [].into(),
+   |         ^^^ private field
+ 7 |         raise_to: ToolSafety::Unknown,
+   |         ^^^^^^^^ private field
+ 8 |         add_effects: SecurityEffects::empty(),
+   |         ^^^^^^^^^^^ private field
+ 9 |         canonical_bytes: 10,
+   |         ^^^^^^^^^^^^^^^ private field
+10 |         evaluator_steps: 1,
+   |         ^^^^^^^^^^^^^^^ private field

@@ -1077,6 +1077,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "rust-agent-tools"
+version = "0.1.0"
+dependencies = [
+ "rust-agent-core",
+ "rust-agent-runtime-api",
+ "serde",
+ "serde_json",
+ "trybuild",
+]
+
+[[package]]
 name = "rustc_version"
 version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
