@@ -1,0 +1,7 @@
+error: lifetime may not live long enough
+ --> tests/ui/save_execution_permit.rs:8:19
+  |
+7 | fn save(permit: &ExecutionPermit) -> SavedPermit {
+  |                 - let's call the lifetime of this reference `'1`
+8 |     SavedPermit { permit }
+  |                   ^^^^^^ this usage requires that `'1` must outlive `'static`

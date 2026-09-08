@@ -1132,13 +1132,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "rust-agent-tool-executor-guarded"
+version = "0.1.0"
+dependencies = [
+ "rust-agent-tools",
+ "trybuild",
+]
+
+[[package]]
 name = "rust-agent-tools"
 version = "0.1.0"
 dependencies = [
  "rust-agent-core",
+ "rust-agent-policy",
  "rust-agent-runtime-api",
  "serde",
  "serde_json",
+ "sha2",
  "trybuild",
 ]
 

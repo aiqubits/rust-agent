@@ -1,0 +1,46 @@
+[package]
+name = "rust-agent-tool-executor-guarded"
+description = "Metadata-only wrapper for the canonical guarded ToolExecutor"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[package.metadata.rust-agent]
+schema = 1
+id = "tool-executor-guarded"
+scope = "agent"
+factory = "rust_agent_tool_executor_guarded::build"
+dependencies-type = "rust_agent_tool_executor_guarded::Dependencies"
+config-type = "rust_agent_tool_executor_guarded::Config"
+config-source = "none"
+targets = ["cfg(true)"]
+target-support = [
+    { predicate = 'cfg(target_os = "linux")', tier = "production" },
+    { predicate = 'cfg(not(target_os = "linux"))', tier = "experimental" },
+]
+lifecycle-effects = []
+provides = [{ capability = "cap:tool-executor", priority = 100, effects = [] }]
+requires = [
+    { capability = "cap:permission-policy", mode = "required", field = "permission" },
+    { capability = "cap:approval", mode = "uses-if-present", field = "approval" },
+    { capability = "cap:tool-provider", mode = "uses-if-present", field = "providers" },
+]
+conflicts = []
+security = []
+runtime-primitives = ["clock", "sleeper"]
+build-requirements = { executables = [], read-inputs = [], environment = [] }
+cargo-features = []
+
+[features]
+default = []
+
+[dependencies]
+rust-agent-tools = { version = "0.1.0", path = "../../api/rust-agent-tools", default-features = false }
+
+[dev-dependencies]
+trybuild = "1.0.110"
+
+[lints]
+workspace = true

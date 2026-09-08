@@ -148,6 +148,24 @@
         "scope": "agent"
       },
       {
+        "id": "cap:tool-executor",
+        "api-package": "rust-agent-tools",
+        "rust-api": "rust_agent_tools::ToolExecutor",
+        "binding-type": "rust_agent_tools::ToolExecutorBinding",
+        "binding-adapter": "rust_agent_tools::ToolExecutorBinding::from_provider",
+        "binding": "singleton",
+        "scope": "agent"
+      },
+      {
+        "id": "cap:tool-provider",
+        "api-package": "rust-agent-tools",
+        "rust-api": "rust_agent_tools::ToolContribution",
+        "binding-type": "rust_agent_tools::ToolProviderBinding",
+        "binding-adapter": "rust_agent_tools::ToolProviderBinding::from_provider",
+        "binding": "ordered-multi",
+        "scope": "agent"
+      },
+      {
         "id": "cap:tool-result-pruner",
         "api-package": "rust-agent-prompt",
         "rust-api": "rust_agent_prompt::ToolResultPruner",
@@ -762,6 +780,77 @@
         },
         "app-coexistence": null,
         "cargo-features": []
+      },
+      {
+        "id": "tool-executor-guarded",
+        "package": "rust-agent-tool-executor-guarded",
+        "package-path": "crates/components/tool-executor-guarded",
+        "scope": "agent",
+        "factory": "rust_agent_tool_executor_guarded::build",
+        "dependencies-type": "rust_agent_tool_executor_guarded::Dependencies",
+        "config-type": "rust_agent_tool_executor_guarded::Config",
+        "config-source": "none",
+        "config-key": null,
+        "resource-namespace-preparer": null,
+        "prepared-config-type": null,
+        "targets": "cfg(true)",
+        "target-support": [
+          {
+            "predicate": "cfg(not(target_os = \"linux\"))",
+            "tier": "experimental"
+          },
+          {
+            "predicate": "cfg(target_os = \"linux\")",
+            "tier": "production"
+          }
+        ],
+        "lifecycle-effects": [],
+        "provides": [
+          {
+            "capability": "cap:tool-executor",
+            "key": null,
+            "priority": 100,
+            "order": 0,
+            "layer": "provider",
+            "resource-namespace": {
+              "mode": "none"
+            },
+            "effects": []
+          }
+        ],
+        "requires": [
+          {
+            "capability": "cap:permission-policy",
+            "mode": "required",
+            "field": "permission",
+            "key": null
+          },
+          {
+            "capability": "cap:approval",
+            "mode": "uses-if-present",
+            "field": "approval",
+            "key": null
+          },
+          {
+            "capability": "cap:tool-provider",
+            "mode": "uses-if-present",
+            "field": "providers",
+            "key": null
+          }
+        ],
+        "conflicts": [],
+        "security": [],
+        "runtime-primitives": [
+          "clock",
+          "sleeper"
+        ],
+        "build-requirements": {
+          "executables": [],
+          "read-inputs": [],
+          "environment": []
+        },
+        "app-coexistence": null,
+        "cargo-features": []
       }
     ],
     "runtime-adapters": [
@@ -920,7 +1009,7 @@
       }
     ]
   },
-  "normalized-catalog-digest": "f8adbdb11f6b4a53cbcd8492ecf06dfc67e0e2f1705302e14183e469686732bb",
+  "normalized-catalog-digest": "727a43e9b4a130a1ddc970f7ff84626c9e5c492ed97a23ac6dbd896b01cd1220",
   "catalog-trust-input": {
     "schema": 1,
     "normalized-policy": {
@@ -1219,7 +1308,12 @@
       "executables": [],
       "read-inputs": [],
       "environment": []
+    },
+    "rust-agent-tools": {
+      "executables": [],
+      "read-inputs": [],
+      "environment": []
     }
   },
-  "identity-digest": "e01149b46ebf4c8ef028f5423f10ba5347ff140ac1cd572741b7f75255e67bdf"
+  "identity-digest": "7dcc0323b179b939a43c3f123b53a34b9828707b37702a5187b00dca09b6e15a"
 }

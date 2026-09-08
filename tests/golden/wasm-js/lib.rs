@@ -9,7 +9,7 @@ mod wasm;
 pub use wasm::start;
 pub use rust_agent_fixture_runtime::create_runtime_primitives as create_runtime_primitives;
 
-pub const CATALOG_DIGEST: &str = "f8adbdb11f6b4a53cbcd8492ecf06dfc67e0e2f1705302e14183e469686732bb";
+pub const CATALOG_DIGEST: &str = "727a43e9b4a130a1ddc970f7ff84626c9e5c492ed97a23ac6dbd896b01cd1220";
 
 #[derive(Default)]
 pub struct RuntimeConfig {

@@ -1,0 +1,5 @@
+error[E0599]: no method named `execute` found for reference `&ToolExecutionSession` in the current scope
+ --> tests/ui/model_session_has_no_raw_execute.rs:8:21
+  |
+8 |     let _ = session.execute(request);
+  |                     ^^^^^^^ method not found in `&ToolExecutionSession`

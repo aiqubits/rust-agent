@@ -1,7 +1,7 @@
 {
   "schema": 2,
   "algorithm": "sha256-rust-agent-composition-v2",
-  "composition-hash": "191faafa23f8ba4cda4e3ad2e60bb294edb1d402398771339925d11a1a9e19e4",
+  "composition-hash": "d24753405dac17d16002a1c61d79a5a38ee3946063d36014d1e369332795f76d",
   "build-kind": "library",
   "profile-name": "fixture-minimal",
   "normalized-profile": {
@@ -323,6 +323,24 @@
           "binding-type": "rust_agent_prompt::TokenMeterBinding",
           "binding-adapter": "rust_agent_prompt::TokenMeterBinding::from_provider",
           "binding": "singleton",
+          "scope": "agent"
+        },
+        {
+          "id": "cap:tool-executor",
+          "api-package": "rust-agent-tools",
+          "rust-api": "rust_agent_tools::ToolExecutor",
+          "binding-type": "rust_agent_tools::ToolExecutorBinding",
+          "binding-adapter": "rust_agent_tools::ToolExecutorBinding::from_provider",
+          "binding": "singleton",
+          "scope": "agent"
+        },
+        {
+          "id": "cap:tool-provider",
+          "api-package": "rust-agent-tools",
+          "rust-api": "rust_agent_tools::ToolContribution",
+          "binding-type": "rust_agent_tools::ToolProviderBinding",
+          "binding-adapter": "rust_agent_tools::ToolProviderBinding::from_provider",
+          "binding": "ordered-multi",
           "scope": "agent"
         },
         {
@@ -940,6 +958,77 @@
           },
           "app-coexistence": null,
           "cargo-features": []
+        },
+        {
+          "id": "tool-executor-guarded",
+          "package": "rust-agent-tool-executor-guarded",
+          "package-path": "crates/components/tool-executor-guarded",
+          "scope": "agent",
+          "factory": "rust_agent_tool_executor_guarded::build",
+          "dependencies-type": "rust_agent_tool_executor_guarded::Dependencies",
+          "config-type": "rust_agent_tool_executor_guarded::Config",
+          "config-source": "none",
+          "config-key": null,
+          "resource-namespace-preparer": null,
+          "prepared-config-type": null,
+          "targets": "cfg(true)",
+          "target-support": [
+            {
+              "predicate": "cfg(not(target_os = \"linux\"))",
+              "tier": "experimental"
+            },
+            {
+              "predicate": "cfg(target_os = \"linux\")",
+              "tier": "production"
+            }
+          ],
+          "lifecycle-effects": [],
+          "provides": [
+            {
+              "capability": "cap:tool-executor",
+              "key": null,
+              "priority": 100,
+              "order": 0,
+              "layer": "provider",
+              "resource-namespace": {
+                "mode": "none"
+              },
+              "effects": []
+            }
+          ],
+          "requires": [
+            {
+              "capability": "cap:permission-policy",
+              "mode": "required",
+              "field": "permission",
+              "key": null
+            },
+            {
+              "capability": "cap:approval",
+              "mode": "uses-if-present",
+              "field": "approval",
+              "key": null
+            },
+            {
+              "capability": "cap:tool-provider",
+              "mode": "uses-if-present",
+              "field": "providers",
+              "key": null
+            }
+          ],
+          "conflicts": [],
+          "security": [],
+          "runtime-primitives": [
+            "clock",
+            "sleeper"
+          ],
+          "build-requirements": {
+            "executables": [],
+            "read-inputs": [],
+            "environment": []
+          },
+          "app-coexistence": null,
+          "cargo-features": []
         }
       ],
       "runtime-adapters": [
@@ -1098,7 +1187,7 @@
         }
       ]
     },
-    "normalized-catalog-digest": "f8adbdb11f6b4a53cbcd8492ecf06dfc67e0e2f1705302e14183e469686732bb",
+    "normalized-catalog-digest": "727a43e9b4a130a1ddc970f7ff84626c9e5c492ed97a23ac6dbd896b01cd1220",
     "catalog-trust-input": {
       "schema": 1,
       "normalized-policy": {
@@ -1397,9 +1486,14 @@
         "executables": [],
         "read-inputs": [],
         "environment": []
+      },
+      "rust-agent-tools": {
+        "executables": [],
+        "read-inputs": [],
+        "environment": []
       }
     },
-    "identity-digest": "e01149b46ebf4c8ef028f5423f10ba5347ff140ac1cd572741b7f75255e67bdf"
+    "identity-digest": "7dcc0323b179b939a43c3f123b53a34b9828707b37702a5187b00dca09b6e15a"
   },
   "custom-target-spec": null,
   "selected-components": [
@@ -1593,6 +1687,13 @@
       },
       {
         "component": "permission-default",
+        "conclusion": "excluded",
+        "reasons": [
+          "NotRequired"
+        ]
+      },
+      {
+        "component": "tool-executor-guarded",
         "conclusion": "excluded",
         "reasons": [
           "NotRequired"
@@ -2103,7 +2204,7 @@
       "id": "rust-agent-runtime-api",
       "package": "rust-agent-runtime-api",
       "logical-path": "crates/api/rust-agent-runtime-api",
-      "tree-digest": "3549196ce8fd050dadad4d6b7595d411d66a77c06f8d3b8fcf56c40181d8a447",
+      "tree-digest": "0496567ee1a3ee146134651c464f7c7b2a0761e82ea80e76d595bbd13f8b4f0c",
       "tree-entries": [
         {
           "path": "Cargo.toml",
@@ -2151,8 +2252,8 @@
           "path": "src/lib.rs",
           "kind": {
             "kind": "regular-file",
-            "sha256": "d1788dd606ea7c927952ee3fd45570369e66b3ea90864de275b82ab268edcdc1",
-            "bytes": 111376
+            "sha256": "f613946c7cab0ee3f8a6e78c3258ff10c01d4949017ac7831df5d8b9cd6fc476",
+            "bytes": 120362
           },
           "metadata": {
             "contract": "read-only-epoch-v1",
@@ -2540,6 +2641,50 @@
           }
         },
         {
+          "path": "tests/ui/forge_tool_call_journal_proof.rs",
+          "kind": {
+            "kind": "regular-file",
+            "sha256": "a8028e19efa0f389923723d1bee1f90efb1e098e388c6784a9f7e1687bdcde88",
+            "bytes": 108
+          },
+          "metadata": {
+            "contract": "read-only-epoch-v1",
+            "mode": 292,
+            "uid": 0,
+            "gid": 0,
+            "atime-nanos": 0,
+            "mtime-nanos": 0,
+            "ctime-nanos": 0,
+            "birthtime-nanos": 0,
+            "link-count": 1,
+            "device": 0,
+            "inode": 0,
+            "generation": 0
+          }
+        },
+        {
+          "path": "tests/ui/forge_tool_call_journal_proof.stderr",
+          "kind": {
+            "kind": "regular-file",
+            "sha256": "5474f087a76913098abd347543182ee3ccd93661596178d2748ee07d090da1c1",
+            "bytes": 242
+          },
+          "metadata": {
+            "contract": "read-only-epoch-v1",
+            "mode": 292,
+            "uid": 0,
+            "gid": 0,
+            "atime-nanos": 0,
+            "mtime-nanos": 0,
+            "ctime-nanos": 0,
+            "birthtime-nanos": 0,
+            "link-count": 1,
+            "device": 0,
+            "inode": 0,
+            "generation": 0
+          }
+        },
+        {
           "path": "tests/ui/forge_volatile_session_reservation.rs",
           "kind": {
             "kind": "regular-file",
@@ -2653,12 +2798,12 @@
     },
     {
       "path": "generator-inputs.json",
-      "digest": "0c97e5fb0689317bd335b381f28a9b32390dca27b20502f1c567c56dc999724a",
-      "bytes": 44882
+      "digest": "befdae29417b878bbd679f4ec069c99c4b44f534ca9bb564957183900d9450e4",
+      "bytes": 47771
     },
     {
       "path": "src/lib.rs",
-      "digest": "75806cc27c397fbe505aae4611340fdd1dbed739fe6301c89f8e38859911a39c",
+      "digest": "a1b68321cbaab0e17e00b122be9fad00313ea66184fc492a3a67fbba6f8c31b0",
       "bytes": 3591
     },
     {

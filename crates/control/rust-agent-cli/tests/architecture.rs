@@ -78,10 +78,16 @@ fn phase_three_tool_api_dependency_and_privacy_boundary_is_isolated() {
         .collect::<BTreeSet<_>>();
     assert_eq!(
         dependencies,
-        ["rust-agent-core", "rust-agent-runtime-api", "serde_json"]
-            .into_iter()
-            .map(str::to_owned)
-            .collect()
+        [
+            "rust-agent-core",
+            "rust-agent-policy",
+            "rust-agent-runtime-api",
+            "serde_json",
+            "sha2",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect()
     );
 
     let output = Command::new("cargo")
@@ -114,10 +120,61 @@ fn phase_three_tool_api_dependency_and_privacy_boundary_is_isolated() {
     }
 
     let source = fs::read_to_string(root.join("crates/api/rust-agent-tools/src/lib.rs")).unwrap();
+    let registry =
+        fs::read_to_string(root.join("crates/api/rust-agent-tools/src/registry.rs")).unwrap();
+    let execution =
+        fs::read_to_string(root.join("crates/api/rust-agent-tools/src/execution.rs")).unwrap();
     assert!(source.contains("pub struct ExecutionPermit"));
-    assert!(source.contains("handler: Arc<dyn Tool>"));
-    assert!(!source.contains("pub handler:"));
-    assert!(!source.contains("unsafe"));
+    assert!(registry.contains("handler: Arc<dyn crate::Tool>"));
+    assert!(!registry.contains("pub handler:"));
+    assert_eq!(execution.matches(".handler().execute(").count(), 1);
+    for checked in [&source, &registry, &execution] {
+        assert!(!checked.contains("unsafe"));
+    }
+}
+
+#[test]
+fn guarded_tool_executor_wrapper_is_metadata_only_and_dependency_one_way() {
+    let root = workspace_root();
+    let manifest: Value = toml::from_str(
+        &fs::read_to_string(root.join("crates/components/tool-executor-guarded/Cargo.toml"))
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        manifest["dependencies"]
+            .as_table()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>(),
+        ["rust-agent-tools"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
+    );
+    let wrapper =
+        fs::read_to_string(root.join("crates/components/tool-executor-guarded/src/lib.rs"))
+            .unwrap();
+    assert!(
+        wrapper.contains(
+            "pub use rust_agent_tools::guarded_component::{Config, Dependencies, build};"
+        )
+    );
+    assert!(!wrapper.contains("fn build("));
+    assert!(!wrapper.contains("ExecutionPermit"));
+    assert!(!wrapper.contains("ToolRegistry"));
+
+    let tools_manifest: Value = toml::from_str(
+        &fs::read_to_string(root.join("crates/api/rust-agent-tools/Cargo.toml")).unwrap(),
+    )
+    .unwrap();
+    assert!(
+        !tools_manifest["dependencies"]
+            .as_table()
+            .unwrap()
+            .contains_key("rust-agent-tool-executor-guarded")
+    );
 }
 
 #[test]

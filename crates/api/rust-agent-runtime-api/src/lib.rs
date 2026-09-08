@@ -18,7 +18,7 @@ use std::{
 
 pub use rust_agent_core::{
     AgentId, AgentLifecycleOperationId, AgentLifecycleOperationIdKind, AgentOperationRecoveryKey,
-    CompositionHash, Digest, MaybeSendSync, RequestId, SessionId,
+    CallId, CompositionHash, Digest, MaybeSendSync, RequestId, SessionId,
 };
 
 /// Adapter-relative monotonic timestamp used by runtime-controlled deadlines.
@@ -458,6 +458,256 @@ impl ModelRequestJournalVerifier {
 
     #[doc(hidden)]
     pub fn scope(&self) -> &ModelCallScopeIdentity {
+        &self.witness.scope
+    }
+}
+
+/// Identity sealed into the model-origin tool journal for one generated Agent scope.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ToolCallScopeIdentity {
+    agent_id: AgentId,
+    lifecycle: AgentLifecycleNonce,
+    session_id: Option<SessionId>,
+    composition: CompositionHash,
+    catalog: Digest,
+}
+
+impl ToolCallScopeIdentity {
+    #[doc(hidden)]
+    pub const fn for_generated_agent(
+        agent_id: AgentId,
+        lifecycle: AgentLifecycleNonce,
+        session_id: Option<SessionId>,
+        composition: CompositionHash,
+        catalog: Digest,
+    ) -> Self {
+        Self {
+            agent_id,
+            lifecycle,
+            session_id,
+            composition,
+            catalog,
+        }
+    }
+
+    pub const fn agent_id(&self) -> AgentId {
+        self.agent_id
+    }
+
+    pub const fn lifecycle(&self) -> AgentLifecycleNonce {
+        self.lifecycle
+    }
+
+    pub const fn session_id(&self) -> Option<SessionId> {
+        self.session_id
+    }
+
+    pub const fn composition(&self) -> CompositionHash {
+        self.composition
+    }
+
+    pub const fn catalog(&self) -> Digest {
+        self.catalog
+    }
+}
+
+/// Exact provider-neutral fields committed before a model-origin tool side effect.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ToolCallJournalProjection {
+    call_id: CallId,
+    step_digest: Digest,
+    tool_digest: Digest,
+    snapshot_digest: Digest,
+    arguments_digest: Digest,
+    effects_digest: Digest,
+}
+
+impl ToolCallJournalProjection {
+    #[doc(hidden)]
+    pub const fn from_tool_plan(
+        call_id: CallId,
+        step_digest: Digest,
+        tool_digest: Digest,
+        snapshot_digest: Digest,
+        arguments_digest: Digest,
+        effects_digest: Digest,
+    ) -> Self {
+        Self {
+            call_id,
+            step_digest,
+            tool_digest,
+            snapshot_digest,
+            arguments_digest,
+            effects_digest,
+        }
+    }
+
+    pub const fn call_id(&self) -> CallId {
+        self.call_id
+    }
+
+    pub const fn step_digest(&self) -> Digest {
+        self.step_digest
+    }
+
+    pub const fn tool_digest(&self) -> Digest {
+        self.tool_digest
+    }
+
+    pub const fn snapshot_digest(&self) -> Digest {
+        self.snapshot_digest
+    }
+
+    pub const fn arguments_digest(&self) -> Digest {
+        self.arguments_digest
+    }
+
+    pub const fn effects_digest(&self) -> Digest {
+        self.effects_digest
+    }
+}
+
+struct ToolJournalAuthorityWitness {
+    tag: NonZeroU64,
+    scope: ToolCallScopeIdentity,
+}
+
+/// Owned journal authority retained by the generated Agent request-journal facade.
+#[allow(missing_debug_implementations)]
+pub struct ToolCallJournalIssuer {
+    witness: Arc<ToolJournalAuthorityWitness>,
+    next_record: AtomicU64,
+}
+
+/// Cloneable verifier installed only on the matching model-origin `ToolExecutor` edge.
+#[derive(Clone)]
+#[allow(missing_debug_implementations)]
+pub struct ToolCallJournalVerifier {
+    witness: Arc<ToolJournalAuthorityWitness>,
+}
+
+/// Opaque evidence that the exact `ToolCall` checkpoint was confirmed committed.
+#[allow(missing_debug_implementations)]
+pub struct ToolCallJournalProof {
+    witness: Arc<ToolJournalAuthorityWitness>,
+    record_sequence: NonZeroU64,
+    projection: ToolCallJournalProjection,
+    record_digest: Digest,
+    cancellation: CancellationToken,
+    deadline: Option<RuntimeInstant>,
+    output_budget: NonZeroUsize,
+    runtime: RuntimePrimitives,
+}
+
+impl ToolCallJournalProof {
+    pub const fn call_id(&self) -> CallId {
+        self.projection.call_id()
+    }
+
+    pub fn cancellation(&self) -> CancellationToken {
+        self.cancellation.clone()
+    }
+
+    pub const fn deadline(&self) -> Option<RuntimeInstant> {
+        self.deadline
+    }
+
+    pub const fn output_budget(&self) -> NonZeroUsize {
+        self.output_budget
+    }
+
+    #[doc(hidden)]
+    pub fn runtime(&self) -> &RuntimePrimitives {
+        &self.runtime
+    }
+}
+
+/// Allocates paired tool journal authority for generated scope assembly.
+#[derive(Debug)]
+pub struct ToolCallJournalAuthority;
+
+static NEXT_TOOL_JOURNAL_AUTHORITY: AtomicU64 = AtomicU64::new(1);
+
+impl ToolCallJournalAuthority {
+    #[doc(hidden)]
+    pub fn issue_for_generated_scope(
+        scope: ToolCallScopeIdentity,
+    ) -> Result<(ToolCallJournalIssuer, ToolCallJournalVerifier), JournalAuthorityError> {
+        let tag = NEXT_TOOL_JOURNAL_AUTHORITY
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| {
+                value.checked_add(1)
+            })
+            .map_err(|_| JournalAuthorityError::AuthorityExhausted)
+            .and_then(|value| {
+                NonZeroU64::new(value).ok_or(JournalAuthorityError::AuthorityExhausted)
+            })?;
+        let witness = Arc::new(ToolJournalAuthorityWitness { tag, scope });
+        Ok((
+            ToolCallJournalIssuer {
+                witness: Arc::clone(&witness),
+                next_record: AtomicU64::new(1),
+            },
+            ToolCallJournalVerifier { witness },
+        ))
+    }
+}
+
+impl ToolCallJournalIssuer {
+    #[doc(hidden)]
+    pub fn seal_committed_record(
+        &self,
+        projection: ToolCallJournalProjection,
+        record_digest: Digest,
+        cancellation: CancellationToken,
+        deadline: Option<RuntimeInstant>,
+        output_budget: NonZeroUsize,
+        runtime: RuntimePrimitives,
+    ) -> Result<ToolCallJournalProof, JournalAuthorityError> {
+        let record_sequence = self
+            .next_record
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| {
+                value.checked_add(1)
+            })
+            .map_err(|_| JournalAuthorityError::RecordSequenceExhausted)
+            .and_then(|value| {
+                NonZeroU64::new(value).ok_or(JournalAuthorityError::RecordSequenceExhausted)
+            })?;
+        Ok(ToolCallJournalProof {
+            witness: Arc::clone(&self.witness),
+            record_sequence,
+            projection,
+            record_digest,
+            cancellation,
+            deadline,
+            output_budget,
+            runtime,
+        })
+    }
+
+    #[doc(hidden)]
+    pub fn scope(&self) -> &ToolCallScopeIdentity {
+        &self.witness.scope
+    }
+}
+
+impl ToolCallJournalVerifier {
+    #[doc(hidden)]
+    pub fn verifies(
+        &self,
+        proof: &ToolCallJournalProof,
+        projection: &ToolCallJournalProjection,
+        record_digest: Digest,
+    ) -> bool {
+        Arc::ptr_eq(&self.witness, &proof.witness)
+            && self.witness.tag == proof.witness.tag
+            && self.witness.scope == proof.witness.scope
+            && proof.record_sequence.get() != 0
+            && &proof.projection == projection
+            && proof.record_digest == record_digest
+    }
+
+    #[doc(hidden)]
+    pub fn scope(&self) -> &ToolCallScopeIdentity {
         &self.witness.scope
     }
 }
@@ -3077,6 +3327,27 @@ mod tests {
         )
     }
 
+    fn tool_scope(agent: u128) -> ToolCallScopeIdentity {
+        ToolCallScopeIdentity::for_generated_agent(
+            AgentId::from_nonzero_u128(agent).unwrap(),
+            AgentLifecycleNonce::from_nonzero(NonZeroU64::new(1).unwrap()),
+            None,
+            CompositionHash::from_digest(Digest::from_bytes([2; 32])),
+            Digest::from_bytes([3; 32]),
+        )
+    }
+
+    fn tool_projection(call: u128) -> ToolCallJournalProjection {
+        ToolCallJournalProjection::from_tool_plan(
+            CallId::from_nonzero_u128(call).unwrap(),
+            Digest::from_bytes([4; 32]),
+            Digest::from_bytes([5; 32]),
+            Digest::from_bytes([6; 32]),
+            Digest::from_bytes([7; 32]),
+            Digest::from_bytes([8; 32]),
+        )
+    }
+
     #[test]
     fn request_journal_proof_is_exact_and_scope_bound() {
         let (issuer, verifier) =
@@ -3099,6 +3370,35 @@ mod tests {
         let (_, foreign) =
             ModelRequestJournalAuthority::issue_for_generated_scope(model_scope()).unwrap();
         assert!(!foreign.verifies(&proof, &projection, record_digest));
+    }
+
+    #[test]
+    fn tool_journal_proof_is_exact_authority_and_agent_bound() {
+        let (issuer, verifier) =
+            ToolCallJournalAuthority::issue_for_generated_scope(tool_scope(1)).unwrap();
+        let projection = tool_projection(9);
+        let record_digest = Digest::from_bytes([10; 32]);
+        let proof = issuer
+            .seal_committed_record(
+                projection.clone(),
+                record_digest,
+                CancellationToken::new(),
+                None,
+                NonZeroUsize::new(1024).unwrap(),
+                RuntimePrimitives::new(RuntimeAdapterIdentity::checked("test-runtime").unwrap()),
+            )
+            .unwrap();
+
+        assert!(verifier.verifies(&proof, &projection, record_digest));
+        assert!(!verifier.verifies(&proof, &tool_projection(10), record_digest));
+        assert!(!verifier.verifies(&proof, &projection, Digest::from_bytes([11; 32])));
+
+        let (_, foreign_authority) =
+            ToolCallJournalAuthority::issue_for_generated_scope(tool_scope(1)).unwrap();
+        assert!(!foreign_authority.verifies(&proof, &projection, record_digest));
+        let (_, foreign_agent) =
+            ToolCallJournalAuthority::issue_for_generated_scope(tool_scope(2)).unwrap();
+        assert!(!foreign_agent.verifies(&proof, &projection, record_digest));
     }
 
     #[test]

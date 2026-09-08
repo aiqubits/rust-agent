@@ -1,0 +1,42 @@
+error[E0603]: module `registry` is private
+ --> tests/ui/access_guarded_internals.rs:2:31
+  |
+2 |     let _ = rust_agent_tools::registry::ToolRegistry::from_bindings(&[]);
+  |                               ^^^^^^^^  ------------ struct `ToolRegistry` is not publicly re-exported
+  |                               |
+  |                               private module
+  |
+note: the module `registry` is defined here
+ --> $WORKSPACE/crates/api/rust-agent-tools/src/lib.rs
+  |
+  | mod registry;
+  | ^^^^^^^^^^^^
+
+error[E0624]: associated function `from_bindings` is private
+ --> tests/ui/access_guarded_internals.rs:2:55
+  |
+2 |       let _ = rust_agent_tools::registry::ToolRegistry::from_bindings(&[]);
+  |                                                         ^^^^^^^^^^^^^ private associated function
+  |
+ ::: $WORKSPACE/crates/api/rust-agent-tools/src/registry.rs
+  |
+  | /     pub(crate) fn from_bindings(
+  | |         providers: &[ToolProviderBinding],
+  | |     ) -> Result<Self, ToolProviderError> {
+  | |________________________________________- private associated function defined here
+
+error[E0624]: associated function `build` is private
+ --> tests/ui/access_guarded_internals.rs:3:52
+  |
+3 |       let _ = rust_agent_tools::GuardedToolExecutor::build;
+  |                                                      ^^^^^ private associated function
+  |
+ ::: $WORKSPACE/crates/api/rust-agent-tools/src/execution.rs
+  |
+  | /     pub(crate) fn build(
+  | |         providers: &[ToolProviderBinding],
+  | |         permission: PermissionPolicyBinding,
+  | |         approval: Option<ApprovalBinding>,
+  | |         verifier: ToolCallJournalVerifier,
+  | |     ) -> Result<Self, ToolExecutionError> {
+  | |_________________________________________- private associated function defined here

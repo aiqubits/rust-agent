@@ -1,11 +1,20 @@
 //! Bounded Tool contracts. Raw handlers and execution permits remain inside this crate's
 //! guarded reference-monitor boundary.
 
+mod execution;
+pub mod guarded_component;
 mod output;
 mod policy;
+mod registry;
 
 use std::{fmt, future::Future, num::NonZeroU64, pin::Pin, sync::Arc};
 
+pub use execution::{
+    GuardedToolExecutor, MAX_ACTIVE_TOOL_SESSIONS, MAX_TOOL_ARGUMENT_BYTES,
+    MAX_TOOL_ARGUMENT_DEPTH, MAX_TOOL_CALLS_PER_STEP, PreparedToolCall, StepId, ToolCallPlan,
+    ToolExecutionError, ToolExecutionRequest, ToolExecutionResult, ToolExecutionSession,
+    ToolExecutor, ToolExecutorBinding, ToolScope,
+};
 pub use output::{
     MAX_TOOL_OUTPUT_BYTES, MAX_TOOL_OUTPUT_ITEMS, MAX_TOOL_OUTPUT_JSON_DEPTH,
     MAX_TOOL_OUTPUT_REFERENCE_BYTES, ToolOutputBuilder, ToolOutputError, ToolValue, ToolValueItem,
@@ -17,9 +26,14 @@ pub use policy::{
     MAX_TOOL_SCALAR_BYTES, ToolArgumentPredicate, ToolCallPolicy, ToolCallPolicyBuilder,
     ToolConcurrencyRule, ToolPolicyBuildError, ToolRiskRule, ToolRiskRuleBuilder, ToolSafety,
 };
-use rust_agent_core::{CanonicalId, MaybeSendSync, SecurityEffects};
+pub use registry::{
+    CapabilityProviderAdapter, MAX_TOOL_PROVIDERS, MAX_TOOL_SCHEMA_BYTES_PER_AGENT,
+    MAX_TOOLS_PER_AGENT, ToolProvider, ToolProviderBinding, ToolSetSnapshot,
+};
+use rust_agent_core::{CanonicalId, Digest, MaybeSendSync, SecurityEffects};
 use rust_agent_runtime_api::{CancellationToken, RuntimeInstant};
 use serde_json::Value as JsonValue;
+use sha2::{Digest as _, Sha256};
 
 pub const MAX_TOOL_DESCRIPTION_BYTES: usize = 4 * 1024;
 pub const MAX_TOOL_SCHEMA_BYTES: usize = 64 * 1024;
@@ -157,6 +171,24 @@ impl ToolDefinition {
         }
         Ok(())
     }
+
+    fn maximum_effects(&self) -> SecurityEffects {
+        self.call_policy
+            .rules()
+            .iter()
+            .fold(self.static_effects, |effects, rule| {
+                effects | rule.add_effects()
+            })
+    }
+}
+
+fn hash_parts(parts: &[&[u8]]) -> Digest {
+    let mut hasher = Sha256::new();
+    for part in parts {
+        hasher.update((*part).len().to_be_bytes());
+        hasher.update(part);
+    }
+    Digest::from_bytes(hasher.finalize().into())
 }
 
 fn json_depth(value: &JsonValue) -> usize {
@@ -304,8 +336,17 @@ impl std::error::Error for ToolRegistrationError {}
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ToolProviderError {
     InvalidProviderIdentity,
+    InvalidComponentIdentity,
+    InvalidRegistration,
     RegistrationLimitExceeded,
+    ProviderLimitExceeded,
+    ToolLimitExceeded,
+    SchemaByteLimitExceeded,
     DuplicateToolName,
+    DuplicateProviderIdentity,
+    EffectCeilingExceeded,
+    SchemaVersionRegressed,
+    SchemaVersionConflict,
     SnapshotUnavailable,
 }
 
@@ -313,10 +354,33 @@ impl fmt::Display for ToolProviderError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::InvalidProviderIdentity => formatter.write_str("invalid tool provider identity"),
+            Self::InvalidComponentIdentity => {
+                formatter.write_str("invalid tool provider Component identity")
+            }
+            Self::InvalidRegistration => formatter.write_str("invalid tool registration"),
             Self::RegistrationLimitExceeded => {
                 formatter.write_str("tool provider registration limit exceeded")
             }
+            Self::ProviderLimitExceeded => {
+                formatter.write_str("tool provider count limit exceeded")
+            }
+            Self::ToolLimitExceeded => formatter.write_str("Agent tool count limit exceeded"),
+            Self::SchemaByteLimitExceeded => {
+                formatter.write_str("Agent tool schema byte limit exceeded")
+            }
             Self::DuplicateToolName => formatter.write_str("duplicate tool name in snapshot"),
+            Self::DuplicateProviderIdentity => {
+                formatter.write_str("duplicate tool provider identity")
+            }
+            Self::EffectCeilingExceeded => {
+                formatter.write_str("tool effects exceed the sealed provider ceiling")
+            }
+            Self::SchemaVersionRegressed => {
+                formatter.write_str("tool provider schema version regressed")
+            }
+            Self::SchemaVersionConflict => {
+                formatter.write_str("tool provider reused a schema version with different content")
+            }
             Self::SnapshotUnavailable => formatter.write_str("tool provider snapshot unavailable"),
         }
     }

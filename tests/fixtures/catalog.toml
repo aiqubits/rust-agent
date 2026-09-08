@@ -39,6 +39,24 @@ binding = "singleton"
 scope = "app"
 
 [[capabilities]]
+id = "cap:tool-provider"
+api-package = "rust-agent-tools"
+rust-api = "rust_agent_tools::ToolContribution"
+binding-type = "rust_agent_tools::ToolProviderBinding"
+binding-adapter = "rust_agent_tools::ToolProviderBinding::from_provider"
+binding = "ordered-multi"
+scope = "agent"
+
+[[capabilities]]
+id = "cap:tool-executor"
+api-package = "rust-agent-tools"
+rust-api = "rust_agent_tools::ToolExecutor"
+binding-type = "rust_agent_tools::ToolExecutorBinding"
+binding-adapter = "rust_agent_tools::ToolExecutorBinding::from_provider"
+binding = "singleton"
+scope = "agent"
+
+[[capabilities]]
 id = "cap:prompt-contributor"
 api-package = "rust-agent-prompt"
 rust-api = "rust_agent_prompt::PromptContributor"
@@ -272,6 +290,33 @@ requires = []
 conflicts = []
 security = []
 runtime-primitives = []
+build-requirements = { executables = [], read-inputs = [], environment = [] }
+cargo-features = []
+
+[[components]]
+id = "tool-executor-guarded"
+package = "rust-agent-tool-executor-guarded"
+package-path = "crates/components/tool-executor-guarded"
+scope = "agent"
+factory = "rust_agent_tool_executor_guarded::build"
+dependencies-type = "rust_agent_tool_executor_guarded::Dependencies"
+config-type = "rust_agent_tool_executor_guarded::Config"
+config-source = "none"
+targets = "cfg(true)"
+target-support = [
+    { predicate = 'cfg(target_os = "linux")', tier = "production" },
+    { predicate = 'cfg(not(target_os = "linux"))', tier = "experimental" },
+]
+lifecycle-effects = []
+provides = [{ capability = "cap:tool-executor", priority = 100, effects = [] }]
+requires = [
+    { capability = "cap:permission-policy", mode = "required", field = "permission" },
+    { capability = "cap:approval", mode = "uses-if-present", field = "approval" },
+    { capability = "cap:tool-provider", mode = "uses-if-present", field = "providers" },
+]
+conflicts = []
+security = []
+runtime-primitives = ["clock", "sleeper"]
 build-requirements = { executables = [], read-inputs = [], environment = [] }
 cargo-features = []
 
