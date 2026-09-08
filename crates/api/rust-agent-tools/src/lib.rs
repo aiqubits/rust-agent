@@ -3,6 +3,7 @@
 
 mod execution;
 pub mod guarded_component;
+mod middleware;
 mod output;
 mod policy;
 mod registry;
@@ -14,6 +15,12 @@ pub use execution::{
     MAX_TOOL_ARGUMENT_DEPTH, MAX_TOOL_CALLS_PER_STEP, PreparedToolCall, StepId, ToolCallPlan,
     ToolExecutionError, ToolExecutionRequest, ToolExecutionResult, ToolExecutionSession,
     ToolExecutor, ToolExecutorBinding, ToolScope,
+};
+pub use middleware::{
+    MAX_TOOL_EXECUTION_MIDDLEWARE, MAX_TOOL_MIDDLEWARE_ERROR_BYTES, ToolAroundExecutionPhase,
+    ToolExecutionMiddleware, ToolExecutionMiddlewareBinding, ToolMiddlewareBuildError,
+    ToolMiddlewareContext, ToolMiddlewareError, ToolMiddlewareErrorKind, ToolMiddlewareOutcome,
+    ToolMiddlewareStage, ToolPostPolicyDecision, ToolPrePolicyDecision,
 };
 pub use output::{
     MAX_TOOL_OUTPUT_BYTES, MAX_TOOL_OUTPUT_ITEMS, MAX_TOOL_OUTPUT_JSON_DEPTH,

@@ -1,7 +1,7 @@
 {
   "schema": 2,
   "algorithm": "sha256-rust-agent-composition-v2",
-  "composition-hash": "6e54d421e80ac76f9632390534a87b93b25d17bb540557f9a55fcd9bc85fd2d6",
+  "composition-hash": "8f5e93f60a693ee2585a7b47ec8af4a8375339b78a7c692b5296b7b6c9aa9684",
   "build-kind": "wasm",
   "profile-name": "fixture-wasm-js",
   "normalized-profile": {
@@ -322,6 +322,15 @@
           "binding-type": "rust_agent_prompt::TokenMeterBinding",
           "binding-adapter": "rust_agent_prompt::TokenMeterBinding::from_provider",
           "binding": "singleton",
+          "scope": "agent"
+        },
+        {
+          "id": "cap:tool-execution-middleware",
+          "api-package": "rust-agent-tools",
+          "rust-api": "rust_agent_tools::ToolExecutionMiddleware",
+          "binding-type": "rust_agent_tools::ToolExecutionMiddlewareBinding",
+          "binding-adapter": "rust_agent_tools::ToolExecutionMiddlewareBinding::from_provider",
+          "binding": "ordered-multi",
           "scope": "agent"
         },
         {
@@ -1013,6 +1022,12 @@
               "mode": "uses-if-present",
               "field": "providers",
               "key": null
+            },
+            {
+              "capability": "cap:tool-execution-middleware",
+              "mode": "uses-if-present",
+              "field": "middleware",
+              "key": null
             }
           ],
           "conflicts": [],
@@ -1186,7 +1201,7 @@
         }
       ]
     },
-    "normalized-catalog-digest": "727a43e9b4a130a1ddc970f7ff84626c9e5c492ed97a23ac6dbd896b01cd1220",
+    "normalized-catalog-digest": "273072eac21f6c1e6355d42a3be84f675d854b81c144a91f49f2fd75f2e11e67",
     "catalog-trust-input": {
       "schema": 1,
       "normalized-policy": {
@@ -1492,7 +1507,7 @@
         "environment": []
       }
     },
-    "identity-digest": "7dcc0323b179b939a43c3f123b53a34b9828707b37702a5187b00dca09b6e15a"
+    "identity-digest": "4ec7830947a28cfc270d1302c4bf34e8ca8693658f770bdcebc1c6e1bb5f6a45"
   },
   "custom-target-spec": null,
   "selected-components": [
@@ -2897,12 +2912,12 @@
     },
     {
       "path": "generator-inputs.json",
-      "digest": "befdae29417b878bbd679f4ec069c99c4b44f534ca9bb564957183900d9450e4",
-      "bytes": 47771
+      "digest": "693062aecbd072351390e398a22e6773b956040dec3a410a7aeb6874b6123a20",
+      "bytes": 48356
     },
     {
       "path": "src/lib.rs",
-      "digest": "40e3f2b7a8158f5f57c466f3f0d58f65cdca50d707208eebd26506e7b12e156f",
+      "digest": "8d74846e5f8ef5bee5f9917126d9807677b5eac6af7996e341a980686fb26662",
       "bytes": 3622
     },
     {

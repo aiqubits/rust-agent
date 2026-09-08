@@ -48,6 +48,15 @@ binding = "ordered-multi"
 scope = "agent"
 
 [[capabilities]]
+id = "cap:tool-execution-middleware"
+api-package = "rust-agent-tools"
+rust-api = "rust_agent_tools::ToolExecutionMiddleware"
+binding-type = "rust_agent_tools::ToolExecutionMiddlewareBinding"
+binding-adapter = "rust_agent_tools::ToolExecutionMiddlewareBinding::from_provider"
+binding = "ordered-multi"
+scope = "agent"
+
+[[capabilities]]
 id = "cap:tool-executor"
 api-package = "rust-agent-tools"
 rust-api = "rust_agent_tools::ToolExecutor"
@@ -313,6 +322,7 @@ requires = [
     { capability = "cap:permission-policy", mode = "required", field = "permission" },
     { capability = "cap:approval", mode = "uses-if-present", field = "approval" },
     { capability = "cap:tool-provider", mode = "uses-if-present", field = "providers" },
+    { capability = "cap:tool-execution-middleware", mode = "uses-if-present", field = "middleware" },
 ]
 conflicts = []
 security = []

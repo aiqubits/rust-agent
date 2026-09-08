@@ -1,0 +1,33 @@
+error[E0616]: field `tool_name` of struct `ToolMiddlewareContext` is private
+ --> tests/ui/forge_middleware_context.rs:6:13
+  |
+6 |     context.tool_name = Arc::from("forged");
+  |             ^^^^^^^^^ private field
+
+error[E0616]: field `deadline` of struct `ToolMiddlewareContext` is private
+ --> tests/ui/forge_middleware_context.rs:7:13
+  |
+7 |     context.deadline = None;
+  |             ^^^^^^^^ private field
+
+error[E0624]: method `cancellation_guard` is private
+ --> tests/ui/forge_middleware_context.rs:8:21
+  |
+8 |     let _ = context.cancellation_guard();
+  |                     ^^^^^^^^^^^^^^^^^^ private method
+  |
+ ::: src/middleware.rs
+  |
+  |     pub(crate) fn cancellation_guard(&self) -> CancellationToken {
+  |     ------------------------------------------------------------ private method defined here
+
+error[E0624]: associated function `from_guarded_call` is private
+  --> tests/ui/forge_middleware_context.rs:12:36
+   |
+12 |     let _ = ToolMiddlewareContext::from_guarded_call;
+   |                                    ^^^^^^^^^^^^^^^^^ private associated function
+   |
+  ::: src/middleware.rs
+   |
+   |     pub(crate) fn from_guarded_call(input: ToolMiddlewareContextInput) -> Self {
+   |     -------------------------------------------------------------------------- private associated function defined here

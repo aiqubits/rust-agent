@@ -26,6 +26,7 @@ requires = [
     { capability = "cap:permission-policy", mode = "required", field = "permission" },
     { capability = "cap:approval", mode = "uses-if-present", field = "approval" },
     { capability = "cap:tool-provider", mode = "uses-if-present", field = "providers" },
+    { capability = "cap:tool-execution-middleware", mode = "uses-if-present", field = "middleware" },
 ]
 conflicts = []
 security = []

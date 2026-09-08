@@ -148,6 +148,15 @@
         "scope": "agent"
       },
       {
+        "id": "cap:tool-execution-middleware",
+        "api-package": "rust-agent-tools",
+        "rust-api": "rust_agent_tools::ToolExecutionMiddleware",
+        "binding-type": "rust_agent_tools::ToolExecutionMiddlewareBinding",
+        "binding-adapter": "rust_agent_tools::ToolExecutionMiddlewareBinding::from_provider",
+        "binding": "ordered-multi",
+        "scope": "agent"
+      },
+      {
         "id": "cap:tool-executor",
         "api-package": "rust-agent-tools",
         "rust-api": "rust_agent_tools::ToolExecutor",
@@ -836,6 +845,12 @@
             "mode": "uses-if-present",
             "field": "providers",
             "key": null
+          },
+          {
+            "capability": "cap:tool-execution-middleware",
+            "mode": "uses-if-present",
+            "field": "middleware",
+            "key": null
           }
         ],
         "conflicts": [],
@@ -1009,7 +1024,7 @@
       }
     ]
   },
-  "normalized-catalog-digest": "727a43e9b4a130a1ddc970f7ff84626c9e5c492ed97a23ac6dbd896b01cd1220",
+  "normalized-catalog-digest": "273072eac21f6c1e6355d42a3be84f675d854b81c144a91f49f2fd75f2e11e67",
   "catalog-trust-input": {
     "schema": 1,
     "normalized-policy": {
@@ -1315,5 +1330,5 @@
       "environment": []
     }
   },
-  "identity-digest": "7dcc0323b179b939a43c3f123b53a34b9828707b37702a5187b00dca09b6e15a"
+  "identity-digest": "4ec7830947a28cfc270d1302c4bf34e8ca8693658f770bdcebc1c6e1bb5f6a45"
 }

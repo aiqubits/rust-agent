@@ -29,6 +29,14 @@ binding-adapter = "rust_agent_tools::ToolExecutorBinding::from_provider"
 binding = "singleton"
 scope = "agent"
 
+[[package.metadata.rust-agent.capability]]
+id = "cap:tool-execution-middleware"
+api = "rust_agent_tools::ToolExecutionMiddleware"
+binding-type = "rust_agent_tools::ToolExecutionMiddlewareBinding"
+binding-adapter = "rust_agent_tools::ToolExecutionMiddlewareBinding::from_provider"
+binding = "ordered-multi"
+scope = "agent"
+
 [features]
 default = []
 

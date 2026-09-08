@@ -25,8 +25,14 @@ use serde_json::Value as JsonValue;
 
 use crate::{
     JsonKind, MAX_TOOL_OUTPUT_BYTES, MAX_TOOL_OUTPUT_ITEMS, MAX_TOOL_OUTPUT_JSON_DEPTH,
-    ToolArgumentPredicate, ToolConcurrencyRule, ToolDefinition, ToolError, ToolOutputError,
+    ToolArgumentPredicate, ToolConcurrencyRule, ToolDefinition, ToolError,
+    ToolMiddlewareBuildError, ToolMiddlewareContext, ToolMiddlewareError, ToolMiddlewareOutcome,
+    ToolMiddlewareStage, ToolOutputError, ToolPostPolicyDecision, ToolPrePolicyDecision,
     ToolProviderBinding, ToolProviderError, ToolSafety, ToolValue, ToolValueItem, hash_parts,
+    middleware::{
+        ToolAroundExecutionPhase, ToolExecutionMiddlewareBinding, ToolMiddlewareChain,
+        ToolMiddlewareContextInput,
+    },
     output::ToolOutputLimits,
     registry::{RegisteredTool, ToolRegistry},
 };
@@ -226,6 +232,16 @@ pub enum ToolExecutionError {
     CallLimitExceeded,
     DuplicateCallId,
     SessionLimitExceeded,
+    MiddlewareConfiguration(ToolMiddlewareBuildError),
+    MiddlewareDenied {
+        middleware_id: Arc<str>,
+        stage: ToolMiddlewareStage,
+    },
+    Middleware {
+        middleware_id: Arc<str>,
+        stage: ToolMiddlewareStage,
+        error: ToolMiddlewareError,
+    },
     InternalStateUnavailable,
     InvalidOutput(ToolOutputError),
     Tool(ToolError),
@@ -259,6 +275,24 @@ impl fmt::Display for ToolExecutionError {
             Self::SessionLimitExceeded => {
                 formatter.write_str("active tool execution session limit exceeded")
             }
+            Self::MiddlewareConfiguration(error) => {
+                write!(formatter, "tool middleware configuration failed: {error}")
+            }
+            Self::MiddlewareDenied {
+                middleware_id,
+                stage,
+            } => write!(
+                formatter,
+                "tool middleware `{middleware_id}` denied call at {stage:?}"
+            ),
+            Self::Middleware {
+                middleware_id,
+                stage,
+                error,
+            } => write!(
+                formatter,
+                "tool middleware `{middleware_id}` failed at {stage:?}: {error}"
+            ),
             Self::InternalStateUnavailable => {
                 formatter.write_str("tool execution state unavailable")
             }
@@ -483,6 +517,23 @@ impl ToolExecutionSession {
             }
             check_guard(&cancellation, deadline, &runtime)?;
 
+            let middleware_context =
+                ToolMiddlewareContext::from_guarded_call(ToolMiddlewareContextInput {
+                    call_id: call.plan.request.call_id,
+                    step: self.step,
+                    tool_name: Arc::clone(&call.plan.request.tool_name),
+                    arguments_digest: call.plan.arguments_digest,
+                    safety: call.plan.classified.safety,
+                    effects: call.plan.classified.effects,
+                    concurrency_digest: call.plan.classified.concurrency_digest,
+                    cancellation: cancellation.clone(),
+                    deadline,
+                });
+            self.run_pre_middleware(&middleware_context, &runtime)
+                .await?;
+            self.run_around_before(&middleware_context, &runtime)
+                .await?;
+
             let limits = ToolOutputLimits::checked(
                 MAX_TOOL_OUTPUT_ITEMS,
                 call.proof.output_budget(),
@@ -495,7 +546,7 @@ impl ToolExecutionSession {
                 output_limits: limits,
             };
             let permit = crate::ExecutionPermit { _private: () };
-            let value = await_guarded(
+            let mut outcome = await_guarded(
                 call.plan.registered.handler().execute(
                     &permit,
                     &context,
@@ -505,15 +556,192 @@ impl ToolExecutionSession {
                 deadline,
                 &runtime,
             )
-            .await?
-            .map_err(ToolExecutionError::Tool)?;
-            validate_output(&value, call.proof.output_budget().get())?;
-            Ok(ToolExecutionResult {
-                call_id: call.plan.request.call_id,
-                tool_name: call.plan.request.tool_name,
-                value,
-            })
+            .await
+            .and_then(|value| value.map_err(ToolExecutionError::Tool))
+            .and_then(|value| {
+                validate_output(&value, call.proof.output_budget().get())?;
+                Ok(ToolExecutionResult {
+                    call_id: call.plan.request.call_id,
+                    tool_name: call.plan.request.tool_name,
+                    value,
+                })
+            });
+
+            if let Err(error) = self
+                .run_around_after(&middleware_context, &outcome, &runtime)
+                .await
+                && outcome.is_ok()
+            {
+                outcome = Err(error);
+            }
+            if let Ok(result) = &outcome
+                && let Err(error) = self
+                    .run_post_middleware(&middleware_context, result, &runtime)
+                    .await
+            {
+                outcome = Err(error);
+            }
+            self.observe_middleware(&middleware_context, &outcome, &runtime)
+                .await;
+            outcome
         })
+    }
+
+    async fn run_pre_middleware(
+        &self,
+        context: &ToolMiddlewareContext,
+        runtime: &RuntimePrimitives,
+    ) -> Result<(), ToolExecutionError> {
+        for middleware in self.owner.middleware.entries() {
+            check_guard(&context.cancellation_guard(), context.deadline(), runtime)?;
+            let decision = await_guarded(
+                middleware.pre_tool_policy(context),
+                context.cancellation_guard(),
+                context.deadline(),
+                runtime,
+            )
+            .await?
+            .map_err(|error| {
+                middleware_error(middleware, ToolMiddlewareStage::PreToolPolicy, error)
+            })?;
+            if decision == ToolPrePolicyDecision::Deny {
+                return Err(ToolExecutionError::MiddlewareDenied {
+                    middleware_id: Arc::from(middleware.id()),
+                    stage: ToolMiddlewareStage::PreToolPolicy,
+                });
+            }
+        }
+        Ok(())
+    }
+
+    async fn run_around_before(
+        &self,
+        context: &ToolMiddlewareContext,
+        runtime: &RuntimePrimitives,
+    ) -> Result<(), ToolExecutionError> {
+        for middleware in self.owner.middleware.entries() {
+            check_guard(&context.cancellation_guard(), context.deadline(), runtime)?;
+            await_guarded(
+                middleware.around_tool_execution(context, ToolAroundExecutionPhase::Before, None),
+                context.cancellation_guard(),
+                context.deadline(),
+                runtime,
+            )
+            .await?
+            .map_err(|error| {
+                middleware_error(
+                    middleware,
+                    ToolMiddlewareStage::AroundToolExecutionBefore,
+                    error,
+                )
+            })?;
+        }
+        Ok(())
+    }
+
+    async fn run_around_after(
+        &self,
+        context: &ToolMiddlewareContext,
+        outcome: &Result<ToolExecutionResult, ToolExecutionError>,
+        runtime: &RuntimePrimitives,
+    ) -> Result<(), ToolExecutionError> {
+        let outcome = middleware_outcome(outcome);
+        for middleware in self.owner.middleware.entries().iter().rev() {
+            check_guard(&context.cancellation_guard(), context.deadline(), runtime)?;
+            await_guarded(
+                middleware.around_tool_execution(
+                    context,
+                    ToolAroundExecutionPhase::After,
+                    Some(outcome),
+                ),
+                context.cancellation_guard(),
+                context.deadline(),
+                runtime,
+            )
+            .await?
+            .map_err(|error| {
+                middleware_error(
+                    middleware,
+                    ToolMiddlewareStage::AroundToolExecutionAfter,
+                    error,
+                )
+            })?;
+        }
+        Ok(())
+    }
+
+    async fn run_post_middleware(
+        &self,
+        context: &ToolMiddlewareContext,
+        result: &ToolExecutionResult,
+        runtime: &RuntimePrimitives,
+    ) -> Result<(), ToolExecutionError> {
+        for middleware in self.owner.middleware.entries() {
+            check_guard(&context.cancellation_guard(), context.deadline(), runtime)?;
+            let decision = await_guarded(
+                middleware.post_tool_policy(context, result),
+                context.cancellation_guard(),
+                context.deadline(),
+                runtime,
+            )
+            .await?
+            .map_err(|error| {
+                middleware_error(middleware, ToolMiddlewareStage::PostToolPolicy, error)
+            })?;
+            if decision == ToolPostPolicyDecision::Reject {
+                return Err(ToolExecutionError::MiddlewareDenied {
+                    middleware_id: Arc::from(middleware.id()),
+                    stage: ToolMiddlewareStage::PostToolPolicy,
+                });
+            }
+        }
+        Ok(())
+    }
+
+    async fn observe_middleware(
+        &self,
+        context: &ToolMiddlewareContext,
+        outcome: &Result<ToolExecutionResult, ToolExecutionError>,
+        runtime: &RuntimePrimitives,
+    ) {
+        let outcome = middleware_outcome(outcome);
+        for middleware in self.owner.middleware.entries() {
+            if check_guard(&context.cancellation_guard(), context.deadline(), runtime).is_err() {
+                break;
+            }
+            if await_guarded(
+                middleware.observe_tool_result(context, outcome),
+                context.cancellation_guard(),
+                context.deadline(),
+                runtime,
+            )
+            .await
+            .is_err()
+            {
+                break;
+            }
+        }
+    }
+}
+
+fn middleware_outcome(
+    outcome: &Result<ToolExecutionResult, ToolExecutionError>,
+) -> ToolMiddlewareOutcome<'_> {
+    match outcome {
+        Ok(result) => ToolMiddlewareOutcome::Success(result),
+        Err(error) => ToolMiddlewareOutcome::Failure(error),
+    }
+}
+
+fn middleware_error(
+    middleware: &ToolExecutionMiddlewareBinding,
+    stage: ToolMiddlewareStage,
+    error: ToolMiddlewareError,
+) -> ToolExecutionError {
+    ToolExecutionError::Middleware {
+        middleware_id: Arc::from(middleware.id()),
+        stage,
+        error,
     }
 }
 
@@ -565,6 +793,7 @@ struct GuardedToolExecutorInner {
     registry: ToolRegistry,
     permission: PermissionPolicyBinding,
     approval: Option<ApprovalBinding>,
+    middleware: ToolMiddlewareChain,
     verifier: ToolCallJournalVerifier,
     active_sessions: AtomicUsize,
 }
@@ -575,6 +804,7 @@ impl fmt::Debug for GuardedToolExecutorInner {
             .debug_struct("GuardedToolExecutorInner")
             .field("registry", &self.registry)
             .field("approval_present", &self.approval.is_some())
+            .field("middleware_count", &self.middleware.entries().len())
             .finish_non_exhaustive()
     }
 }
@@ -590,6 +820,7 @@ impl GuardedToolExecutor {
         providers: &[ToolProviderBinding],
         permission: PermissionPolicyBinding,
         approval: Option<ApprovalBinding>,
+        middleware: &[ToolExecutionMiddlewareBinding],
         verifier: ToolCallJournalVerifier,
     ) -> Result<Self, ToolExecutionError> {
         Ok(Self {
@@ -597,6 +828,8 @@ impl GuardedToolExecutor {
                 registry: ToolRegistry::from_bindings(providers)?,
                 permission,
                 approval,
+                middleware: ToolMiddlewareChain::from_bindings(middleware)
+                    .map_err(ToolExecutionError::MiddlewareConfiguration)?,
                 verifier,
                 active_sessions: AtomicUsize::new(0),
             }),
@@ -957,7 +1190,7 @@ mod tests {
         future::Future,
         num::{NonZeroU64, NonZeroUsize},
         sync::{
-            Arc,
+            Arc, Mutex,
             atomic::{AtomicU64, AtomicUsize, Ordering},
         },
         task::{Context, Poll, Wake, Waker},
@@ -1069,6 +1302,126 @@ mod tests {
         decision: ApprovalDecision,
     }
 
+    #[derive(Debug)]
+    struct RecordingMiddleware {
+        id: &'static str,
+        order: i32,
+        events: Arc<Mutex<Vec<String>>>,
+        pre: ToolPrePolicyDecision,
+        post: ToolPostPolicyDecision,
+        fail_before: bool,
+        fail_observer: bool,
+    }
+
+    impl crate::ToolExecutionMiddleware for RecordingMiddleware {
+        fn id(&self) -> &'static str {
+            self.id
+        }
+
+        fn order(&self) -> i32 {
+            self.order
+        }
+
+        fn pre_tool_policy<'a>(
+            &'a self,
+            context: &'a ToolMiddlewareContext,
+        ) -> ToolFuture<'a, Result<ToolPrePolicyDecision, ToolMiddlewareError>> {
+            assert_eq!(context.tool_name(), "counting");
+            assert_eq!(context.effects(), SecurityEffects::READ_LOCAL);
+            self.events.lock().unwrap().push(format!("{}:pre", self.id));
+            let decision = self.pre;
+            Box::pin(async move { Ok(decision) })
+        }
+
+        fn around_tool_execution<'a>(
+            &'a self,
+            _context: &'a ToolMiddlewareContext,
+            phase: ToolAroundExecutionPhase,
+            outcome: Option<ToolMiddlewareOutcome<'a>>,
+        ) -> ToolFuture<'a, Result<(), ToolMiddlewareError>> {
+            let label = match phase {
+                ToolAroundExecutionPhase::Before => {
+                    assert!(outcome.is_none());
+                    "before"
+                }
+                ToolAroundExecutionPhase::After => {
+                    assert!(matches!(outcome, Some(ToolMiddlewareOutcome::Success(_))));
+                    "after"
+                }
+            };
+            self.events
+                .lock()
+                .unwrap()
+                .push(format!("{}:{label}", self.id));
+            let fail = self.fail_before && phase == ToolAroundExecutionPhase::Before;
+            Box::pin(async move {
+                if fail {
+                    Err(ToolMiddlewareError::new(
+                        crate::ToolMiddlewareErrorKind::Execution,
+                        "before failed",
+                    ))
+                } else {
+                    Ok(())
+                }
+            })
+        }
+
+        fn post_tool_policy<'a>(
+            &'a self,
+            _context: &'a ToolMiddlewareContext,
+            _result: &'a ToolExecutionResult,
+        ) -> ToolFuture<'a, Result<ToolPostPolicyDecision, ToolMiddlewareError>> {
+            self.events
+                .lock()
+                .unwrap()
+                .push(format!("{}:post", self.id));
+            let decision = self.post;
+            Box::pin(async move { Ok(decision) })
+        }
+
+        fn observe_tool_result<'a>(
+            &'a self,
+            _context: &'a ToolMiddlewareContext,
+            outcome: ToolMiddlewareOutcome<'a>,
+        ) -> ToolFuture<'a, Result<(), ToolMiddlewareError>> {
+            let label = match outcome {
+                ToolMiddlewareOutcome::Success(_) => "observe-success",
+                ToolMiddlewareOutcome::Failure(_) => "observe-failure",
+            };
+            self.events
+                .lock()
+                .unwrap()
+                .push(format!("{}:{label}", self.id));
+            let fail = self.fail_observer;
+            Box::pin(async move {
+                if fail {
+                    Err(ToolMiddlewareError::new(
+                        crate::ToolMiddlewareErrorKind::Observer,
+                        "observer failed",
+                    ))
+                } else {
+                    Ok(())
+                }
+            })
+        }
+    }
+
+    fn recording_middleware(
+        id: &'static str,
+        order: i32,
+        events: Arc<Mutex<Vec<String>>>,
+    ) -> ToolExecutionMiddlewareBinding {
+        ToolExecutionMiddlewareBinding::from_provider(Arc::new(RecordingMiddleware {
+            id,
+            order,
+            events,
+            pre: ToolPrePolicyDecision::Continue,
+            post: ToolPostPolicyDecision::Accept,
+            fail_before: false,
+            fail_observer: false,
+        }))
+    }
+
     impl Approval for CountingApproval {
         fn request(
             &self,
@@ -1128,6 +1481,16 @@ mod tests {
         decision: PermissionDecision,
         approval: Option<ApprovalBinding>,
     ) -> Harness {
+        harness_with_middleware(agent, providers, decision, approval, &[])
+    }
+
+    fn harness_with_middleware(
+        agent: u128,
+        providers: &[ToolProviderBinding],
+        decision: PermissionDecision,
+        approval: Option<ApprovalBinding>,
+        middleware: &[ToolExecutionMiddlewareBinding],
+    ) -> Harness {
         let agent_id = AgentId::from_nonzero_u128(agent).unwrap();
         let lifecycle = AgentLifecycleNonce::from_nonzero(NonZeroU64::new(1).unwrap());
         let composition = CompositionHash::from_digest(Digest::from_bytes([2; 32]));
@@ -1153,8 +1516,10 @@ mod tests {
         Harness {
             scope,
             issuer,
-            executor: GuardedToolExecutor::build(providers, permission, approval, verifier)
-                .unwrap(),
+            executor: GuardedToolExecutor::build(
+                providers, permission, approval, middleware, verifier,
+            )
+            .unwrap(),
             permission_calls,
             observed_effects,
         }
@@ -1461,7 +1826,7 @@ mod tests {
             observed_effects: Arc::new(AtomicU64::new(0)),
         }));
         assert!(matches!(
-            GuardedToolExecutor::build(&[binding], permission, None, verifier),
+            GuardedToolExecutor::build(&[binding], permission, None, &[], verifier),
             Err(ToolExecutionError::Provider(
                 ToolProviderError::EffectCeilingExceeded
             ))
@@ -1587,5 +1952,181 @@ mod tests {
             )
             .unwrap();
         assert_ne!(without.record_digest(), with.record_digest());
+    }
+
+    #[test]
+    fn typed_middleware_order_wraps_only_proof_authorized_dispatch() {
+        let tool_calls = Arc::new(AtomicUsize::new(0));
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let late = recording_middleware("late", 10, Arc::clone(&events));
+        let early = ToolExecutionMiddlewareBinding::from_provider(Arc::new(RecordingMiddleware {
+            id: "early",
+            order: -10,
+            events: Arc::clone(&events),
+            pre: ToolPrePolicyDecision::Continue,
+            post: ToolPostPolicyDecision::Accept,
+            fail_before: false,
+            fail_observer: true,
+        }));
+        let harness = harness_with_middleware(
+            1,
+            &[provider(Arc::clone(&tool_calls), simple_policy())],
+            PermissionDecision::Allow,
+            None,
+            &[late, early],
+        );
+        let session = harness
+            .executor
+            .prepare_model_step(&harness.scope, step())
+            .unwrap();
+        let cancellation = CancellationToken::new();
+        cancellation.cancel();
+        let cancelled = seal(
+            &harness.issuer,
+            session.plan_call(request(3_999, false)).unwrap(),
+            cancellation,
+        );
+        assert_eq!(
+            run(session.execute_prepared(cancelled)),
+            Err(ToolExecutionError::Cancelled)
+        );
+        assert!(events.lock().unwrap().is_empty());
+        assert_eq!(harness.permission_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(tool_calls.load(Ordering::SeqCst), 0);
+
+        let plan = session.plan_call(request(4_000, false)).unwrap();
+        assert!(events.lock().unwrap().is_empty());
+        let prepared = seal(&harness.issuer, plan, CancellationToken::new());
+        assert!(run(session.execute_prepared(prepared)).is_ok());
+        assert_eq!(tool_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            *events.lock().unwrap(),
+            [
+                "early:pre",
+                "late:pre",
+                "early:before",
+                "late:before",
+                "late:after",
+                "early:after",
+                "early:post",
+                "late:post",
+                "early:observe-success",
+                "late:observe-success",
+            ]
+        );
+    }
+
+    #[test]
+    fn middleware_failure_policies_are_stage_exact() {
+        let tool_calls = Arc::new(AtomicUsize::new(0));
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let denied = ToolExecutionMiddlewareBinding::from_provider(Arc::new(RecordingMiddleware {
+            id: "deny",
+            order: 0,
+            events: Arc::clone(&events),
+            pre: ToolPrePolicyDecision::Deny,
+            post: ToolPostPolicyDecision::Accept,
+            fail_before: false,
+            fail_observer: false,
+        }));
+        let harness = harness_with_middleware(
+            1,
+            &[provider(Arc::clone(&tool_calls), simple_policy())],
+            PermissionDecision::Allow,
+            None,
+            &[denied],
+        );
+        let session = harness
+            .executor
+            .prepare_model_step(&harness.scope, step())
+            .unwrap();
+        let prepared = seal(
+            &harness.issuer,
+            session.plan_call(request(4_001, false)).unwrap(),
+            CancellationToken::new(),
+        );
+        assert!(matches!(
+            run(session.execute_prepared(prepared)),
+            Err(ToolExecutionError::MiddlewareDenied {
+                stage: ToolMiddlewareStage::PreToolPolicy,
+                ..
+            })
+        ));
+        assert_eq!(tool_calls.load(Ordering::SeqCst), 0);
+
+        let failed_events = Arc::new(Mutex::new(Vec::new()));
+        let failed = ToolExecutionMiddlewareBinding::from_provider(Arc::new(RecordingMiddleware {
+            id: "failed",
+            order: 0,
+            events: failed_events,
+            pre: ToolPrePolicyDecision::Continue,
+            post: ToolPostPolicyDecision::Accept,
+            fail_before: true,
+            fail_observer: false,
+        }));
+        let failed_harness = harness_with_middleware(
+            2,
+            &[provider(Arc::clone(&tool_calls), simple_policy())],
+            PermissionDecision::Allow,
+            None,
+            &[failed],
+        );
+        let session = failed_harness
+            .executor
+            .prepare_model_step(&failed_harness.scope, step())
+            .unwrap();
+        let prepared = seal(
+            &failed_harness.issuer,
+            session.plan_call(request(4_002, false)).unwrap(),
+            CancellationToken::new(),
+        );
+        assert!(matches!(
+            run(session.execute_prepared(prepared)),
+            Err(ToolExecutionError::Middleware {
+                stage: ToolMiddlewareStage::AroundToolExecutionBefore,
+                ..
+            })
+        ));
+        assert_eq!(tool_calls.load(Ordering::SeqCst), 0);
+
+        let post_events = Arc::new(Mutex::new(Vec::new()));
+        let post_reject =
+            ToolExecutionMiddlewareBinding::from_provider(Arc::new(RecordingMiddleware {
+                id: "post-reject",
+                order: 0,
+                events: Arc::clone(&post_events),
+                pre: ToolPrePolicyDecision::Continue,
+                post: ToolPostPolicyDecision::Reject,
+                fail_before: false,
+                fail_observer: false,
+            }));
+        let post_harness = harness_with_middleware(
+            3,
+            &[provider(Arc::clone(&tool_calls), simple_policy())],
+            PermissionDecision::Allow,
+            None,
+            &[post_reject],
+        );
+        let session = post_harness
+            .executor
+            .prepare_model_step(&post_harness.scope, step())
+            .unwrap();
+        let prepared = seal(
+            &post_harness.issuer,
+            session.plan_call(request(4_003, false)).unwrap(),
+            CancellationToken::new(),
+        );
+        assert!(matches!(
+            run(session.execute_prepared(prepared)),
+            Err(ToolExecutionError::MiddlewareDenied {
+                stage: ToolMiddlewareStage::PostToolPolicy,
+                ..
+            })
+        ));
+        assert_eq!(tool_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            post_events.lock().unwrap().last().map(String::as_str),
+            Some("post-reject:observe-failure")
+        );
     }
 }

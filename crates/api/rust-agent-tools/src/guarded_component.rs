@@ -6,7 +6,7 @@ use rust_agent_runtime_api::{
     ToolCallJournalVerifier,
 };
 
-use crate::{GuardedToolExecutor, ToolProviderBinding};
+use crate::{GuardedToolExecutor, ToolExecutionMiddlewareBinding, ToolProviderBinding};
 
 #[derive(Clone, Debug, Default)]
 pub struct Config;
@@ -17,6 +17,7 @@ pub struct Dependencies {
     providers: Vec<ToolProviderBinding>,
     permission: PermissionPolicyBinding,
     approval: Option<ApprovalBinding>,
+    middleware: Vec<ToolExecutionMiddlewareBinding>,
     verifier: ToolCallJournalVerifier,
 }
 
@@ -26,6 +27,7 @@ impl std::fmt::Debug for Dependencies {
             .debug_struct("Dependencies")
             .field("provider_count", &self.providers.len())
             .field("approval_present", &self.approval.is_some())
+            .field("middleware_count", &self.middleware.len())
             .finish_non_exhaustive()
     }
 }
@@ -36,12 +38,14 @@ impl Dependencies {
         providers: Vec<ToolProviderBinding>,
         permission: PermissionPolicyBinding,
         approval: Option<ApprovalBinding>,
+        middleware: Vec<ToolExecutionMiddlewareBinding>,
         verifier: ToolCallJournalVerifier,
     ) -> Self {
         Self {
             providers,
             permission,
             approval,
+            middleware,
             verifier,
         }
     }
@@ -62,6 +66,7 @@ pub fn build(
         &dependencies.providers,
         dependencies.permission,
         dependencies.approval,
+        &dependencies.middleware,
         dependencies.verifier,
     )
     .map_err(|error| ComponentBuildError::InvalidConfig(error.to_string()))?;
@@ -149,6 +154,7 @@ mod tests {
             Vec::new(),
             PermissionPolicyBinding::from_provider(Arc::new(Allow)),
             None,
+            Vec::new(),
             verifier,
         )
     }

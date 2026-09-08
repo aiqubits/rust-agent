@@ -124,11 +124,13 @@ fn phase_three_tool_api_dependency_and_privacy_boundary_is_isolated() {
         fs::read_to_string(root.join("crates/api/rust-agent-tools/src/registry.rs")).unwrap();
     let execution =
         fs::read_to_string(root.join("crates/api/rust-agent-tools/src/execution.rs")).unwrap();
+    let middleware =
+        fs::read_to_string(root.join("crates/api/rust-agent-tools/src/middleware.rs")).unwrap();
     assert!(source.contains("pub struct ExecutionPermit"));
     assert!(registry.contains("handler: Arc<dyn crate::Tool>"));
     assert!(!registry.contains("pub handler:"));
     assert_eq!(execution.matches(".handler().execute(").count(), 1);
-    for checked in [&source, &registry, &execution] {
+    for checked in [&source, &registry, &execution, &middleware] {
         assert!(!checked.contains("unsafe"));
     }
 }
