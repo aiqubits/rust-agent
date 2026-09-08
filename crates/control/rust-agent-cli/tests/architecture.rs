@@ -258,6 +258,83 @@ fn guarded_tool_executor_wrapper_is_metadata_only_and_dependency_one_way() {
 }
 
 #[test]
+fn driver_tools_is_api_only_ordered_and_matrixed() {
+    let root = workspace_root();
+    let manifest: Value = toml::from_str(
+        &fs::read_to_string(root.join("crates/components/driver-tools/Cargo.toml")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        manifest["dependencies"]
+            .as_table()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>(),
+        [
+            "rust-agent-agent",
+            "rust-agent-core",
+            "rust-agent-model",
+            "rust-agent-runtime-api",
+            "rust-agent-tools",
+            "serde_json",
+            "sha2",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect()
+    );
+    assert!(
+        !manifest["dependencies"]
+            .as_table()
+            .unwrap()
+            .contains_key("rust-agent-tool-executor-guarded")
+    );
+    let requirements = manifest["package"]["metadata"]["rust-agent"]["requires"]
+        .as_array()
+        .unwrap();
+    assert_eq!(requirements.len(), 2);
+    assert_eq!(requirements[0]["capability"].as_str(), Some("cap:model"));
+    assert_eq!(
+        requirements[1]["capability"].as_str(),
+        Some("cap:tool-executor")
+    );
+    assert!(
+        requirements
+            .iter()
+            .all(|requirement| requirement["mode"].as_str() == Some("required"))
+    );
+
+    let source =
+        fs::read_to_string(root.join("crates/components/driver-tools/src/lib.rs")).unwrap();
+    for required in [
+        ".prepare_model_step(",
+        ".plan_call(request)",
+        "context.prepare_tool_call(",
+        "plan.seal(proof)",
+        ".execute_prepared_batch(",
+    ] {
+        assert!(
+            source.contains(required),
+            "missing Tool loop step: {required}"
+        );
+    }
+    assert!(!source.contains("unsafe"));
+
+    let ci = fs::read_to_string(root.join(".github/workflows/ci.yml")).unwrap();
+    for command in [
+        "cargo check -p rust-agent-driver-tools --no-default-features",
+        "cargo check -p rust-agent-driver-tools --all-features",
+        "-p rust-agent-driver-tools",
+    ] {
+        assert!(
+            ci.contains(command),
+            "missing driver-tools CI gate: {command}"
+        );
+    }
+}
+
+#[test]
 fn phase_three_policy_api_and_default_provider_are_dependency_isolated() {
     let root = workspace_root();
     let dependencies = |relative: &str| {

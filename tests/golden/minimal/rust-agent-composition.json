@@ -1,7 +1,7 @@
 {
   "schema": 2,
   "algorithm": "sha256-rust-agent-composition-v2",
-  "composition-hash": "3816cbbfe3c00f9a6ec07d3db7dc117def49d8b3e13e5de1f6ed037fe2bf7307",
+  "composition-hash": "2ffe7d7ddc422b45d96631d5cc38492c444a6b08c58309dbacb229be29401edd",
   "build-kind": "library",
   "profile-name": "fixture-minimal",
   "normalized-profile": {
@@ -405,6 +405,68 @@
               "capability": "cap:model",
               "mode": "required",
               "field": "model",
+              "key": null
+            }
+          ],
+          "conflicts": [],
+          "security": [],
+          "runtime-primitives": [],
+          "build-requirements": {
+            "executables": [],
+            "read-inputs": [],
+            "environment": []
+          },
+          "app-coexistence": null,
+          "cargo-features": []
+        },
+        {
+          "id": "driver-tools",
+          "package": "rust-agent-driver-tools",
+          "package-path": "crates/components/driver-tools",
+          "scope": "agent",
+          "factory": "rust_agent_driver_tools::build",
+          "dependencies-type": "rust_agent_driver_tools::Dependencies",
+          "config-type": "rust_agent_driver_tools::Config",
+          "config-source": "none",
+          "config-key": null,
+          "resource-namespace-preparer": null,
+          "prepared-config-type": null,
+          "targets": "cfg(true)",
+          "target-support": [
+            {
+              "predicate": "cfg(not(target_os = \"linux\"))",
+              "tier": "experimental"
+            },
+            {
+              "predicate": "cfg(target_os = \"linux\")",
+              "tier": "production"
+            }
+          ],
+          "lifecycle-effects": [],
+          "provides": [
+            {
+              "capability": "cap:agent-driver",
+              "key": null,
+              "priority": 90,
+              "order": 0,
+              "layer": "provider",
+              "resource-namespace": {
+                "mode": "none"
+              },
+              "effects": []
+            }
+          ],
+          "requires": [
+            {
+              "capability": "cap:model",
+              "mode": "required",
+              "field": "model",
+              "key": null
+            },
+            {
+              "capability": "cap:tool-executor",
+              "mode": "required",
+              "field": "tools",
               "key": null
             }
           ],
@@ -1202,7 +1264,7 @@
         }
       ]
     },
-    "normalized-catalog-digest": "273072eac21f6c1e6355d42a3be84f675d854b81c144a91f49f2fd75f2e11e67",
+    "normalized-catalog-digest": "9305f17ddafdaf6793fad9287ff965df8114cc9755bb5342fe7f9987b3ac23b6",
     "catalog-trust-input": {
       "schema": 1,
       "normalized-policy": {
@@ -1508,7 +1570,7 @@
         "environment": []
       }
     },
-    "identity-digest": "4ec7830947a28cfc270d1302c4bf34e8ca8693658f770bdcebc1c6e1bb5f6a45"
+    "identity-digest": "2672f324bf63e91edb4f046369b7b138c2b46f963128e0744adf25dae16377ba"
   },
   "custom-target-spec": null,
   "selected-components": [
@@ -1632,6 +1694,13 @@
     "diagnostics": [
       {
         "component": "driver-direct",
+        "conclusion": "excluded",
+        "reasons": [
+          "NotRequired"
+        ]
+      },
+      {
+        "component": "driver-tools",
         "conclusion": "excluded",
         "reasons": [
           "NotRequired"
@@ -2857,12 +2926,12 @@
     },
     {
       "path": "generator-inputs.json",
-      "digest": "693062aecbd072351390e398a22e6773b956040dec3a410a7aeb6874b6123a20",
-      "bytes": 48356
+      "digest": "a064b231a0cf29940ed2a5da94ce5d415d40fa6b5cd662a02fe5044f743a691f",
+      "bytes": 50127
     },
     {
       "path": "src/lib.rs",
-      "digest": "fdf4d81dc5397ed338a977378eb3d1ae44bf29c3f8e864e97fbb7e48915f5ee8",
+      "digest": "5317ac417b4aea381677fd01bfd190b160e6c77c09c0a9c89b02f46b1a01e2aa",
       "bytes": 3591
     },
     {

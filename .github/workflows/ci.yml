@@ -80,6 +80,7 @@ jobs:
           cargo check -p rust-agent-spill --no-default-features
           cargo check -p rust-agent-telemetry --no-default-features
           cargo check -p rust-agent-tool-executor-guarded --no-default-features
+          cargo check -p rust-agent-driver-tools --no-default-features
           cargo check -p rust-agent-commands --all-features
           cargo check -p rust-agent-tools --all-features
           cargo check -p rust-agent-policy --all-features
@@ -88,6 +89,7 @@ jobs:
           cargo check -p rust-agent-spill --all-features
           cargo check -p rust-agent-telemetry --all-features
           cargo check -p rust-agent-tool-executor-guarded --all-features
+          cargo check -p rust-agent-driver-tools --all-features
       - name: Verify current Phase 3 claimed target matrix
         shell: bash
         run: |
@@ -101,6 +103,7 @@ jobs:
             -p rust-agent-telemetry
             -p rust-agent-permission-default
             -p rust-agent-tool-executor-guarded
+            -p rust-agent-driver-tools
           )
           for target in wasm32-unknown-unknown aarch64-linux-android aarch64-apple-ios x86_64-apple-darwin x86_64-pc-windows-msvc; do
             cargo check --target "$target" --all-features "${phase3_packages[@]}"

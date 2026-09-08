@@ -923,6 +923,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "rust-agent-driver-tools"
+version = "0.1.0"
+dependencies = [
+ "futures-core",
+ "rust-agent-agent",
+ "rust-agent-core",
+ "rust-agent-model",
+ "rust-agent-policy",
+ "rust-agent-runtime-api",
+ "rust-agent-tools",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
 name = "rust-agent-fixture-api"
 version = "0.1.0"
 dependencies = [

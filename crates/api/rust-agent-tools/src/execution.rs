@@ -22,7 +22,7 @@ use rust_agent_policy::{
 use rust_agent_runtime_api::{
     AgentLifecycleNonce, CancellationToken, RuntimeFuture, RuntimeInstant,
     RuntimePrimitiveBindings, RuntimePrimitiveError, RuntimePrimitives, ToolCallJournalProjection,
-    ToolCallJournalProof, ToolCallJournalVerifier,
+    ToolCallJournalProof, ToolCallJournalVerifier, ToolCallScopeIdentity,
 };
 use serde_json::Value as JsonValue;
 
@@ -117,6 +117,17 @@ pub struct ToolScope {
 }
 
 impl ToolScope {
+    /// Copies the immutable identity from the Agent context's paired Tool journal scope.
+    pub const fn from_journal_scope(scope: &ToolCallScopeIdentity) -> Self {
+        Self {
+            agent_id: scope.agent_id(),
+            lifecycle: scope.lifecycle(),
+            session_id: scope.session_id(),
+            composition: scope.composition(),
+            catalog: scope.catalog(),
+        }
+    }
+
     #[doc(hidden)]
     pub const fn for_generated_agent(
         agent_id: AgentId,

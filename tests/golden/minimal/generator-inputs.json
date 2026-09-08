@@ -242,6 +242,68 @@
         "cargo-features": []
       },
       {
+        "id": "driver-tools",
+        "package": "rust-agent-driver-tools",
+        "package-path": "crates/components/driver-tools",
+        "scope": "agent",
+        "factory": "rust_agent_driver_tools::build",
+        "dependencies-type": "rust_agent_driver_tools::Dependencies",
+        "config-type": "rust_agent_driver_tools::Config",
+        "config-source": "none",
+        "config-key": null,
+        "resource-namespace-preparer": null,
+        "prepared-config-type": null,
+        "targets": "cfg(true)",
+        "target-support": [
+          {
+            "predicate": "cfg(not(target_os = \"linux\"))",
+            "tier": "experimental"
+          },
+          {
+            "predicate": "cfg(target_os = \"linux\")",
+            "tier": "production"
+          }
+        ],
+        "lifecycle-effects": [],
+        "provides": [
+          {
+            "capability": "cap:agent-driver",
+            "key": null,
+            "priority": 90,
+            "order": 0,
+            "layer": "provider",
+            "resource-namespace": {
+              "mode": "none"
+            },
+            "effects": []
+          }
+        ],
+        "requires": [
+          {
+            "capability": "cap:model",
+            "mode": "required",
+            "field": "model",
+            "key": null
+          },
+          {
+            "capability": "cap:tool-executor",
+            "mode": "required",
+            "field": "tools",
+            "key": null
+          }
+        ],
+        "conflicts": [],
+        "security": [],
+        "runtime-primitives": [],
+        "build-requirements": {
+          "executables": [],
+          "read-inputs": [],
+          "environment": []
+        },
+        "app-coexistence": null,
+        "cargo-features": []
+      },
+      {
         "id": "fixture-build-proof",
         "package": "rust-agent-fixture-build-proof",
         "package-path": "tests/fixtures/components/fixture-build-proof",
@@ -1024,7 +1086,7 @@
       }
     ]
   },
-  "normalized-catalog-digest": "273072eac21f6c1e6355d42a3be84f675d854b81c144a91f49f2fd75f2e11e67",
+  "normalized-catalog-digest": "9305f17ddafdaf6793fad9287ff965df8114cc9755bb5342fe7f9987b3ac23b6",
   "catalog-trust-input": {
     "schema": 1,
     "normalized-policy": {
@@ -1330,5 +1392,5 @@
       "environment": []
     }
   },
-  "identity-digest": "4ec7830947a28cfc270d1302c4bf34e8ca8693658f770bdcebc1c6e1bb5f6a45"
+  "identity-digest": "2672f324bf63e91edb4f046369b7b138c2b46f963128e0744adf25dae16377ba"
 }

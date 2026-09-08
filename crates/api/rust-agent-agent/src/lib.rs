@@ -45,8 +45,8 @@ use rust_agent_runtime_api::{
     ModelCallScopeIdentity, ModelRequestJournalIssuer, PublicationCandidate, PublicationDirectory,
     PublicationDirectoryError, PublicationDirectoryWriteHandle, PublicationVeto,
     PublishedSessionMode, RuntimePrimitives, ToolCallJournalIssuer, ToolCallJournalProjection,
-    ToolCallJournalProof, VolatileLifecycleOperation, VolatileLifecycleOperationIssuer,
-    new_publication_directory,
+    ToolCallJournalProof, ToolCallScopeIdentity, VolatileLifecycleOperation,
+    VolatileLifecycleOperationIssuer, new_publication_directory,
 };
 use rust_agent_session::{SessionPersistenceError, SessionQueryHandle};
 use sha2::{Digest as _, Sha256};
@@ -743,6 +743,15 @@ impl fmt::Debug for AgentContext {
 }
 
 impl AgentContext {
+    /// Returns the exact generated Tool journal scope paired with this Agent context.
+    pub fn tool_call_scope_identity(&self) -> Result<&ToolCallScopeIdentity, AgentError> {
+        self.journal
+            .tool_issuer
+            .as_ref()
+            .map(ToolCallJournalIssuer::scope)
+            .ok_or(AgentError::JournalUnavailable)
+    }
+
     fn new(
         model_issuer: ModelRequestJournalIssuer,
         tool_issuer: Option<ToolCallJournalIssuer>,
@@ -3767,6 +3776,10 @@ mod tests {
         let sealed = run(app.seal_agent_operation(AgentOperationDraft::sessionless())).unwrap();
         let allocated = run(app.allocate_agent_operation(sealed)).unwrap();
         let agent = run(app.create_agent(allocated.into_create_request())).unwrap();
+        assert!(matches!(
+            agent.inner.context.tool_call_scope_identity(),
+            Err(AgentError::JournalUnavailable)
+        ));
         let request_id = agent.allocate_turn_request().unwrap();
         agent
             .inner

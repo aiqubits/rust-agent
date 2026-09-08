@@ -256,6 +256,32 @@ build-requirements = { executables = [], read-inputs = [], environment = [] }
 cargo-features = []
 
 [[components]]
+id = "driver-tools"
+package = "rust-agent-driver-tools"
+package-path = "crates/components/driver-tools"
+scope = "agent"
+factory = "rust_agent_driver_tools::build"
+dependencies-type = "rust_agent_driver_tools::Dependencies"
+config-type = "rust_agent_driver_tools::Config"
+config-source = "none"
+targets = "cfg(true)"
+target-support = [
+    { predicate = 'cfg(target_os = "linux")', tier = "production" },
+    { predicate = 'cfg(not(target_os = "linux"))', tier = "experimental" },
+]
+lifecycle-effects = []
+provides = [{ capability = "cap:agent-driver", priority = 90, effects = [] }]
+requires = [
+    { capability = "cap:model", mode = "required", field = "model" },
+    { capability = "cap:tool-executor", mode = "required", field = "tools" },
+]
+conflicts = []
+security = []
+runtime-primitives = []
+build-requirements = { executables = [], read-inputs = [], environment = [] }
+cargo-features = []
+
+[[components]]
 id = "lifecycle-observer-noop"
 package = "rust-agent-lifecycle-observer-noop"
 package-path = "crates/components/lifecycle-observer-noop"

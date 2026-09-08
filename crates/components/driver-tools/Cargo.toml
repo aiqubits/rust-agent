@@ -1,0 +1,52 @@
+[package]
+name = "rust-agent-driver-tools"
+description = "Bounded model and Tool execution loop Agent driver Component"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[package.metadata.rust-agent]
+schema = 1
+id = "driver-tools"
+scope = "agent"
+factory = "rust_agent_driver_tools::build"
+dependencies-type = "rust_agent_driver_tools::Dependencies"
+config-type = "rust_agent_driver_tools::Config"
+config-source = "none"
+targets = ["cfg(true)"]
+target-support = [
+    { predicate = 'cfg(target_os = "linux")', tier = "production" },
+    { predicate = 'cfg(not(target_os = "linux"))', tier = "experimental" },
+]
+lifecycle-effects = []
+provides = [{ capability = "cap:agent-driver", priority = 90, effects = [] }]
+requires = [
+    { capability = "cap:model", mode = "required", field = "model" },
+    { capability = "cap:tool-executor", mode = "required", field = "tools" },
+]
+conflicts = []
+security = []
+runtime-primitives = []
+build-requirements = { executables = [], read-inputs = [], environment = [] }
+cargo-features = []
+
+[features]
+default = []
+
+[dependencies]
+rust-agent-agent = { version = "0.1.0", path = "../../api/rust-agent-agent", default-features = false }
+rust-agent-core = { version = "0.1.0", path = "../../api/rust-agent-core", default-features = false }
+rust-agent-model = { version = "0.1.0", path = "../../api/rust-agent-model", default-features = false }
+rust-agent-runtime-api = { version = "0.1.0", path = "../../api/rust-agent-runtime-api", default-features = false }
+rust-agent-tools = { version = "0.1.0", path = "../../api/rust-agent-tools", default-features = false }
+serde_json.workspace = true
+sha2 = "0.10.9"
+
+[dev-dependencies]
+futures-core.workspace = true
+rust-agent-policy = { version = "0.1.0", path = "../../api/rust-agent-policy", default-features = false }
+
+[lints]
+workspace = true
