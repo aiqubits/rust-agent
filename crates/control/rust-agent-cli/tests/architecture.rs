@@ -131,6 +131,11 @@ fn phase_three_tool_api_dependency_and_privacy_boundary_is_isolated() {
     let runtime_api =
         fs::read_to_string(root.join("crates/api/rust-agent-runtime-api/src/lib.rs")).unwrap();
     let agent = fs::read_to_string(root.join("crates/api/rust-agent-agent/src/lib.rs")).unwrap();
+    let model = fs::read_to_string(root.join("crates/api/rust-agent-model/src/lib.rs")).unwrap();
+    let model_manifest: Value = toml::from_str(
+        &fs::read_to_string(root.join("crates/api/rust-agent-model/Cargo.toml")).unwrap(),
+    )
+    .unwrap();
     let guarded_component =
         fs::read_to_string(root.join("crates/api/rust-agent-tools/src/guarded_component.rs"))
             .unwrap();
@@ -152,6 +157,14 @@ fn phase_three_tool_api_dependency_and_privacy_boundary_is_isolated() {
     assert!(runtime_api.contains("pub fn bind_tool_consumer("));
     assert!(agent.contains("pub fn prepare_tool_call("));
     assert!(agent.contains("fn build_driver_with_tools("));
+    assert!(model.contains("pub struct ModelToolCall"));
+    assert!(model.contains("ToolCall(ModelToolCall)"));
+    assert!(
+        !model_manifest["dependencies"]
+            .as_table()
+            .unwrap()
+            .contains_key("rust-agent-tools")
+    );
     assert!(guarded_component.contains("binding: GeneratedToolConsumerBinding"));
     assert!(guarded_component.contains(".into_verifier_for_edge(consumer,"));
     assert!(registry.contains("handler: Arc<dyn crate::Tool>"));

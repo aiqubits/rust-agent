@@ -1,0 +1,5 @@
+error: cannot construct `ModelToolCall` with struct literal syntax due to private fields
+ --> tests/ui/forge_model_tool_call.rs:4:17
+  |
+4 |     let _call = ModelToolCall {};
+  |                 ^^^^^^^^^^^^^

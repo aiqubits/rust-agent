@@ -24,6 +24,9 @@ use sha2::{Digest as _, Sha256};
 pub const MAX_MODEL_MESSAGES: usize = 128;
 pub const MAX_MODEL_CONTENT_BLOCKS: usize = 1_024;
 pub const MAX_MODEL_TOOLS: usize = 64;
+pub const MAX_MODEL_TOOL_CALLS: usize = 64;
+pub const MAX_MODEL_TOOL_ARGUMENT_BYTES: usize = 256 * 1024;
+pub const MAX_MODEL_PROVIDER_CALL_ID_BYTES: usize = 256;
 pub const MAX_MODEL_VISIBLE_BYTES: usize = 256 * 1024;
 pub const MAX_MODEL_OUTPUT_BYTES: usize = 256 * 1024;
 
@@ -111,12 +114,84 @@ pub struct ModelRequest {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ModelResponse {
     pub message: Message,
+    pub tool_calls: Vec<ModelToolCall>,
     pub usage: Usage,
+}
+
+/// Provider-neutral, bounded model request to invoke one named Tool.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ModelToolCall {
+    name: CanonicalId,
+    arguments_json: Arc<str>,
+    provider_call_id: Option<Arc<str>>,
+}
+
+impl ModelToolCall {
+    pub fn new(
+        name: impl Into<String>,
+        arguments_json: impl Into<String>,
+    ) -> Result<Self, ModelError> {
+        let name = CanonicalId::new(name.into())
+            .map_err(|_| ModelError::InvalidRequest("invalid model tool call name"))?;
+        let arguments_json = arguments_json.into();
+        if arguments_json.is_empty() || arguments_json.len() > MAX_MODEL_TOOL_ARGUMENT_BYTES {
+            return Err(ModelError::InvalidRequest(
+                "invalid model tool call arguments",
+            ));
+        }
+        Ok(Self {
+            name,
+            arguments_json: Arc::from(arguments_json),
+            provider_call_id: None,
+        })
+    }
+
+    pub fn with_provider_call_id(
+        mut self,
+        provider_call_id: impl Into<String>,
+    ) -> Result<Self, ModelError> {
+        let provider_call_id = provider_call_id.into();
+        if provider_call_id.is_empty()
+            || provider_call_id.len() > MAX_MODEL_PROVIDER_CALL_ID_BYTES
+            || provider_call_id.bytes().any(|byte| byte.is_ascii_control())
+        {
+            return Err(ModelError::InvalidRequest(
+                "invalid provider model tool call id",
+            ));
+        }
+        self.provider_call_id = Some(Arc::from(provider_call_id));
+        Ok(self)
+    }
+
+    pub fn name(&self) -> &str {
+        self.name.as_str()
+    }
+
+    pub fn arguments_json(&self) -> &str {
+        &self.arguments_json
+    }
+
+    pub fn provider_call_id(&self) -> Option<&str> {
+        self.provider_call_id.as_deref()
+    }
+
+    fn encoded_bytes(&self) -> Option<usize> {
+        self.name
+            .as_str()
+            .len()
+            .checked_add(self.arguments_json.len())?
+            .checked_add(
+                self.provider_call_id
+                    .as_ref()
+                    .map_or(0, |value| value.len()),
+            )
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ModelEvent {
     Delta(String),
+    ToolCall(ModelToolCall),
     Completed(Usage),
 }
 
@@ -709,6 +784,7 @@ fn guarded_stream(
         source,
         budget,
         used: 0,
+        tool_calls: 0,
         terminal: false,
         completed: false,
         cancellation,
@@ -721,6 +797,7 @@ struct GuardedModelStream {
     source: ModelStream,
     budget: usize,
     used: usize,
+    tool_calls: usize,
     terminal: bool,
     completed: bool,
     cancellation: CancellationToken,
@@ -766,6 +843,34 @@ impl Stream for GuardedModelStream {
                     }
                 };
                 Poll::Ready(Some(Ok(ModelEvent::Delta(delta))))
+            }
+            Poll::Ready(Some(Ok(ModelEvent::ToolCall(call)))) => {
+                if self.completed {
+                    self.terminal = true;
+                    return Poll::Ready(Some(Err(ModelError::ProtocolViolation(
+                        "tool call after completion event",
+                    ))));
+                }
+                self.tool_calls = match self.tool_calls.checked_add(1) {
+                    Some(total) if total <= MAX_MODEL_TOOL_CALLS => total,
+                    _ => {
+                        self.terminal = true;
+                        return Poll::Ready(Some(Err(ModelError::ProtocolViolation(
+                            "too many model tool calls",
+                        ))));
+                    }
+                };
+                self.used = match call
+                    .encoded_bytes()
+                    .and_then(|bytes| self.used.checked_add(bytes))
+                {
+                    Some(total) if total <= self.budget => total,
+                    _ => {
+                        self.terminal = true;
+                        return Poll::Ready(Some(Err(ModelError::OutputBudgetExceeded)));
+                    }
+                };
+                Poll::Ready(Some(Ok(ModelEvent::ToolCall(call))))
             }
             Poll::Ready(Some(Ok(ModelEvent::Completed(usage)))) => {
                 if self.completed {
@@ -830,6 +935,8 @@ where
         )));
     }
     let mut text = String::new();
+    let mut tool_calls = Vec::new();
+    let mut used = 0_usize;
     let mut usage = None;
     while let Some(event) = stream.next().await {
         let event = match event {
@@ -851,13 +958,34 @@ where
                         "delta after completion event",
                     )));
                 }
-                if text.len().saturating_add(delta.len()) > budget {
-                    return Err(StreamCollectionError::Model(
+                used = used
+                    .checked_add(delta.len())
+                    .filter(|total| *total <= budget)
+                    .ok_or(StreamCollectionError::Model(
                         ModelError::OutputBudgetExceeded,
-                    ));
-                }
+                    ))?;
                 text.push_str(&delta);
                 on_delta(&delta).map_err(StreamCollectionError::Consumer)?;
+            }
+            ModelEvent::ToolCall(call) => {
+                if usage.is_some() {
+                    return Err(StreamCollectionError::Model(ModelError::ProtocolViolation(
+                        "tool call after completion event",
+                    )));
+                }
+                if tool_calls.len() == MAX_MODEL_TOOL_CALLS {
+                    return Err(StreamCollectionError::Model(ModelError::ProtocolViolation(
+                        "too many model tool calls",
+                    )));
+                }
+                used = call
+                    .encoded_bytes()
+                    .and_then(|bytes| used.checked_add(bytes))
+                    .filter(|total| *total <= budget)
+                    .ok_or(StreamCollectionError::Model(
+                        ModelError::OutputBudgetExceeded,
+                    ))?;
+                tool_calls.push(call);
             }
             ModelEvent::Completed(value) => {
                 if usage.replace(value).is_some() {
@@ -876,6 +1004,7 @@ where
             role: MessageRole::Assistant,
             content: vec![ContentBlock::Text(text)],
         },
+        tool_calls,
         usage,
     })
 }
@@ -1600,6 +1729,91 @@ mod tests {
     struct InvalidProtocolModel;
 
     #[test]
+    fn model_tool_calls_are_checked_bounded_and_collected_in_order() {
+        assert_eq!(
+            ModelToolCall::new("Invalid", "{}"),
+            Err(ModelError::InvalidRequest("invalid model tool call name"))
+        );
+        assert_eq!(
+            ModelToolCall::new("echo", ""),
+            Err(ModelError::InvalidRequest(
+                "invalid model tool call arguments"
+            ))
+        );
+        assert_eq!(
+            ModelToolCall::new("echo", "x".repeat(MAX_MODEL_TOOL_ARGUMENT_BYTES + 1)),
+            Err(ModelError::InvalidRequest(
+                "invalid model tool call arguments"
+            ))
+        );
+        let first = ModelToolCall::new("echo", r#"{"value":"one"}"#)
+            .unwrap()
+            .with_provider_call_id("provider-1")
+            .unwrap();
+        assert_eq!(first.name(), "echo");
+        assert_eq!(first.arguments_json(), r#"{"value":"one"}"#);
+        assert_eq!(first.provider_call_id(), Some("provider-1"));
+        assert!(matches!(
+            first
+                .clone()
+                .with_provider_call_id("x".repeat(MAX_MODEL_PROVIDER_CALL_ID_BYTES + 1)),
+            Err(ModelError::InvalidRequest(
+                "invalid provider model tool call id"
+            ))
+        ));
+        let second = ModelToolCall::new("echo", r#"{"value":"two"}"#).unwrap();
+        let budget = first.encoded_bytes().unwrap() + second.encoded_bytes().unwrap();
+        let response = run(collect_stream(
+            Box::pin(stream::iter([
+                Ok(ModelEvent::ToolCall(first.clone())),
+                Ok(ModelEvent::ToolCall(second.clone())),
+                Ok(ModelEvent::Completed(Usage::default())),
+            ])),
+            budget,
+        ))
+        .unwrap();
+        assert_eq!(response.tool_calls, vec![first.clone(), second]);
+        assert_eq!(
+            run(collect_stream(
+                Box::pin(stream::iter([
+                    Ok(ModelEvent::ToolCall(first.clone())),
+                    Ok(ModelEvent::Completed(Usage::default())),
+                ])),
+                first.encoded_bytes().unwrap() - 1,
+            )),
+            Err(ModelError::OutputBudgetExceeded)
+        );
+        let too_many =
+            std::iter::repeat_n(Ok(ModelEvent::ToolCall(first)), MAX_MODEL_TOOL_CALLS + 1)
+                .chain(std::iter::once(Ok(ModelEvent::Completed(Usage::default()))))
+                .collect::<Vec<_>>();
+        assert_eq!(
+            run(collect_stream(
+                Box::pin(stream::iter(too_many)),
+                MAX_MODEL_OUTPUT_BYTES,
+            )),
+            Err(ModelError::ProtocolViolation("too many model tool calls"))
+        );
+
+        let guarded_call = ModelToolCall::new("echo", r#"{"value":"guarded"}"#).unwrap();
+        let guarded = guarded_stream(
+            Box::pin(stream::iter([
+                Ok(ModelEvent::ToolCall(guarded_call.clone())),
+                Ok(ModelEvent::Completed(Usage::default())),
+            ])),
+            guarded_call.encoded_bytes().unwrap() - 1,
+            CancellationToken::new(),
+            None,
+            &runtime(),
+        )
+        .unwrap();
+        assert_eq!(
+            run(collect_stream(guarded, MAX_MODEL_OUTPUT_BYTES)),
+            Err(ModelError::OutputBudgetExceeded)
+        );
+    }
+
+    #[test]
     fn default_collector_rejects_delta_after_completion() {
         let stream = Box::pin(stream::iter([
             Ok(ModelEvent::Completed(Usage::default())),
@@ -1624,6 +1838,19 @@ mod tests {
             run(collect_stream(stream, MAX_MODEL_OUTPUT_BYTES)),
             Err(ModelError::ProtocolViolation(
                 "error after completion event"
+            ))
+        );
+
+        let stream = Box::pin(stream::iter([
+            Ok(ModelEvent::Completed(Usage::default())),
+            Ok(ModelEvent::ToolCall(
+                ModelToolCall::new("echo", "{}").unwrap(),
+            )),
+        ]));
+        assert_eq!(
+            run(collect_stream(stream, MAX_MODEL_OUTPUT_BYTES)),
+            Err(ModelError::ProtocolViolation(
+                "tool call after completion event"
             ))
         );
     }
