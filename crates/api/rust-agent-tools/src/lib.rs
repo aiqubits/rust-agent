@@ -79,6 +79,12 @@ impl ToolDefinition {
                 "tool input schema is too large",
             ));
         }
+        if policy::effects_require_mutating(static_effects) && static_safety < ToolSafety::Mutating
+        {
+            return Err(ToolRegistrationError::InvalidPolicy(
+                ToolPolicyBuildError::SafetyNotMonotonic,
+            ));
+        }
         call_policy
             .validate_bounded(static_safety)
             .map_err(ToolRegistrationError::InvalidPolicy)?;
@@ -122,6 +128,13 @@ impl ToolDefinition {
     }
 
     fn validate_again(&self) -> Result<(), ToolRegistrationError> {
+        if policy::effects_require_mutating(self.static_effects)
+            && self.static_safety < ToolSafety::Mutating
+        {
+            return Err(ToolRegistrationError::InvalidPolicy(
+                ToolPolicyBuildError::SafetyNotMonotonic,
+            ));
+        }
         self.call_policy
             .validate_bounded(self.static_safety)
             .map_err(ToolRegistrationError::InvalidPolicy)?;
@@ -495,6 +508,21 @@ mod tests {
                     .unwrap(),
             ),
             Err(ToolRegistrationError::InvalidDefinition(_))
+        ));
+        assert!(matches!(
+            ToolDefinition::new(
+                "network-reader",
+                "misclassified network tool",
+                json!({}),
+                ToolSafety::ReadOnly,
+                SecurityEffects::NETWORK,
+                ToolCallPolicy::builder(ToolConcurrencyRule::Exclusive)
+                    .build()
+                    .unwrap(),
+            ),
+            Err(ToolRegistrationError::InvalidPolicy(
+                ToolPolicyBuildError::SafetyNotMonotonic
+            ))
         ));
         assert!(matches!(
             ToolRegistrationSnapshot::new(

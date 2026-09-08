@@ -21,6 +21,24 @@ binding = "singleton"
 scope = "agent"
 
 [[capabilities]]
+id = "cap:permission-policy"
+api-package = "rust-agent-policy"
+rust-api = "rust_agent_policy::PermissionPolicy"
+binding-type = "rust_agent_policy::PermissionPolicyBinding"
+binding-adapter = "rust_agent_policy::PermissionPolicyBinding::from_provider"
+binding = "singleton"
+scope = "agent"
+
+[[capabilities]]
+id = "cap:approval"
+api-package = "rust-agent-policy"
+rust-api = "rust_agent_policy::Approval"
+binding-type = "rust_agent_policy::ApprovalBinding"
+binding-adapter = "rust_agent_policy::ApprovalBinding::from_provider"
+binding = "singleton"
+scope = "app"
+
+[[capabilities]]
 id = "cap:lifecycle-observer"
 api-package = "rust-agent-runtime-api"
 rust-api = "rust_agent_runtime_api::LifecycleObserver"
@@ -160,6 +178,29 @@ security = []
 runtime-primitives = []
 build-requirements = { executables = [], read-inputs = [], environment = [] }
 app-coexistence = { mode = "concurrent-independent", evidence = { source = "coexistence-evidence.toml", algorithm = "sha256", digest = "56b67f9cdfb997c9b7bcb696854a733dabb26912f9731c4c04d3b753a6f6d378", reviewer-policy = "phase-2-runtime-review-v1" } }
+cargo-features = []
+
+[[components]]
+id = "permission-default"
+package = "rust-agent-permission-default"
+package-path = "crates/components/permission-default"
+scope = "agent"
+factory = "rust_agent_permission_default::build"
+dependencies-type = "rust_agent_permission_default::Dependencies"
+config-type = "rust_agent_permission_default::Config"
+config-source = "none"
+targets = "cfg(true)"
+target-support = [
+    { predicate = 'cfg(target_os = "linux")', tier = "production" },
+    { predicate = 'cfg(not(target_os = "linux"))', tier = "experimental" },
+]
+lifecycle-effects = []
+provides = [{ capability = "cap:permission-policy", priority = 100, effects = [] }]
+requires = []
+conflicts = []
+security = []
+runtime-primitives = []
+build-requirements = { executables = [], read-inputs = [], environment = [] }
 cargo-features = []
 
 [[components]]

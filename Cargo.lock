@@ -1040,6 +1040,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "rust-agent-permission-default"
+version = "0.1.0"
+dependencies = [
+ "rust-agent-core",
+ "rust-agent-policy",
+ "rust-agent-runtime-api",
+]
+
+[[package]]
+name = "rust-agent-policy"
+version = "0.1.0"
+dependencies = [
+ "rust-agent-core",
+ "rust-agent-runtime-api",
+ "trybuild",
+]
+
+[[package]]
 name = "rust-agent-runtime-api"
 version = "0.1.0"
 dependencies = [

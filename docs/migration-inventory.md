@@ -10,3 +10,4 @@ the checked-out AINS tree.
 | 3.1 | `AINS/crates/rust-agent/src/tools/outputs.rs` | `rust-agent-tools` | Inline output item/byte/depth admission before retention; UTF-8-safe error bounds | Complete |
 | 3.1 | `AINS/crates/rust-agent/src/tools/runtime.rs` | `rust-agent-tools` | Deterministic registration identity and duplicate-name rejection; execution pipeline intentionally remains in later Phase 3 slices | Partial |
 | 3.1 | `AINS/crates/rust-agent/tests/tool_runtime.rs` | `rust-agent-tools` unit and compile-fail suites | Registration, output budget and private-boundary regression shape without legacy `AgentKernel`/`ToolRuntime` imports | Complete |
+| 3.2 | `AINS/crates/rust-agent/src/policy/permission_engine.rs` | `rust-agent-policy` and `permission-default` | Three-state allow/ask/deny seam; the default provider allows read-only actions and requires approval for higher-risk actions without importing mutable AINS mode/path state | Complete |

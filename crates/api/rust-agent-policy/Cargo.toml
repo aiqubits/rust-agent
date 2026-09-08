@@ -1,0 +1,43 @@
+[package]
+name = "rust-agent-policy"
+description = "Permission and approval capability contracts for rust-agent"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[package.metadata.rust-agent.build-requirements]
+schema = 1
+executables = []
+read-inputs = []
+environment = []
+
+[[package.metadata.rust-agent.capability]]
+id = "cap:permission-policy"
+api = "rust_agent_policy::PermissionPolicy"
+binding-type = "rust_agent_policy::PermissionPolicyBinding"
+binding-adapter = "rust_agent_policy::PermissionPolicyBinding::from_provider"
+binding = "singleton"
+scope = "agent"
+
+[[package.metadata.rust-agent.capability]]
+id = "cap:approval"
+api = "rust_agent_policy::Approval"
+binding-type = "rust_agent_policy::ApprovalBinding"
+binding-adapter = "rust_agent_policy::ApprovalBinding::from_provider"
+binding = "singleton"
+scope = "app"
+
+[features]
+default = []
+
+[dependencies]
+rust-agent-core = { version = "0.1.0", path = "../rust-agent-core", default-features = false }
+rust-agent-runtime-api = { version = "0.1.0", path = "../rust-agent-runtime-api", default-features = false }
+
+[dev-dependencies]
+trybuild = "1.0.110"
+
+[lints]
+workspace = true

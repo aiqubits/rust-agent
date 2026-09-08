@@ -1,0 +1,5 @@
+error[E0616]: field `provider` of struct `PermissionPolicyBinding` is private
+  --> tests/ui/access_raw_provider.rs:15:29
+   |
+15 |     let _provider = binding.provider;
+   |                             ^^^^^^^^ private field

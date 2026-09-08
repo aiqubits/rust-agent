@@ -312,8 +312,22 @@ impl ToolRiskRule {
         if steps != self.evaluator_steps || steps > MAX_TOOL_POLICY_EVALUATOR_STEPS {
             return Err(ToolPolicyBuildError::EvaluatorStepsExceeded);
         }
+        if effects_require_mutating(self.add_effects) && self.raise_to < ToolSafety::Mutating {
+            return Err(ToolPolicyBuildError::SafetyNotMonotonic);
+        }
         Ok(())
     }
+}
+
+pub(crate) fn effects_require_mutating(effects: SecurityEffects) -> bool {
+    let mut effect_floor = SecurityEffects::WRITE_LOCAL;
+    effect_floor |= SecurityEffects::NETWORK;
+    effect_floor |= SecurityEffects::PROCESS_EXEC;
+    effect_floor |= SecurityEffects::REMOTE_EXEC;
+    effect_floor |= SecurityEffects::SECRET_ACCESS;
+    effect_floor |= SecurityEffects::CODE_EXEC;
+    effect_floor |= SecurityEffects::MCP_CONNECT;
+    effects.bits() & effect_floor.bits() != 0
 }
 
 #[derive(Debug)]
@@ -668,6 +682,12 @@ mod tests {
         let policy = builder.build().unwrap();
         assert_eq!(
             policy.validate_bounded(ToolSafety::Mutating),
+            Err(ToolPolicyBuildError::SafetyNotMonotonic)
+        );
+
+        let effectful = ToolRiskRule::builder(ToolSafety::ReadOnly, SecurityEffects::NETWORK);
+        assert_eq!(
+            effectful.build(),
             Err(ToolPolicyBuildError::SafetyNotMonotonic)
         );
     }

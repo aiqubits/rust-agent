@@ -1,7 +1,7 @@
 {
   "schema": 2,
   "algorithm": "sha256-rust-agent-composition-v2",
-  "composition-hash": "96ceb8ca879f6de2ea03c744e90a727089c358c0fc407a9908a42dbfc010e189",
+  "composition-hash": "3e7846d4ecb859068b25f08340437e7509147b439b721ca1a2de5cce9953b71f",
   "build-kind": "wasm",
   "profile-name": "fixture-wasm-js",
   "normalized-profile": {
@@ -190,6 +190,15 @@
           "scope": "agent"
         },
         {
+          "id": "cap:approval",
+          "api-package": "rust-agent-policy",
+          "rust-api": "rust_agent_policy::Approval",
+          "binding-type": "rust_agent_policy::ApprovalBinding",
+          "binding-adapter": "rust_agent_policy::ApprovalBinding::from_provider",
+          "binding": "singleton",
+          "scope": "app"
+        },
+        {
           "id": "cap:fixture-build-proof",
           "api-package": "rust-agent-fixture-api",
           "rust-api": "rust_agent_fixture_api::BuildProof",
@@ -242,6 +251,15 @@
           "binding-adapter": "rust_agent_model::ModelProviderBinding::from_provider",
           "binding": "registry",
           "scope": "app"
+        },
+        {
+          "id": "cap:permission-policy",
+          "api-package": "rust-agent-policy",
+          "rust-api": "rust_agent_policy::PermissionPolicy",
+          "binding-type": "rust_agent_policy::PermissionPolicyBinding",
+          "binding-adapter": "rust_agent_policy::PermissionPolicyBinding::from_provider",
+          "binding": "singleton",
+          "scope": "agent"
         }
       ],
       "components": [
@@ -800,6 +818,55 @@
             }
           },
           "cargo-features": []
+        },
+        {
+          "id": "permission-default",
+          "package": "rust-agent-permission-default",
+          "package-path": "crates/components/permission-default",
+          "scope": "agent",
+          "factory": "rust_agent_permission_default::build",
+          "dependencies-type": "rust_agent_permission_default::Dependencies",
+          "config-type": "rust_agent_permission_default::Config",
+          "config-source": "none",
+          "config-key": null,
+          "resource-namespace-preparer": null,
+          "prepared-config-type": null,
+          "targets": "cfg(true)",
+          "target-support": [
+            {
+              "predicate": "cfg(not(target_os = \"linux\"))",
+              "tier": "experimental"
+            },
+            {
+              "predicate": "cfg(target_os = \"linux\")",
+              "tier": "production"
+            }
+          ],
+          "lifecycle-effects": [],
+          "provides": [
+            {
+              "capability": "cap:permission-policy",
+              "key": null,
+              "priority": 100,
+              "order": 0,
+              "layer": "provider",
+              "resource-namespace": {
+                "mode": "none"
+              },
+              "effects": []
+            }
+          ],
+          "requires": [],
+          "conflicts": [],
+          "security": [],
+          "runtime-primitives": [],
+          "build-requirements": {
+            "executables": [],
+            "read-inputs": [],
+            "environment": []
+          },
+          "app-coexistence": null,
+          "cargo-features": []
         }
       ],
       "runtime-adapters": [
@@ -958,7 +1025,7 @@
         }
       ]
     },
-    "normalized-catalog-digest": "53d0434f969b61e5032cbf70cc5eea44a92e8542cdd9e2c0eb722c4be63aa6e3",
+    "normalized-catalog-digest": "ad028d35b783e7da34220de85389476e4383d10c2c162878240b0fd05cb42153",
     "catalog-trust-input": {
       "schema": 1,
       "normalized-policy": {
@@ -1223,6 +1290,11 @@
         "read-inputs": [],
         "environment": []
       },
+      "rust-agent-policy": {
+        "executables": [],
+        "read-inputs": [],
+        "environment": []
+      },
       "rust-agent-runtime-api": {
         "executables": [],
         "read-inputs": [],
@@ -1234,7 +1306,7 @@
         "environment": []
       }
     },
-    "identity-digest": "dec645e4170a176cb4f9ee5cb676d2cf2e119693287597910c6cf6657078db92"
+    "identity-digest": "0359eb6f6359cfa797ba2df1980cd83cd268f8c4adc7e6af169607118e05efc6"
   },
   "custom-target-spec": null,
   "selected-components": [
@@ -1449,6 +1521,13 @@
       },
       {
         "component": "model-replay",
+        "conclusion": "excluded",
+        "reasons": [
+          "NotRequired"
+        ]
+      },
+      {
+        "component": "permission-default",
         "conclusion": "excluded",
         "reasons": [
           "NotRequired"
@@ -2581,12 +2660,12 @@
     },
     {
       "path": "generator-inputs.json",
-      "digest": "7e49a7140a0e183191566d41f46385c0aaff3e83e0e80782ae675520eddc6655",
-      "bytes": 39201
+      "digest": "1f0779c47e3c95848badd3a5f51cc642b1319e34b67aa494c2c614e04966d485",
+      "bytes": 41519
     },
     {
       "path": "src/lib.rs",
-      "digest": "6a308e206a37f3df677746f19eb34287ad2ef9238cdbfed13594bdf3c2cc198c",
+      "digest": "2ae056f1e75c3f35cc2423cedb477330a76c75852b285069468ee66bfec57523",
       "bytes": 3622
     },
     {

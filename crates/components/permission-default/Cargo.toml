@@ -1,0 +1,41 @@
+[package]
+name = "rust-agent-permission-default"
+description = "Conservative default permission policy Component"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[package.metadata.rust-agent]
+schema = 1
+id = "permission-default"
+scope = "agent"
+factory = "rust_agent_permission_default::build"
+dependencies-type = "rust_agent_permission_default::Dependencies"
+config-type = "rust_agent_permission_default::Config"
+config-source = "none"
+targets = ["cfg(true)"]
+target-support = [
+    { predicate = 'cfg(target_os = "linux")', tier = "production" },
+    { predicate = 'cfg(not(target_os = "linux"))', tier = "experimental" },
+]
+lifecycle-effects = []
+provides = [{ capability = "cap:permission-policy", priority = 100, effects = [] }]
+requires = []
+conflicts = []
+security = []
+runtime-primitives = []
+build-requirements = { executables = [], read-inputs = [], environment = [] }
+cargo-features = []
+
+[features]
+default = []
+
+[dependencies]
+rust-agent-core = { version = "0.1.0", path = "../../api/rust-agent-core", default-features = false }
+rust-agent-policy = { version = "0.1.0", path = "../../api/rust-agent-policy", default-features = false }
+rust-agent-runtime-api = { version = "0.1.0", path = "../../api/rust-agent-runtime-api", default-features = false }
+
+[lints]
+workspace = true
