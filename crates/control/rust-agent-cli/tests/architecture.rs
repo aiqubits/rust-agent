@@ -79,6 +79,7 @@ fn phase_three_tool_api_dependency_and_privacy_boundary_is_isolated() {
     assert_eq!(
         dependencies,
         [
+            "rust-agent-commands",
             "rust-agent-core",
             "rust-agent-policy",
             "rust-agent-runtime-api",
@@ -107,7 +108,6 @@ fn phase_three_tool_api_dependency_and_privacy_boundary_is_isolated() {
     for forbidden in [
         "AINS",
         "rust-agent-agent",
-        "rust-agent-commands",
         "rust-agent-driver-",
         "rust-agent-model",
         "rust-agent-session",
@@ -120,6 +120,8 @@ fn phase_three_tool_api_dependency_and_privacy_boundary_is_isolated() {
     }
 
     let source = fs::read_to_string(root.join("crates/api/rust-agent-tools/src/lib.rs")).unwrap();
+    let commands =
+        fs::read_to_string(root.join("crates/api/rust-agent-commands/src/lib.rs")).unwrap();
     let registry =
         fs::read_to_string(root.join("crates/api/rust-agent-tools/src/registry.rs")).unwrap();
     let execution =
@@ -128,12 +130,53 @@ fn phase_three_tool_api_dependency_and_privacy_boundary_is_isolated() {
         fs::read_to_string(root.join("crates/api/rust-agent-tools/src/middleware.rs")).unwrap();
     assert!(source.contains("pub struct ExecutionPermit"));
     assert!(source.contains("pub fn prepare_nested<'a>("));
+    assert!(commands.contains("pub struct CommandPermit"));
+    assert!(commands.contains("pub struct CommandToolGrant<'a>"));
+    assert!(commands.contains("PhantomData<&'a mut &'a ()>"));
+    assert!(execution.contains("fn prepare_command<'a>("));
     assert!(registry.contains("handler: Arc<dyn crate::Tool>"));
     assert!(!registry.contains("pub handler:"));
     assert!(execution.contains("PhantomData<&'a mut &'a ()>"));
     assert_eq!(execution.matches(".handler().execute(").count(), 1);
-    for checked in [&source, &registry, &execution, &middleware] {
+    for checked in [&source, &commands, &registry, &execution, &middleware] {
         assert!(!checked.contains("unsafe"));
+    }
+
+    let commands_manifest: Value = toml::from_str(
+        &fs::read_to_string(root.join("crates/api/rust-agent-commands/Cargo.toml")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        commands_manifest["dependencies"]
+            .as_table()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>(),
+        ["rust-agent-core", "rust-agent-runtime-api"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
+    );
+    let output = Command::new("cargo")
+        .args([
+            "tree",
+            "-p",
+            "rust-agent-commands",
+            "--edges",
+            "normal",
+            "--no-default-features",
+        ])
+        .current_dir(&root)
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let tree = String::from_utf8(output.stdout).unwrap();
+    for forbidden in ["rust-agent-agent", "rust-agent-session", "rust-agent-tools"] {
+        assert!(
+            !tree.contains(forbidden),
+            "commands API dependency tree contains forbidden owner {forbidden}:\n{tree}"
+        );
     }
 }
 

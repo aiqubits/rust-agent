@@ -1,0 +1,49 @@
+warning: unreachable expression
+ --> tests/ui/forge_command_authority.rs:4:19
+  |
+4 |       let _permit = CommandPermit {
+  |  ___________________^
+5 | |         authority: unreachable!(),
+  | |                    -------------- any code following this expression is unreachable
+6 | |     };
+  | |_____^ unreachable expression
+  |
+  = note: `#[warn(unreachable_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: unreachable expression
+ --> tests/ui/forge_command_authority.rs:7:20
+  |
+7 |       let _context = CommandContext {
+  |  ____________________^
+8 | |         authority: unreachable!(),
+  | |                    -------------- any code following this expression is unreachable
+9 | |     };
+  | |_____^ unreachable expression
+
+error[E0451]: field `authority` of struct `CommandPermit` is private
+ --> tests/ui/forge_command_authority.rs:5:9
+  |
+4 |     let _permit = CommandPermit {
+  |                   ------------- in this type
+5 |         authority: unreachable!(),
+  |         ^^^^^^^^^ private field
+
+error[E0451]: field `authority` of struct `CommandContext` is private
+ --> tests/ui/forge_command_authority.rs:8:9
+  |
+7 |     let _context = CommandContext {
+  |                    -------------- in this type
+8 |         authority: unreachable!(),
+  |         ^^^^^^^^^ private field
+
+error: type `rust_agent_commands::CommandAuthority` is private
+ --> tests/ui/forge_command_authority.rs:5:20
+  |
+5 |         authority: unreachable!(),
+  |                    ^^^^^^^^^^^^^^ private type
+
+error: type `rust_agent_commands::CommandAuthority` is private
+ --> tests/ui/forge_command_authority.rs:8:20
+  |
+8 |         authority: unreachable!(),
+  |                    ^^^^^^^^^^^^^^ private type

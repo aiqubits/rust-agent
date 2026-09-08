@@ -1762,6 +1762,17 @@ impl RuntimePrimitiveBindings {
         self.allowed.binary_search(&primitive).is_ok()
     }
 
+    pub fn same_projection_identity(&self, other: &Self) -> bool {
+        if self.allowed != other.allowed {
+            return false;
+        }
+        match (&self.runtime, &other.runtime) {
+            (Some(left), Some(right)) => left.same_bundle_identity(right),
+            (None, None) => true,
+            _ => false,
+        }
+    }
+
     pub fn now(&self) -> Result<RuntimeInstant, RuntimePrimitiveError> {
         self.require(RuntimePrimitiveKind::Clock)?.now()
     }
@@ -3068,6 +3079,29 @@ mod tests {
         .unwrap();
         assert!(projection.has(RuntimePrimitiveKind::Clock));
         assert!(!projection.has(RuntimePrimitiveKind::Sleep));
+        assert!(projection.same_projection_identity(&projection.clone()));
+        assert!(
+            RuntimePrimitiveBindings::none()
+                .same_projection_identity(&RuntimePrimitiveBindings::none())
+        );
+        assert!(
+            !projection.same_projection_identity(
+                &RuntimePrimitiveBindings::projected(
+                    runtime.clone(),
+                    &[RuntimePrimitiveKind::Clock],
+                )
+                .unwrap()
+            )
+        );
+        assert!(
+            !projection.same_projection_identity(
+                &RuntimePrimitiveBindings::projected(
+                    explicit_runtime(),
+                    &[RuntimePrimitiveKind::Clock, RuntimePrimitiveKind::Spawn],
+                )
+                .unwrap()
+            )
+        );
         assert!(projection.now().is_ok());
         assert!(matches!(
             projection.sleep_until(runtime.now().unwrap()),

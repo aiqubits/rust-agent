@@ -1,0 +1,12 @@
+error: lifetime may not live long enough
+ --> tests/ui/command_tool_grant_cannot_escape.rs:7:5
+  |
+3 | fn escape<'a>(
+  |           -- lifetime `'a` defined here
+...
+7 |     permit.delegate_tools(context).unwrap()
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ returning this value requires that `'a` must outlive `'static`
+  |
+  = note: requirement occurs because of the type `CommandToolGrant<'_>`, which makes the generic argument `'_` invariant
+  = note: the struct `CommandToolGrant<'a>` is invariant over the parameter `'a`
+  = help: see <https://doc.rust-lang.org/nomicon/subtyping.html> for more information about variance

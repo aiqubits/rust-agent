@@ -1,5 +1,6 @@
 use std::{fmt, sync::Arc};
 
+use rust_agent_commands::CommandInvocationId;
 use rust_agent_core::{CallId, CanonicalId, Digest, MaybeSendSync, SecurityEffects};
 use rust_agent_runtime_api::{CancellationToken, RuntimeInstant};
 
@@ -40,6 +41,15 @@ pub enum ToolMiddlewareErrorKind {
     Policy,
     Execution,
     Observer,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ToolExecutionOrigin {
+    ModelStep(StepId),
+    Command {
+        invocation_id: CommandInvocationId,
+        caller_digest: Digest,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -96,7 +106,7 @@ fn floor_char_boundary(value: &str, mut index: usize) -> usize {
 #[derive(Clone, Debug)]
 pub struct ToolMiddlewareContext {
     call_id: CallId,
-    step: StepId,
+    origin: ToolExecutionOrigin,
     tool_name: Arc<str>,
     arguments_digest: Digest,
     safety: ToolSafety,
@@ -108,7 +118,7 @@ pub struct ToolMiddlewareContext {
 
 pub(crate) struct ToolMiddlewareContextInput {
     pub(crate) call_id: CallId,
-    pub(crate) step: StepId,
+    pub(crate) origin: ToolExecutionOrigin,
     pub(crate) tool_name: Arc<str>,
     pub(crate) arguments_digest: Digest,
     pub(crate) safety: ToolSafety,
@@ -122,7 +132,7 @@ impl ToolMiddlewareContext {
     pub(crate) fn from_guarded_call(input: ToolMiddlewareContextInput) -> Self {
         Self {
             call_id: input.call_id,
-            step: input.step,
+            origin: input.origin,
             tool_name: input.tool_name,
             arguments_digest: input.arguments_digest,
             safety: input.safety,
@@ -137,8 +147,15 @@ impl ToolMiddlewareContext {
         self.call_id
     }
 
-    pub const fn step(&self) -> StepId {
-        self.step
+    pub const fn origin(&self) -> ToolExecutionOrigin {
+        self.origin
+    }
+
+    pub const fn step(&self) -> Option<StepId> {
+        match self.origin {
+            ToolExecutionOrigin::ModelStep(step) => Some(step),
+            ToolExecutionOrigin::Command { .. } => None,
+        }
     }
 
     pub fn tool_name(&self) -> &str {

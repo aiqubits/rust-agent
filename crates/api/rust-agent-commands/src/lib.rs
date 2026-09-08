@@ -1,17 +1,23 @@
-//! Command DTOs and the Phase 2 empty guarded dispatcher.
+//! Command DTOs, the Phase 2 empty guarded dispatcher, and opaque Tool delegation authority.
 
 use std::{
     fmt,
     future::Future,
-    num::NonZeroU64,
+    marker::PhantomData,
+    num::{NonZeroU64, NonZeroUsize},
     pin::Pin,
     sync::{Arc, Weak},
 };
 
-use rust_agent_core::{AgentId, Digest};
-use rust_agent_runtime_api::{AgentLifecycleNonce, CommandAdmissionError, CommandAdmissionGate};
+use rust_agent_core::{AgentId, Digest, SecurityEffects};
+use rust_agent_runtime_api::{
+    AgentLifecycleNonce, CancellationToken, CommandAdmissionError, CommandAdmissionGate,
+    RuntimeInstant, RuntimePrimitiveBindings,
+};
 
 pub const MAX_COMMAND_ARGUMENT_BYTES: usize = 64 * 1024;
+pub const MAX_COMMAND_TOOL_CALLS: usize = 64;
+pub const MAX_COMMAND_TOOL_OUTPUT_BYTES: usize = 256 * 1024;
 
 #[cfg(not(target_arch = "wasm32"))]
 pub type CommandFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
@@ -59,6 +65,209 @@ impl CommandInvocationId {
         self.sequence.get()
     }
 }
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CommandToolBudget {
+    max_calls: NonZeroUsize,
+    max_output_bytes: NonZeroUsize,
+}
+
+impl CommandToolBudget {
+    pub fn checked(
+        max_calls: NonZeroUsize,
+        max_output_bytes: NonZeroUsize,
+    ) -> Result<Self, CommandDelegationError> {
+        if max_calls.get() > MAX_COMMAND_TOOL_CALLS {
+            return Err(CommandDelegationError::BudgetExceeded("max_calls"));
+        }
+        if max_output_bytes.get() > MAX_COMMAND_TOOL_OUTPUT_BYTES {
+            return Err(CommandDelegationError::BudgetExceeded("max_output_bytes"));
+        }
+        Ok(Self {
+            max_calls,
+            max_output_bytes,
+        })
+    }
+
+    pub const fn max_calls(self) -> NonZeroUsize {
+        self.max_calls
+    }
+
+    pub const fn max_output_bytes(self) -> NonZeroUsize {
+        self.max_output_bytes
+    }
+}
+
+struct CommandAuthority {
+    invocation_id: CommandInvocationId,
+    caller_digest: Digest,
+    cancellation: CancellationToken,
+    deadline: Option<RuntimeInstant>,
+    tool_budget: CommandToolBudget,
+    effect_ceiling: SecurityEffects,
+    tool_executor_digest: Digest,
+    runtime: RuntimePrimitiveBindings,
+}
+
+/// Opaque authority created only by guarded command dispatch after its journal gate.
+pub struct CommandPermit {
+    authority: Arc<CommandAuthority>,
+}
+
+impl fmt::Debug for CommandPermit {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CommandPermit")
+            .field("invocation_id", &self.authority.invocation_id)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Immutable execution context paired with the current opaque command permit.
+pub struct CommandContext {
+    authority: Arc<CommandAuthority>,
+}
+
+impl fmt::Debug for CommandContext {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CommandContext")
+            .field("invocation_id", &self.authority.invocation_id)
+            .finish_non_exhaustive()
+    }
+}
+
+impl CommandContext {
+    pub fn invocation_id(&self) -> CommandInvocationId {
+        self.authority.invocation_id
+    }
+
+    pub fn caller_digest(&self) -> Digest {
+        self.authority.caller_digest
+    }
+
+    pub fn cancellation(&self) -> CancellationToken {
+        self.authority.cancellation.clone()
+    }
+
+    pub fn deadline(&self) -> Option<RuntimeInstant> {
+        self.authority.deadline
+    }
+}
+
+/// Tool authority borrowed from the exact current command permit and context.
+pub struct CommandToolGrant<'a> {
+    permit: &'a CommandPermit,
+    _authority: PhantomData<&'a mut &'a ()>,
+}
+
+impl fmt::Debug for CommandToolGrant<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CommandToolGrant")
+            .field("invocation_id", &self.permit.authority.invocation_id)
+            .finish_non_exhaustive()
+    }
+}
+
+impl CommandToolGrant<'_> {
+    pub fn invocation_id(&self) -> CommandInvocationId {
+        self.permit.authority.invocation_id
+    }
+
+    pub fn caller_digest(&self) -> Digest {
+        self.permit.authority.caller_digest
+    }
+
+    pub fn cancellation(&self) -> CancellationToken {
+        self.permit.authority.cancellation.clone()
+    }
+
+    pub fn deadline(&self) -> Option<RuntimeInstant> {
+        self.permit.authority.deadline
+    }
+
+    pub fn tool_budget(&self) -> CommandToolBudget {
+        self.permit.authority.tool_budget
+    }
+
+    pub fn effect_ceiling(&self) -> SecurityEffects {
+        self.permit.authority.effect_ceiling
+    }
+
+    pub fn tool_executor_digest(&self) -> Digest {
+        self.permit.authority.tool_executor_digest
+    }
+
+    pub fn matches_runtime(&self, runtime: &RuntimePrimitiveBindings) -> bool {
+        self.permit
+            .authority
+            .runtime
+            .same_projection_identity(runtime)
+    }
+}
+
+impl CommandPermit {
+    pub fn delegate_tools<'a>(
+        &'a self,
+        context: &'a CommandContext,
+    ) -> Result<CommandToolGrant<'a>, CommandDelegationError> {
+        if !Arc::ptr_eq(&self.authority, &context.authority) {
+            return Err(CommandDelegationError::AuthorityMismatch);
+        }
+        if self.authority.cancellation.is_cancelled() {
+            return Err(CommandDelegationError::Cancelled);
+        }
+        if let Some(deadline) = self.authority.deadline
+            && self
+                .authority
+                .runtime
+                .now()
+                .map_err(|_| CommandDelegationError::RuntimeUnavailable)?
+                >= deadline
+        {
+            return Err(CommandDelegationError::DeadlineExceeded);
+        }
+        Ok(CommandToolGrant {
+            permit: self,
+            _authority: PhantomData,
+        })
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CommandDelegationError {
+    BudgetExceeded(&'static str),
+    AuthorityMismatch,
+    Cancelled,
+    DeadlineExceeded,
+    RuntimeUnavailable,
+}
+
+impl fmt::Display for CommandDelegationError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::BudgetExceeded(field) => {
+                write!(
+                    formatter,
+                    "command tool budget `{field}` exceeds its hard ceiling"
+                )
+            }
+            Self::AuthorityMismatch => {
+                formatter.write_str("command context does not match the current permit")
+            }
+            Self::Cancelled => formatter.write_str("command tool delegation was cancelled"),
+            Self::DeadlineExceeded => {
+                formatter.write_str("command tool delegation deadline exceeded")
+            }
+            Self::RuntimeUnavailable => {
+                formatter.write_str("command tool delegation runtime is unavailable")
+            }
+        }
+    }
+}
+
+impl std::error::Error for CommandDelegationError {}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CommandRequest {
@@ -264,6 +473,84 @@ mod tests {
             "{}",
             Digest::from_bytes([1; 32]),
         )
+    }
+
+    fn command_authority(cancellation: CancellationToken) -> Arc<CommandAuthority> {
+        Arc::new(CommandAuthority {
+            invocation_id: CommandInvocationId::from_agent(
+                agent(1),
+                lifecycle(1),
+                NonZeroU64::new(9).unwrap(),
+            ),
+            caller_digest: Digest::from_bytes([7; 32]),
+            cancellation,
+            deadline: None,
+            tool_budget: CommandToolBudget::checked(
+                NonZeroUsize::new(4).unwrap(),
+                NonZeroUsize::new(4096).unwrap(),
+            )
+            .unwrap(),
+            effect_ceiling: SecurityEffects::READ_LOCAL,
+            tool_executor_digest: Digest::from_bytes([8; 32]),
+            runtime: RuntimePrimitiveBindings::none(),
+        })
+    }
+
+    #[test]
+    fn command_tool_budget_and_exact_permit_delegation_are_bounded() {
+        assert_eq!(
+            CommandToolBudget::checked(
+                NonZeroUsize::new(MAX_COMMAND_TOOL_CALLS + 1).unwrap(),
+                NonZeroUsize::new(1).unwrap(),
+            ),
+            Err(CommandDelegationError::BudgetExceeded("max_calls"))
+        );
+        assert_eq!(
+            CommandToolBudget::checked(
+                NonZeroUsize::new(1).unwrap(),
+                NonZeroUsize::new(MAX_COMMAND_TOOL_OUTPUT_BYTES + 1).unwrap(),
+            ),
+            Err(CommandDelegationError::BudgetExceeded("max_output_bytes"))
+        );
+
+        let authority = command_authority(CancellationToken::new());
+        let permit = CommandPermit {
+            authority: Arc::clone(&authority),
+        };
+        let context = CommandContext {
+            authority: Arc::clone(&authority),
+        };
+        let grant = permit.delegate_tools(&context).unwrap();
+        assert_eq!(grant.invocation_id(), authority.invocation_id);
+        assert_eq!(grant.caller_digest(), authority.caller_digest);
+        assert_eq!(grant.effect_ceiling(), SecurityEffects::READ_LOCAL);
+        assert_eq!(grant.tool_executor_digest(), Digest::from_bytes([8; 32]));
+        assert_eq!(grant.tool_budget(), authority.tool_budget);
+        assert!(grant.deadline().is_none());
+        assert!(!grant.cancellation().is_cancelled());
+        assert!(grant.matches_runtime(&authority.runtime));
+
+        let foreign = CommandContext {
+            authority: command_authority(CancellationToken::new()),
+        };
+        assert!(matches!(
+            permit.delegate_tools(&foreign),
+            Err(CommandDelegationError::AuthorityMismatch)
+        ));
+
+        let cancellation = CancellationToken::new();
+        let cancelled_authority = command_authority(cancellation.clone());
+        let cancelled_permit = CommandPermit {
+            authority: Arc::clone(&cancelled_authority),
+        };
+        let cancelled_context = CommandContext {
+            authority: cancelled_authority,
+        };
+        cancellation.cancel();
+        assert!(matches!(
+            cancelled_permit.delegate_tools(&cancelled_context),
+            Err(CommandDelegationError::Cancelled)
+        ));
     }
 
     #[test]

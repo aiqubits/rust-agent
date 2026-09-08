@@ -11,6 +11,7 @@ use std::{
     task::Poll,
 };
 
+use rust_agent_commands::CommandToolGrant;
 use rust_agent_core::{
     AgentId, CallId, CompositionHash, Digest, MaybeSendSync, RequestId, SecurityEffects, SessionId,
 };
@@ -19,14 +20,15 @@ use rust_agent_policy::{
     ApprovalRequest, PermissionDecision, PermissionPolicyBinding,
 };
 use rust_agent_runtime_api::{
-    AgentLifecycleNonce, CancellationToken, RuntimeInstant, RuntimePrimitives,
-    ToolCallJournalProjection, ToolCallJournalProof, ToolCallJournalVerifier,
+    AgentLifecycleNonce, CancellationToken, RuntimeFuture, RuntimeInstant,
+    RuntimePrimitiveBindings, RuntimePrimitiveError, RuntimePrimitives, ToolCallJournalProjection,
+    ToolCallJournalProof, ToolCallJournalVerifier,
 };
 use serde_json::Value as JsonValue;
 
 use crate::{
     JsonKind, MAX_TOOL_OUTPUT_BYTES, MAX_TOOL_OUTPUT_ITEMS, MAX_TOOL_OUTPUT_JSON_DEPTH,
-    ToolArgumentPredicate, ToolConcurrencyRule, ToolDefinition, ToolError,
+    ToolArgumentPredicate, ToolConcurrencyRule, ToolDefinition, ToolError, ToolExecutionOrigin,
     ToolMiddlewareBuildError, ToolMiddlewareContext, ToolMiddlewareError, ToolMiddlewareOutcome,
     ToolMiddlewareStage, ToolOutputError, ToolPostPolicyDecision, ToolPrePolicyDecision,
     ToolProviderBinding, ToolProviderError, ToolSafety, ToolValue, ToolValueItem, hash_parts,
@@ -44,6 +46,31 @@ pub const MAX_TOOL_CALLS_PER_STEP: usize = 128;
 pub const MAX_ACTIVE_TOOL_SESSIONS: usize = 64;
 pub const MAX_NESTED_TOOL_DEPTH: u8 = 8;
 pub const MAX_NESTED_TOOL_CALLS: usize = 64;
+
+#[derive(Clone, Debug)]
+enum ToolRuntimeGuard {
+    Direct(RuntimePrimitives),
+    Projected(RuntimePrimitiveBindings),
+}
+
+impl ToolRuntimeGuard {
+    fn now(&self) -> Result<RuntimeInstant, RuntimePrimitiveError> {
+        match self {
+            Self::Direct(runtime) => runtime.now(),
+            Self::Projected(runtime) => runtime.now(),
+        }
+    }
+
+    fn sleep_until(
+        &self,
+        deadline: RuntimeInstant,
+    ) -> Result<RuntimeFuture<'static, ()>, RuntimePrimitiveError> {
+        match self {
+            Self::Direct(runtime) => runtime.sleep_until(deadline),
+            Self::Projected(runtime) => runtime.sleep_until(deadline),
+        }
+    }
+}
 
 /// Stable model-step coordinate supplied by the driver.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -225,6 +252,7 @@ pub enum ToolExecutionError {
     Provider(ToolProviderError),
     EffectCeilingExceeded,
     JournalAuthorityMismatch,
+    CommandAuthorityMismatch,
     JournalProofMismatch,
     PermissionDenied,
     ApprovalRequired,
@@ -267,6 +295,9 @@ impl fmt::Display for ToolExecutionError {
             }
             Self::JournalAuthorityMismatch => {
                 formatter.write_str("tool scope does not match the journal authority")
+            }
+            Self::CommandAuthorityMismatch => {
+                formatter.write_str("command grant does not match the guarded tool executor")
             }
             Self::JournalProofMismatch => formatter.write_str("tool journal proof mismatch"),
             Self::PermissionDenied => formatter.write_str("tool call denied by permission policy"),
@@ -389,12 +420,13 @@ struct SessionIdentity {
 #[derive(Debug)]
 struct NestedCallBudget {
     admitted: Mutex<BTreeSet<CallId>>,
+    limit: usize,
 }
 
 #[derive(Debug)]
 pub(crate) struct NestedToolAuthority {
     owner: Weak<GuardedToolExecutorInner>,
-    step: StepId,
+    origin: ToolExecutionOrigin,
     root_call_id: CallId,
     depth: u8,
     calls: Arc<NestedCallBudget>,
@@ -403,7 +435,7 @@ pub(crate) struct NestedToolAuthority {
     cancellation: CancellationToken,
     deadline: Option<RuntimeInstant>,
     output_budget: std::num::NonZeroUsize,
-    runtime: RuntimePrimitives,
+    runtime: ToolRuntimeGuard,
 }
 
 impl NestedToolAuthority {
@@ -416,8 +448,8 @@ impl NestedToolAuthority {
 pub struct BorrowedToolExecutionSession<'a> {
     owner: Weak<GuardedToolExecutorInner>,
     definitions: Arc<[ToolDefinition]>,
-    step: StepId,
-    root_call_id: CallId,
+    origin: ToolExecutionOrigin,
+    root_call_id: Option<CallId>,
     depth: u8,
     calls: Arc<NestedCallBudget>,
     effect_ceiling: SecurityEffects,
@@ -425,7 +457,7 @@ pub struct BorrowedToolExecutionSession<'a> {
     cancellation: CancellationToken,
     deadline: Option<RuntimeInstant>,
     output_budget: std::num::NonZeroUsize,
-    runtime: RuntimePrimitives,
+    runtime: ToolRuntimeGuard,
     _authority: PhantomData<&'a mut &'a ()>,
 }
 
@@ -481,10 +513,10 @@ impl BorrowedToolExecutionSession<'_> {
                     .admitted
                     .lock()
                     .map_err(|_| ToolExecutionError::InternalStateUnavailable)?;
-                if admitted.len() == MAX_NESTED_TOOL_CALLS {
+                if admitted.len() >= self.calls.limit {
                     return Err(ToolExecutionError::CallLimitExceeded);
                 }
-                if request.call_id == self.root_call_id || !admitted.insert(request.call_id) {
+                if self.root_call_id == Some(request.call_id) || !admitted.insert(request.call_id) {
                     return Err(ToolExecutionError::DuplicateCallId);
                 }
             }
@@ -530,7 +562,7 @@ impl BorrowedToolExecutionSession<'_> {
             let middleware_context =
                 ToolMiddlewareContext::from_guarded_call(ToolMiddlewareContextInput {
                     call_id: request.call_id,
-                    step: self.step,
+                    origin: self.origin,
                     tool_name: Arc::clone(&request.tool_name),
                     arguments_digest,
                     safety: classified.safety,
@@ -554,10 +586,11 @@ impl BorrowedToolExecutionSession<'_> {
             .map_err(ToolExecutionError::InvalidOutput)?;
             let mut chain = self.chain.to_vec();
             chain.push(Arc::clone(&request.tool_name));
+            let root_call_id = self.root_call_id.unwrap_or(request.call_id);
             let authority = Arc::new(NestedToolAuthority {
                 owner: Arc::downgrade(&owner),
-                step: self.step,
-                root_call_id: self.root_call_id,
+                origin: self.origin,
+                root_call_id,
                 depth: self.depth,
                 calls: Arc::clone(&self.calls),
                 effect_ceiling: classified.effects,
@@ -639,8 +672,8 @@ pub(crate) fn prepare_nested<'a>(
     Ok(BorrowedToolExecutionSession {
         owner: authority.owner.clone(),
         definitions,
-        step: authority.step,
-        root_call_id: authority.root_call_id,
+        origin: authority.origin,
+        root_call_id: Some(authority.root_call_id),
         depth,
         calls: Arc::clone(&authority.calls),
         effect_ceiling: authority.effect_ceiling,
@@ -657,23 +690,24 @@ pub(crate) fn prepare_nested<'a>(
 pub(crate) fn test_nested_authority() -> Arc<NestedToolAuthority> {
     Arc::new(NestedToolAuthority {
         owner: Weak::new(),
-        step: StepId::new(
+        origin: ToolExecutionOrigin::ModelStep(StepId::new(
             RequestId::from_nonzero_u128(1).unwrap(),
             NonZeroU64::new(1).unwrap(),
-        ),
+        )),
         root_call_id: CallId::from_nonzero_u128(1).unwrap(),
         depth: 0,
         calls: Arc::new(NestedCallBudget {
             admitted: Mutex::new(BTreeSet::new()),
+            limit: MAX_NESTED_TOOL_CALLS,
         }),
         effect_ceiling: SecurityEffects::empty(),
         chain: Arc::from([]),
         cancellation: CancellationToken::new(),
         deadline: None,
         output_budget: std::num::NonZeroUsize::new(1).unwrap(),
-        runtime: RuntimePrimitives::new(
+        runtime: ToolRuntimeGuard::Direct(RuntimePrimitives::new(
             rust_agent_runtime_api::RuntimeAdapterIdentity::checked("test-runtime").unwrap(),
-        ),
+        )),
     })
 }
 
@@ -784,7 +818,7 @@ impl ToolExecutionSession {
             }
             let cancellation = call.proof.cancellation();
             let deadline = call.proof.deadline();
-            let runtime = call.proof.runtime().clone();
+            let runtime = ToolRuntimeGuard::Direct(call.proof.runtime().clone());
             check_guard(&cancellation, deadline, &runtime)?;
 
             let action = Action::new(
@@ -826,7 +860,7 @@ impl ToolExecutionSession {
             let middleware_context =
                 ToolMiddlewareContext::from_guarded_call(ToolMiddlewareContextInput {
                     call_id: call.plan.request.call_id,
-                    step: self.step,
+                    origin: ToolExecutionOrigin::ModelStep(self.step),
                     tool_name: Arc::clone(&call.plan.request.tool_name),
                     arguments_digest: call.plan.arguments_digest,
                     safety: call.plan.classified.safety,
@@ -850,11 +884,12 @@ impl ToolExecutionSession {
             .map_err(ToolExecutionError::InvalidOutput)?;
             let authority = Arc::new(NestedToolAuthority {
                 owner: Arc::downgrade(&self.owner),
-                step: self.step,
+                origin: ToolExecutionOrigin::ModelStep(self.step),
                 root_call_id: call.plan.request.call_id,
                 depth: 0,
                 calls: Arc::new(NestedCallBudget {
                     admitted: Mutex::new(BTreeSet::new()),
+                    limit: MAX_NESTED_TOOL_CALLS,
                 }),
                 effect_ceiling: call.plan.classified.effects,
                 chain: Arc::from([Arc::clone(&call.plan.request.tool_name)]),
@@ -912,7 +947,7 @@ impl GuardedToolExecutorInner {
     async fn run_pre_middleware(
         &self,
         context: &ToolMiddlewareContext,
-        runtime: &RuntimePrimitives,
+        runtime: &ToolRuntimeGuard,
     ) -> Result<(), ToolExecutionError> {
         for middleware in self.middleware.entries() {
             check_guard(&context.cancellation_guard(), context.deadline(), runtime)?;
@@ -939,7 +974,7 @@ impl GuardedToolExecutorInner {
     async fn run_around_before(
         &self,
         context: &ToolMiddlewareContext,
-        runtime: &RuntimePrimitives,
+        runtime: &ToolRuntimeGuard,
     ) -> Result<(), ToolExecutionError> {
         for middleware in self.middleware.entries() {
             check_guard(&context.cancellation_guard(), context.deadline(), runtime)?;
@@ -965,7 +1000,7 @@ impl GuardedToolExecutorInner {
         &self,
         context: &ToolMiddlewareContext,
         outcome: &Result<ToolExecutionResult, ToolExecutionError>,
-        runtime: &RuntimePrimitives,
+        runtime: &ToolRuntimeGuard,
     ) -> Result<(), ToolExecutionError> {
         let outcome = middleware_outcome(outcome);
         for middleware in self.middleware.entries().iter().rev() {
@@ -996,7 +1031,7 @@ impl GuardedToolExecutorInner {
         &self,
         context: &ToolMiddlewareContext,
         result: &ToolExecutionResult,
-        runtime: &RuntimePrimitives,
+        runtime: &ToolRuntimeGuard,
     ) -> Result<(), ToolExecutionError> {
         for middleware in self.middleware.entries() {
             check_guard(&context.cancellation_guard(), context.deadline(), runtime)?;
@@ -1024,7 +1059,7 @@ impl GuardedToolExecutorInner {
         &self,
         context: &ToolMiddlewareContext,
         outcome: &Result<ToolExecutionResult, ToolExecutionError>,
-        runtime: &RuntimePrimitives,
+        runtime: &ToolRuntimeGuard,
     ) {
         let outcome = middleware_outcome(outcome);
         for middleware in self.middleware.entries() {
@@ -1074,11 +1109,18 @@ impl Drop for ToolExecutionSession {
 }
 
 pub trait ToolExecutor: MaybeSendSync {
+    fn identity_digest(&self) -> Digest;
+
     fn prepare_model_step(
         &self,
         scope: &ToolScope,
         step: StepId,
     ) -> Result<Arc<ToolExecutionSession>, ToolExecutionError>;
+
+    fn prepare_command<'a>(
+        &'a self,
+        grant: &'a CommandToolGrant<'a>,
+    ) -> Result<BorrowedToolExecutionSession<'a>, ToolExecutionError>;
 }
 
 #[derive(Clone)]
@@ -1101,6 +1143,17 @@ impl ToolExecutorBinding {
     ) -> Result<Arc<ToolExecutionSession>, ToolExecutionError> {
         self.provider.prepare_model_step(scope, step)
     }
+
+    pub fn prepare_command<'a>(
+        &'a self,
+        grant: &'a CommandToolGrant<'a>,
+    ) -> Result<BorrowedToolExecutionSession<'a>, ToolExecutionError> {
+        self.provider.prepare_command(grant)
+    }
+
+    pub fn identity_digest(&self) -> Digest {
+        self.provider.identity_digest()
+    }
 }
 
 impl fmt::Debug for ToolExecutorBinding {
@@ -1118,6 +1171,41 @@ struct GuardedToolExecutorInner {
     middleware: ToolMiddlewareChain,
     verifier: ToolCallJournalVerifier,
     active_sessions: AtomicUsize,
+    identity_digest: Digest,
+    command_runtime: RuntimePrimitiveBindings,
+}
+
+struct CommandGrantView {
+    origin: ToolExecutionOrigin,
+    cancellation: CancellationToken,
+    deadline: Option<RuntimeInstant>,
+    max_calls: NonZeroUsize,
+    max_output_bytes: NonZeroUsize,
+    effect_ceiling: SecurityEffects,
+    tool_executor_digest: Digest,
+    runtime_matches: bool,
+}
+
+impl CommandGrantView {
+    fn from_grant(
+        grant: &CommandToolGrant<'_>,
+        command_runtime: &RuntimePrimitiveBindings,
+    ) -> Self {
+        let budget = grant.tool_budget();
+        Self {
+            origin: ToolExecutionOrigin::Command {
+                invocation_id: grant.invocation_id(),
+                caller_digest: grant.caller_digest(),
+            },
+            cancellation: grant.cancellation(),
+            deadline: grant.deadline(),
+            max_calls: budget.max_calls(),
+            max_output_bytes: budget.max_output_bytes(),
+            effect_ceiling: grant.effect_ceiling(),
+            tool_executor_digest: grant.tool_executor_digest(),
+            runtime_matches: grant.matches_runtime(command_runtime),
+        }
+    }
 }
 
 impl fmt::Debug for GuardedToolExecutorInner {
@@ -1127,6 +1215,8 @@ impl fmt::Debug for GuardedToolExecutorInner {
             .field("registry", &self.registry)
             .field("approval_present", &self.approval.is_some())
             .field("middleware_count", &self.middleware.entries().len())
+            .field("identity_digest", &self.identity_digest)
+            .field("command_runtime", &self.command_runtime)
             .finish_non_exhaustive()
     }
 }
@@ -1144,22 +1234,68 @@ impl GuardedToolExecutor {
         approval: Option<ApprovalBinding>,
         middleware: &[ToolExecutionMiddlewareBinding],
         verifier: ToolCallJournalVerifier,
+        command_runtime: RuntimePrimitiveBindings,
     ) -> Result<Self, ToolExecutionError> {
+        let registry = ToolRegistry::from_bindings(providers)?;
+        let identity_digest = tool_executor_identity(&verifier, &registry);
         Ok(Self {
             inner: Arc::new(GuardedToolExecutorInner {
-                registry: ToolRegistry::from_bindings(providers)?,
+                registry,
                 permission,
                 approval,
                 middleware: ToolMiddlewareChain::from_bindings(middleware)
                     .map_err(ToolExecutionError::MiddlewareConfiguration)?,
                 verifier,
                 active_sessions: AtomicUsize::new(0),
+                identity_digest,
+                command_runtime,
             }),
+        })
+    }
+
+    fn prepare_command_view(
+        &self,
+        grant: CommandGrantView,
+    ) -> Result<BorrowedToolExecutionSession<'_>, ToolExecutionError> {
+        let authority = self.inner.verifier.scope();
+        let ToolExecutionOrigin::Command { invocation_id, .. } = grant.origin else {
+            return Err(ToolExecutionError::CommandAuthorityMismatch);
+        };
+        if grant.tool_executor_digest != self.inner.identity_digest
+            || !grant.runtime_matches
+            || invocation_id.agent_id() != authority.agent_id()
+            || invocation_id.lifecycle() != authority.lifecycle()
+        {
+            return Err(ToolExecutionError::CommandAuthorityMismatch);
+        }
+        let runtime = ToolRuntimeGuard::Projected(self.inner.command_runtime.clone());
+        check_guard(&grant.cancellation, grant.deadline, &runtime)?;
+        Ok(BorrowedToolExecutionSession {
+            owner: Arc::downgrade(&self.inner),
+            definitions: self.inner.registry.definitions(),
+            origin: grant.origin,
+            root_call_id: None,
+            depth: 0,
+            calls: Arc::new(NestedCallBudget {
+                admitted: Mutex::new(BTreeSet::new()),
+                limit: grant.max_calls.get(),
+            }),
+            effect_ceiling: grant.effect_ceiling,
+            chain: Arc::from([]),
+            cancellation: grant.cancellation,
+            deadline: grant.deadline,
+            output_budget: grant.max_output_bytes,
+            runtime,
+            _authority: PhantomData,
         })
     }
 }
 
 impl ToolExecutor for GuardedToolExecutor {
+    fn identity_digest(&self) -> Digest {
+        self.inner.identity_digest
+    }
+
     fn prepare_model_step(
         &self,
         scope: &ToolScope,
@@ -1190,6 +1326,36 @@ impl ToolExecutor for GuardedToolExecutor {
             planned_calls: Mutex::new(BTreeSet::new()),
         }))
     }
+
+    fn prepare_command<'a>(
+        &'a self,
+        grant: &'a CommandToolGrant<'a>,
+    ) -> Result<BorrowedToolExecutionSession<'a>, ToolExecutionError> {
+        self.prepare_command_view(CommandGrantView::from_grant(
+            grant,
+            &self.inner.command_runtime,
+        ))
+    }
+}
+
+fn tool_executor_identity(verifier: &ToolCallJournalVerifier, registry: &ToolRegistry) -> Digest {
+    let scope = verifier.scope();
+    let session = match scope.session_id() {
+        Some(session) => hash_parts(&[
+            b"rust-agent-tool-executor-session-present-v1\0",
+            &session.to_canonical_v1_bytes(),
+        ]),
+        None => hash_parts(&[b"rust-agent-tool-executor-session-absent-v1\0"]),
+    };
+    hash_parts(&[
+        b"rust-agent-tool-executor-identity-v1\0",
+        &scope.agent_id().to_canonical_v1_bytes(),
+        &scope.lifecycle().get().to_be_bytes(),
+        session.as_bytes(),
+        scope.composition().digest().as_bytes(),
+        scope.catalog().as_bytes(),
+        registry.snapshot_digest().as_bytes(),
+    ])
 }
 
 fn action_risk(safety: ToolSafety) -> ActionRisk {
@@ -1458,7 +1624,7 @@ fn json_depth(value: &JsonValue) -> usize {
 fn check_guard(
     cancellation: &CancellationToken,
     deadline: Option<RuntimeInstant>,
-    runtime: &RuntimePrimitives,
+    runtime: &ToolRuntimeGuard,
 ) -> Result<(), ToolExecutionError> {
     if cancellation.is_cancelled() {
         return Err(ToolExecutionError::Cancelled);
@@ -1478,7 +1644,7 @@ async fn await_guarded<F, T>(
     future: F,
     cancellation: CancellationToken,
     deadline: Option<RuntimeInstant>,
-    runtime: &RuntimePrimitives,
+    runtime: &ToolRuntimeGuard,
 ) -> Result<T, ToolExecutionError>
 where
     F: Future<Output = T>,
@@ -1509,7 +1675,7 @@ where
 struct RawExecutionGuard<'a> {
     cancellation: CancellationToken,
     deadline: Option<RuntimeInstant>,
-    runtime: &'a RuntimePrimitives,
+    runtime: &'a ToolRuntimeGuard,
     output_budget: NonZeroUsize,
 }
 
@@ -1556,6 +1722,7 @@ mod tests {
         thread,
     };
 
+    use rust_agent_commands::CommandInvocationId;
     use rust_agent_policy::{Approval, ApprovalFuture, PermissionPolicy};
     use rust_agent_runtime_api::{
         RuntimeAdapterIdentity, ToolCallJournalAuthority, ToolCallScopeIdentity,
@@ -1801,6 +1968,10 @@ mod tests {
                 context.tool_name(),
                 "counting" | "parent" | "child"
             ));
+            match context.origin() {
+                ToolExecutionOrigin::ModelStep(step) => assert_eq!(context.step(), Some(step)),
+                ToolExecutionOrigin::Command { .. } => assert_eq!(context.step(), None),
+            }
             assert_eq!(context.effects(), SecurityEffects::READ_LOCAL);
             self.events.lock().unwrap().push(format!("{}:pre", self.id));
             let decision = self.pre;
@@ -2039,7 +2210,12 @@ mod tests {
             scope,
             issuer,
             executor: GuardedToolExecutor::build(
-                providers, permission, approval, middleware, verifier,
+                providers,
+                permission,
+                approval,
+                middleware,
+                verifier,
+                RuntimePrimitiveBindings::none(),
             )
             .unwrap(),
             permission_calls,
@@ -2098,6 +2274,31 @@ mod tests {
             .unwrap();
         let prepared = seal(&harness.issuer, plan, CancellationToken::new());
         run(session.execute_prepared(prepared))
+    }
+
+    fn command_grant_view(
+        harness: &Harness,
+        cancellation: CancellationToken,
+        effect_ceiling: SecurityEffects,
+        max_calls: usize,
+    ) -> CommandGrantView {
+        CommandGrantView {
+            origin: ToolExecutionOrigin::Command {
+                invocation_id: CommandInvocationId::from_agent(
+                    harness.scope.agent_id(),
+                    harness.scope.lifecycle(),
+                    NonZeroU64::new(1).unwrap(),
+                ),
+                caller_digest: Digest::from_bytes([9; 32]),
+            },
+            cancellation,
+            deadline: None,
+            max_calls: NonZeroUsize::new(max_calls).unwrap(),
+            max_output_bytes: NonZeroUsize::new(1024).unwrap(),
+            effect_ceiling,
+            tool_executor_digest: harness.executor.inner.identity_digest,
+            runtime_matches: true,
+        }
     }
 
     #[test]
@@ -2367,7 +2568,14 @@ mod tests {
             observed_effects: Arc::new(AtomicU64::new(0)),
         }));
         assert!(matches!(
-            GuardedToolExecutor::build(&[binding], permission, None, &[], verifier),
+            GuardedToolExecutor::build(
+                &[binding],
+                permission,
+                None,
+                &[],
+                verifier,
+                RuntimePrimitiveBindings::none(),
+            ),
             Err(ToolExecutionError::Provider(
                 ToolProviderError::EffectCeilingExceeded
             ))
@@ -2641,24 +2849,146 @@ mod tests {
     }
 
     #[test]
+    fn command_origin_is_identity_bound_bounded_and_reuses_guarded_dispatch() {
+        let child_calls = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::new(Mutex::new(None));
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let middleware = recording_middleware("command", 0, Arc::clone(&events));
+        let harness = harness_with_middleware(
+            1,
+            &[nested_provider(
+                "child",
+                1,
+                ToolSafety::ReadOnly,
+                SecurityEffects::READ_LOCAL,
+                Arc::clone(&child_calls),
+                observed,
+            )],
+            PermissionDecision::Allow,
+            None,
+            &[middleware],
+        );
+        let session = harness
+            .executor
+            .prepare_command_view(command_grant_view(
+                &harness,
+                CancellationToken::new(),
+                SecurityEffects::READ_LOCAL,
+                1,
+            ))
+            .unwrap();
+        assert!(
+            session
+                .definitions()
+                .iter()
+                .any(|tool| tool.name() == "child")
+        );
+        assert!(
+            run(session.execute(
+                ToolExecutionRequest::new(
+                    CallId::from_nonzero_u128(7_000).unwrap(),
+                    "child",
+                    json!({}),
+                )
+                .unwrap(),
+            ))
+            .is_ok()
+        );
+        assert_eq!(child_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(harness.permission_calls.load(Ordering::SeqCst), 1);
+        assert!(matches!(
+            run(session.execute(
+                ToolExecutionRequest::new(
+                    CallId::from_nonzero_u128(7_001).unwrap(),
+                    "child",
+                    json!({}),
+                )
+                .unwrap(),
+            )),
+            Err(ToolExecutionError::CallLimitExceeded)
+        ));
+        assert_eq!(events.lock().unwrap().len(), 5);
+
+        let no_effect_session = harness
+            .executor
+            .prepare_command_view(command_grant_view(
+                &harness,
+                CancellationToken::new(),
+                SecurityEffects::empty(),
+                1,
+            ))
+            .unwrap();
+        assert!(matches!(
+            run(no_effect_session.execute(
+                ToolExecutionRequest::new(
+                    CallId::from_nonzero_u128(7_002).unwrap(),
+                    "child",
+                    json!({}),
+                )
+                .unwrap(),
+            )),
+            Err(ToolExecutionError::EffectCeilingExceeded)
+        ));
+        assert_eq!(child_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(harness.permission_calls.load(Ordering::SeqCst), 1);
+
+        let mut foreign = command_grant_view(
+            &harness,
+            CancellationToken::new(),
+            SecurityEffects::READ_LOCAL,
+            1,
+        );
+        foreign.tool_executor_digest = Digest::from_bytes([0; 32]);
+        assert!(matches!(
+            harness.executor.prepare_command_view(foreign),
+            Err(ToolExecutionError::CommandAuthorityMismatch)
+        ));
+
+        let mut foreign_runtime = command_grant_view(
+            &harness,
+            CancellationToken::new(),
+            SecurityEffects::READ_LOCAL,
+            1,
+        );
+        foreign_runtime.runtime_matches = false;
+        assert!(matches!(
+            harness.executor.prepare_command_view(foreign_runtime),
+            Err(ToolExecutionError::CommandAuthorityMismatch)
+        ));
+
+        let cancellation = CancellationToken::new();
+        cancellation.cancel();
+        assert!(matches!(
+            harness.executor.prepare_command_view(command_grant_view(
+                &harness,
+                cancellation,
+                SecurityEffects::READ_LOCAL,
+                1,
+            )),
+            Err(ToolExecutionError::Cancelled)
+        ));
+    }
+
+    #[test]
     fn nested_session_requires_the_exact_permit_and_enforces_depth_before_dispatch() {
         let harness = harness(1, &[], PermissionDecision::Allow, None);
         let authority = Arc::new(NestedToolAuthority {
             owner: Arc::downgrade(&harness.executor.inner),
-            step: step(),
+            origin: ToolExecutionOrigin::ModelStep(step()),
             root_call_id: CallId::from_nonzero_u128(5_001).unwrap(),
             depth: MAX_NESTED_TOOL_DEPTH,
             calls: Arc::new(NestedCallBudget {
                 admitted: Mutex::new(BTreeSet::new()),
+                limit: MAX_NESTED_TOOL_CALLS,
             }),
             effect_ceiling: SecurityEffects::READ_LOCAL,
             chain: Arc::from([Arc::from("parent")]),
             cancellation: CancellationToken::new(),
             deadline: None,
             output_budget: NonZeroUsize::new(1024).unwrap(),
-            runtime: RuntimePrimitives::new(
+            runtime: ToolRuntimeGuard::Direct(RuntimePrimitives::new(
                 RuntimeAdapterIdentity::checked("test-runtime").unwrap(),
-            ),
+            )),
         });
         let context = crate::ToolContext {
             cancellation: CancellationToken::new(),
@@ -2682,7 +3012,7 @@ mod tests {
         let foreign = crate::ExecutionPermit {
             authority: Arc::new(NestedToolAuthority {
                 owner: authority.owner.clone(),
-                step: authority.step,
+                origin: authority.origin,
                 root_call_id: authority.root_call_id,
                 depth: authority.depth,
                 calls: Arc::clone(&authority.calls),

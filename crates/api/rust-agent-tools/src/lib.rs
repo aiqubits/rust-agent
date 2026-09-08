@@ -19,9 +19,9 @@ pub use execution::{
 };
 pub use middleware::{
     MAX_TOOL_EXECUTION_MIDDLEWARE, MAX_TOOL_MIDDLEWARE_ERROR_BYTES, ToolAroundExecutionPhase,
-    ToolExecutionMiddleware, ToolExecutionMiddlewareBinding, ToolMiddlewareBuildError,
-    ToolMiddlewareContext, ToolMiddlewareError, ToolMiddlewareErrorKind, ToolMiddlewareOutcome,
-    ToolMiddlewareStage, ToolPostPolicyDecision, ToolPrePolicyDecision,
+    ToolExecutionMiddleware, ToolExecutionMiddlewareBinding, ToolExecutionOrigin,
+    ToolMiddlewareBuildError, ToolMiddlewareContext, ToolMiddlewareError, ToolMiddlewareErrorKind,
+    ToolMiddlewareOutcome, ToolMiddlewareStage, ToolPostPolicyDecision, ToolPrePolicyDecision,
 };
 pub use output::{
     MAX_TOOL_OUTPUT_BYTES, MAX_TOOL_OUTPUT_ITEMS, MAX_TOOL_OUTPUT_JSON_DEPTH,

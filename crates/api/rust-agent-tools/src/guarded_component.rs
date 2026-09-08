@@ -61,13 +61,13 @@ pub fn build(
             "tool-executor-guarded requires the exact clock/sleep primitive projection".into(),
         ));
     }
-    drop(runtime);
     let executor = GuardedToolExecutor::build(
         &dependencies.providers,
         dependencies.permission,
         dependencies.approval,
         &dependencies.middleware,
         dependencies.verifier,
+        runtime,
     )
     .map_err(|error| ComponentBuildError::InvalidConfig(error.to_string()))?;
     Ok(ComponentOutput::stateless(executor))

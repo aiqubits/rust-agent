@@ -37,7 +37,7 @@ error[E0624]: associated function `build` is private
   | |         providers: &[ToolProviderBinding],
   | |         permission: PermissionPolicyBinding,
   | |         approval: Option<ApprovalBinding>,
-  | |         middleware: &[ToolExecutionMiddlewareBinding],
-  | |         verifier: ToolCallJournalVerifier,
+... |
+  | |         command_runtime: RuntimePrimitiveBindings,
   | |     ) -> Result<Self, ToolExecutionError> {
   | |_________________________________________- private associated function defined here

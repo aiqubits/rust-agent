@@ -41,6 +41,7 @@ scope = "agent"
 default = []
 
 [dependencies]
+rust-agent-commands = { version = "0.1.0", path = "../rust-agent-commands", default-features = false }
 rust-agent-core = { version = "0.1.0", path = "../rust-agent-core", default-features = false }
 rust-agent-policy = { version = "0.1.0", path = "../rust-agent-policy", default-features = false }
 rust-agent-runtime-api = { version = "0.1.0", path = "../rust-agent-runtime-api", default-features = false }

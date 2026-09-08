@@ -887,6 +887,7 @@ version = "0.1.0"
 dependencies = [
  "rust-agent-core",
  "rust-agent-runtime-api",
+ "trybuild",
 ]
 
 [[package]]
@@ -1143,6 +1144,7 @@ dependencies = [
 name = "rust-agent-tools"
 version = "0.1.0"
 dependencies = [
+ "rust-agent-commands",
  "rust-agent-core",
  "rust-agent-policy",
  "rust-agent-runtime-api",

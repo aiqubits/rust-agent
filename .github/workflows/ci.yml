@@ -72,6 +72,7 @@ jobs:
           done
       - name: Verify current Phase 3 API dependency closures
         run: |
+          cargo check -p rust-agent-commands --no-default-features
           cargo check -p rust-agent-tools --no-default-features
           cargo check -p rust-agent-policy --no-default-features
           cargo check -p rust-agent-prompt --no-default-features
@@ -79,6 +80,7 @@ jobs:
           cargo check -p rust-agent-spill --no-default-features
           cargo check -p rust-agent-telemetry --no-default-features
           cargo check -p rust-agent-tool-executor-guarded --no-default-features
+          cargo check -p rust-agent-commands --all-features
           cargo check -p rust-agent-tools --all-features
           cargo check -p rust-agent-policy --all-features
           cargo check -p rust-agent-prompt --all-features
@@ -90,6 +92,7 @@ jobs:
         shell: bash
         run: |
           phase3_packages=(
+            -p rust-agent-commands
             -p rust-agent-tools
             -p rust-agent-policy
             -p rust-agent-prompt
