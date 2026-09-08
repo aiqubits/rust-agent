@@ -57,6 +57,121 @@ pub const MAX_TOOL_REGISTRATIONS_PER_PROVIDER: usize = 64;
 pub const MAX_TOOL_ERROR_MESSAGE_BYTES: usize = 4 * 1024;
 pub const MAX_TOOL_CALL_COST_UNITS: usize = 1024;
 
+#[cfg(test)]
+#[derive(Debug)]
+struct TestAssemblyRuntime;
+
+#[cfg(test)]
+impl rust_agent_runtime_api::RuntimeClock for TestAssemblyRuntime {
+    fn now(&self) -> rust_agent_runtime_api::RuntimeInstant {
+        rust_agent_runtime_api::RuntimeInstant::from_monotonic_duration(std::time::Duration::ZERO)
+    }
+}
+
+#[cfg(test)]
+impl rust_agent_runtime_api::RuntimeSleeper for TestAssemblyRuntime {
+    fn sleep_until(
+        &self,
+        _deadline: rust_agent_runtime_api::RuntimeInstant,
+    ) -> rust_agent_runtime_api::RuntimeFuture<'static, ()> {
+        Box::pin(async {})
+    }
+}
+
+#[cfg(test)]
+impl rust_agent_runtime_api::RuntimeSpawner for TestAssemblyRuntime {
+    fn spawn(
+        &self,
+        _owner: rust_agent_runtime_api::RuntimeTaskOwner,
+        _task: rust_agent_runtime_api::RuntimeFuture<'static, ()>,
+    ) -> Result<(), rust_agent_runtime_api::RuntimePrimitiveError> {
+        Ok(())
+    }
+
+    fn drain(
+        &self,
+        _owner: rust_agent_runtime_api::RuntimeTaskOwner,
+    ) -> rust_agent_runtime_api::RuntimeFuture<'static, ()> {
+        Box::pin(async {})
+    }
+}
+
+#[cfg(test)]
+fn test_tool_journal_parts(
+    agent_id: rust_agent_core::AgentId,
+    lifecycle: rust_agent_runtime_api::AgentLifecycleNonce,
+    composition: rust_agent_core::CompositionHash,
+    catalog: rust_agent_core::Digest,
+) -> (
+    rust_agent_runtime_api::ToolCallJournalIssuer,
+    rust_agent_runtime_api::GeneratedToolConsumerBinding,
+) {
+    let model_scope = rust_agent_runtime_api::ModelCallScopeIdentity::for_generated_agent(
+        agent_id,
+        lifecycle,
+        None,
+        composition,
+        catalog,
+    );
+    let plan = rust_agent_runtime_api::GeneratedModelBindingPlan::checked(
+        "driver-tools",
+        vec![(
+            Arc::<str>::from("test-model"),
+            Arc::<str>::from("test-model"),
+        )],
+        Vec::new(),
+        Vec::new(),
+    )
+    .unwrap()
+    .with_tool_consumer_edge("driver-tools", "tool-executor-guarded")
+    .unwrap();
+    let driver = Arc::new(TestAssemblyRuntime);
+    let runtime = rust_agent_runtime_api::RuntimePrimitives::from_adapter(
+        rust_agent_runtime_api::RuntimeAdapterIdentity::checked("test-assembly-runtime").unwrap(),
+        Arc::clone(&driver),
+        driver.clone(),
+        driver.clone(),
+        driver,
+    );
+    let runtime_owner = runtime
+        .claim_generated_composition_owner(composition, catalog, plan)
+        .unwrap();
+    let owner =
+        rust_agent_runtime_api::begin_composition_assembly(runtime_owner, composition, catalog)
+            .unwrap()
+            .finish();
+    let mut assembly = owner.begin_binding_assembly(model_scope).unwrap();
+    assembly
+        .bind_model_consumer("driver-tools", &[Arc::<str>::from("test-model")])
+        .unwrap();
+    assembly
+        .bind_tool_consumer("driver-tools", "tool-executor-guarded")
+        .unwrap();
+    let (_, _, issuer, binding) = assembly
+        .finish()
+        .unwrap()
+        .into_agent_journal_parts(&owner)
+        .unwrap();
+    (issuer.unwrap(), binding.unwrap())
+}
+
+#[cfg(test)]
+pub(crate) fn test_tool_journal_authority(
+    agent_id: rust_agent_core::AgentId,
+    lifecycle: rust_agent_runtime_api::AgentLifecycleNonce,
+    composition: rust_agent_core::CompositionHash,
+    catalog: rust_agent_core::Digest,
+) -> (
+    rust_agent_runtime_api::ToolCallJournalIssuer,
+    rust_agent_runtime_api::ToolCallJournalVerifier,
+) {
+    let (issuer, binding) = test_tool_journal_parts(agent_id, lifecycle, composition, catalog);
+    let verifier = binding
+        .into_verifier_for_edge("driver-tools", "tool-executor-guarded")
+        .unwrap();
+    (issuer, verifier)
+}
+
 /// Checked, build-reviewed relative cost of one Tool call.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct ToolCallCost(NonZeroUsize);

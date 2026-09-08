@@ -1,0 +1,11 @@
+error[E0603]: struct `ToolCallJournalAuthority` is private
+ --> tests/ui/issue_tool_journal_authority.rs:1:29
+  |
+1 | use rust_agent_runtime_api::ToolCallJournalAuthority;
+  |                             ^^^^^^^^^^^^^^^^^^^^^^^^ private struct
+  |
+note: the struct `ToolCallJournalAuthority` is defined here
+ --> src/lib.rs
+  |
+  | struct ToolCallJournalAuthority;
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

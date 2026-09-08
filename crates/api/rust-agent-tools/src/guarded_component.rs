@@ -2,8 +2,8 @@
 
 use rust_agent_policy::{ApprovalBinding, PermissionPolicyBinding};
 use rust_agent_runtime_api::{
-    ComponentBuildError, ComponentOutput, RuntimePrimitiveBindings, RuntimePrimitiveKind,
-    ToolCallJournalVerifier,
+    ComponentBuildError, ComponentOutput, GeneratedToolConsumerBinding, RuntimePrimitiveBindings,
+    RuntimePrimitiveKind, ToolCallJournalVerifier,
 };
 
 use crate::{GuardedToolExecutor, ToolExecutionMiddlewareBinding, ToolProviderBinding};
@@ -39,15 +39,19 @@ impl Dependencies {
         permission: PermissionPolicyBinding,
         approval: Option<ApprovalBinding>,
         middleware: Vec<ToolExecutionMiddlewareBinding>,
-        verifier: ToolCallJournalVerifier,
-    ) -> Self {
-        Self {
+        consumer: &str,
+        binding: GeneratedToolConsumerBinding,
+    ) -> Result<Self, ComponentBuildError> {
+        let verifier = binding
+            .into_verifier_for_edge(consumer, "tool-executor-guarded")
+            .map_err(|error| ComponentBuildError::InvalidConfig(error.to_string()))?;
+        Ok(Self {
             providers,
             permission,
             approval,
             middleware,
             verifier,
-        }
+        })
     }
 }
 
@@ -82,7 +86,6 @@ mod tests {
     use rust_agent_runtime_api::{
         AgentLifecycleNonce, RuntimeAdapterIdentity, RuntimeClock, RuntimeFuture,
         RuntimePrimitiveError, RuntimePrimitives, RuntimeSleeper, RuntimeSpawner, RuntimeTaskOwner,
-        ToolCallJournalAuthority, ToolCallScopeIdentity,
     };
 
     use super::*;
@@ -140,23 +143,21 @@ mod tests {
     }
 
     fn dependencies() -> Dependencies {
-        let (_, verifier) = ToolCallJournalAuthority::issue_for_generated_scope(
-            ToolCallScopeIdentity::for_generated_agent(
-                AgentId::from_nonzero_u128(1).unwrap(),
-                AgentLifecycleNonce::from_nonzero(std::num::NonZeroU64::new(1).unwrap()),
-                None,
-                CompositionHash::from_digest(Digest::from_bytes([2; 32])),
-                Digest::from_bytes([3; 32]),
-            ),
-        )
-        .unwrap();
+        let (_, binding) = crate::test_tool_journal_parts(
+            AgentId::from_nonzero_u128(1).unwrap(),
+            AgentLifecycleNonce::from_nonzero(std::num::NonZeroU64::new(1).unwrap()),
+            CompositionHash::from_digest(Digest::from_bytes([2; 32])),
+            Digest::from_bytes([3; 32]),
+        );
         Dependencies::from_generated_agent(
             Vec::new(),
             PermissionPolicyBinding::from_provider(Arc::new(Allow)),
             None,
             Vec::new(),
-            verifier,
+            "driver-tools",
+            binding,
         )
+        .unwrap()
     }
 
     #[test]

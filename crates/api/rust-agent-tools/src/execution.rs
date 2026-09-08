@@ -452,6 +452,7 @@ impl ToolCallPlan {
             self.session_identity.snapshot_digest,
             self.arguments_digest,
             self.effects_digest,
+            self.plan_digest,
         )
     }
 
@@ -1981,9 +1982,7 @@ mod tests {
 
     use rust_agent_commands::CommandInvocationId;
     use rust_agent_policy::{Approval, ApprovalFuture, PermissionPolicy};
-    use rust_agent_runtime_api::{
-        RuntimeAdapterIdentity, ToolCallJournalAuthority, ToolCallScopeIdentity,
-    };
+    use rust_agent_runtime_api::RuntimeAdapterIdentity;
     use serde_json::json;
 
     use super::*;
@@ -2589,16 +2588,8 @@ mod tests {
         let composition = CompositionHash::from_digest(Digest::from_bytes([2; 32]));
         let catalog = Digest::from_bytes([3; 32]);
         let scope = ToolScope::for_generated_agent(agent_id, lifecycle, None, composition, catalog);
-        let (issuer, verifier) = ToolCallJournalAuthority::issue_for_generated_scope(
-            ToolCallScopeIdentity::for_generated_agent(
-                agent_id,
-                lifecycle,
-                None,
-                composition,
-                catalog,
-            ),
-        )
-        .unwrap();
+        let (issuer, verifier) =
+            crate::test_tool_journal_authority(agent_id, lifecycle, composition, catalog);
         let permission_calls = Arc::new(AtomicUsize::new(0));
         let observed_effects = Arc::new(AtomicU64::new(0));
         let permission = PermissionPolicyBinding::from_provider(Arc::new(CountingPermission {
@@ -3035,16 +3026,12 @@ mod tests {
             .prepare_model_step(&harness.scope, step())
             .unwrap();
         let plan = session.plan_call(request(21, false)).unwrap();
-        let (foreign_issuer, _) = ToolCallJournalAuthority::issue_for_generated_scope(
-            ToolCallScopeIdentity::for_generated_agent(
-                harness.scope.agent_id,
-                harness.scope.lifecycle,
-                None,
-                harness.scope.composition,
-                harness.scope.catalog,
-            ),
-        )
-        .unwrap();
+        let (foreign_issuer, _) = crate::test_tool_journal_authority(
+            harness.scope.agent_id,
+            harness.scope.lifecycle,
+            harness.scope.composition,
+            harness.scope.catalog,
+        );
         let proof = foreign_issuer
             .seal_committed_record(
                 plan.journal_projection(),
@@ -3243,16 +3230,12 @@ mod tests {
             contribution,
         )
         .unwrap();
-        let (_, verifier) = ToolCallJournalAuthority::issue_for_generated_scope(
-            ToolCallScopeIdentity::for_generated_agent(
-                empty.scope.agent_id,
-                empty.scope.lifecycle,
-                None,
-                empty.scope.composition,
-                empty.scope.catalog,
-            ),
-        )
-        .unwrap();
+        let (_, verifier) = crate::test_tool_journal_authority(
+            empty.scope.agent_id,
+            empty.scope.lifecycle,
+            empty.scope.composition,
+            empty.scope.catalog,
+        );
         let permission = PermissionPolicyBinding::from_provider(Arc::new(CountingPermission {
             calls: Arc::new(AtomicUsize::new(0)),
             decision: PermissionDecision::Allow,

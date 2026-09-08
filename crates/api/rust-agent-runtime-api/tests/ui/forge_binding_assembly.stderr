@@ -1,17 +1,35 @@
 error: cannot construct `BindingAssemblyOwner` with struct literal syntax due to private fields
- --> tests/ui/forge_binding_assembly.rs:4:18
+ --> tests/ui/forge_binding_assembly.rs:8:18
   |
-4 |     let _owner = BindingAssemblyOwner {};
+8 |     let _owner = BindingAssemblyOwner {};
   |                  ^^^^^^^^^^^^^^^^^^^^
 
 error: cannot construct `GeneratedScopeCallAuthority` with struct literal syntax due to private fields
- --> tests/ui/forge_binding_assembly.rs:5:22
+ --> tests/ui/forge_binding_assembly.rs:9:22
   |
-5 |     let _authority = GeneratedScopeCallAuthority {};
+9 |     let _authority = GeneratedScopeCallAuthority {};
   |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
+error: cannot construct `GeneratedToolConsumerBinding` with struct literal syntax due to private fields
+  --> tests/ui/forge_binding_assembly.rs:10:25
+   |
+10 |     let _tool_binding = GeneratedToolConsumerBinding {};
+   |                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0277]: the trait bound `GeneratedToolConsumerBinding: Clone` is not satisfied
+  --> tests/ui/forge_binding_assembly.rs:11:22
+   |
+11 |     requires_clone::<GeneratedToolConsumerBinding>();
+   |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `Clone` is not implemented for `GeneratedToolConsumerBinding`
+   |
+note: required by a bound in `requires_clone`
+  --> tests/ui/forge_binding_assembly.rs:5:22
+   |
+ 5 | fn requires_clone<T: Clone>() {}
+   |                      ^^^^^ required by this bound in `requires_clone`
+
 error: cannot construct `RuntimeOwner` with struct literal syntax due to private fields
- --> tests/ui/forge_binding_assembly.rs:6:26
-  |
-6 |     let _runtime_owner = RuntimeOwner {};
-  |                          ^^^^^^^^^^^^
+  --> tests/ui/forge_binding_assembly.rs:12:26
+   |
+12 |     let _runtime_owner = RuntimeOwner {};
+   |                          ^^^^^^^^^^^^

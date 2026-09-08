@@ -128,6 +128,12 @@ fn phase_three_tool_api_dependency_and_privacy_boundary_is_isolated() {
         fs::read_to_string(root.join("crates/api/rust-agent-tools/src/execution.rs")).unwrap();
     let middleware =
         fs::read_to_string(root.join("crates/api/rust-agent-tools/src/middleware.rs")).unwrap();
+    let runtime_api =
+        fs::read_to_string(root.join("crates/api/rust-agent-runtime-api/src/lib.rs")).unwrap();
+    let agent = fs::read_to_string(root.join("crates/api/rust-agent-agent/src/lib.rs")).unwrap();
+    let guarded_component =
+        fs::read_to_string(root.join("crates/api/rust-agent-tools/src/guarded_component.rs"))
+            .unwrap();
     assert!(source.contains("pub struct ExecutionPermit"));
     assert!(source.contains("pub const MAX_TOOL_CALL_COST_UNITS: usize = 1024;"));
     assert!(source.contains("pub fn prepare_nested<'a>("));
@@ -140,6 +146,14 @@ fn phase_three_tool_api_dependency_and_privacy_boundary_is_isolated() {
     assert!(execution.contains("pub const MAX_NESTED_TOOL_COST_UNITS: usize = 4 * 1024;"));
     assert!(execution.contains("pub fn execute_prepared_batch("));
     assert!(execution.contains("fn next_dispatchable_call("));
+    assert!(runtime_api.contains("struct ToolCallJournalAuthority;"));
+    assert!(!runtime_api.contains("pub struct ToolCallJournalAuthority;"));
+    assert!(runtime_api.contains("pub struct GeneratedToolConsumerBinding"));
+    assert!(runtime_api.contains("pub fn bind_tool_consumer("));
+    assert!(agent.contains("pub fn prepare_tool_call("));
+    assert!(agent.contains("fn build_driver_with_tools("));
+    assert!(guarded_component.contains("binding: GeneratedToolConsumerBinding"));
+    assert!(guarded_component.contains(".into_verifier_for_edge(consumer,"));
     assert!(registry.contains("handler: Arc<dyn crate::Tool>"));
     assert!(!registry.contains("pub handler:"));
     assert!(execution.contains("PhantomData<&'a mut &'a ()>"));

@@ -1,7 +1,7 @@
 {
   "schema": 2,
   "algorithm": "sha256-rust-agent-composition-v2",
-  "composition-hash": "efe8ba73d55e8bba3c74d6ac854f1b609652c0e4d690e2d480dabd69b3d1878e",
+  "composition-hash": "acba3a4235782af6ab2bda61e4ddf71b872feaa4f9c05570f99acbea983e5770",
   "build-kind": "wasm",
   "profile-name": "fixture-wasm-js",
   "normalized-profile": {
@@ -2318,7 +2318,7 @@
       "id": "rust-agent-runtime-api",
       "package": "rust-agent-runtime-api",
       "logical-path": "crates/api/rust-agent-runtime-api",
-      "tree-digest": "b6afb4209535964fde9eb3c998c519feec3e5cfba135db3f76c2139ec55b2341",
+      "tree-digest": "b1d430ee6fc467a21f13d85e643cc76c22fc27f4e5d17b94681e6491e11e445a",
       "tree-entries": [
         {
           "path": "Cargo.toml",
@@ -2366,8 +2366,8 @@
           "path": "src/lib.rs",
           "kind": {
             "kind": "regular-file",
-            "sha256": "8b40e67d4d2b84035db9ce393d8cf103ba23e6f6e6caf3693ad749bee1fb0b31",
-            "bytes": 121864
+            "sha256": "bd59b627a0a8b7f6fa19393f88c30deb2c0bff14321e2ea9260106c0778bf8b0",
+            "bytes": 130972
           },
           "metadata": {
             "contract": "read-only-epoch-v1",
@@ -2450,8 +2450,8 @@
           "path": "tests/ui/forge_binding_assembly.rs",
           "kind": {
             "kind": "regular-file",
-            "sha256": "92a27c2aad47aed24014e1338fa68a257bc3a93521bf8cfc6b0041abdd97c634",
-            "bytes": 247
+            "sha256": "ecf364f70cd08971d1718cea1c1777c042c4dfd01470c5890c911b0edbe6147b",
+            "bytes": 429
           },
           "metadata": {
             "contract": "read-only-epoch-v1",
@@ -2472,8 +2472,8 @@
           "path": "tests/ui/forge_binding_assembly.stderr",
           "kind": {
             "kind": "regular-file",
-            "sha256": "6d5406373bbf73c19cd2d9f97f18b27958d50238333305fcab38322dd7e3d57f",
-            "bytes": 722
+            "sha256": "676a2ed8cd8d06599b871dae149305f0673dcdd1c927f218021e710fa7d87362",
+            "bytes": 1543
           },
           "metadata": {
             "contract": "read-only-epoch-v1",
@@ -2826,6 +2826,50 @@
             "kind": "regular-file",
             "sha256": "486ed1b635ddc526f2b412d5638bf57c3010b21322cb89025457908bbd920fdf",
             "bytes": 1192
+          },
+          "metadata": {
+            "contract": "read-only-epoch-v1",
+            "mode": 292,
+            "uid": 0,
+            "gid": 0,
+            "atime-nanos": 0,
+            "mtime-nanos": 0,
+            "ctime-nanos": 0,
+            "birthtime-nanos": 0,
+            "link-count": 1,
+            "device": 0,
+            "inode": 0,
+            "generation": 0
+          }
+        },
+        {
+          "path": "tests/ui/issue_tool_journal_authority.rs",
+          "kind": {
+            "kind": "regular-file",
+            "sha256": "04ea24bfa003ea6fc24e17dc7e224f1ccf9d397d516591de3e54b1e10f3efddf",
+            "bytes": 131
+          },
+          "metadata": {
+            "contract": "read-only-epoch-v1",
+            "mode": 292,
+            "uid": 0,
+            "gid": 0,
+            "atime-nanos": 0,
+            "mtime-nanos": 0,
+            "ctime-nanos": 0,
+            "birthtime-nanos": 0,
+            "link-count": 1,
+            "device": 0,
+            "inode": 0,
+            "generation": 0
+          }
+        },
+        {
+          "path": "tests/ui/issue_tool_journal_authority.stderr",
+          "kind": {
+            "kind": "regular-file",
+            "sha256": "75c8a62526877b3abde36004fe688bd7301dd6ea2bc43e083d2a3c75b2b7062f",
+            "bytes": 401
           },
           "metadata": {
             "contract": "read-only-epoch-v1",

@@ -7,7 +7,7 @@ use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     fmt,
     future::{Future, poll_fn},
-    num::NonZeroU64,
+    num::{NonZeroU64, NonZeroUsize},
     pin::Pin,
     sync::{
         Arc, Mutex, Weak,
@@ -41,11 +41,12 @@ use rust_agent_model::{
 use rust_agent_runtime_api::{
     AgentEventFeedError, AgentLifecycleNonce, AgentPublicStatus, AppHandoffError, AppHandoffSeal,
     BindingAssemblyOwner, CancellationToken, CommandAdmissionError, CommandAdmissionGate,
-    ComponentBuildError, LifecycleObserver, LifecycleObserverBinding, ModelCallScopeIdentity,
-    ModelRequestJournalIssuer, PublicationCandidate, PublicationDirectory,
+    ComponentBuildError, GeneratedToolConsumerBinding, LifecycleObserver, LifecycleObserverBinding,
+    ModelCallScopeIdentity, ModelRequestJournalIssuer, PublicationCandidate, PublicationDirectory,
     PublicationDirectoryError, PublicationDirectoryWriteHandle, PublicationVeto,
-    PublishedSessionMode, RuntimePrimitives, VolatileLifecycleOperation,
-    VolatileLifecycleOperationIssuer, new_publication_directory,
+    PublishedSessionMode, RuntimePrimitives, ToolCallJournalIssuer, ToolCallJournalProjection,
+    ToolCallJournalProof, VolatileLifecycleOperation, VolatileLifecycleOperationIssuer,
+    new_publication_directory,
 };
 use rust_agent_session::{SessionPersistenceError, SessionQueryHandle};
 use sha2::{Digest as _, Sha256};
@@ -58,6 +59,7 @@ use crate::{
 };
 
 pub const MAX_AGENT_INPUT_BYTES: usize = 256 * 1024;
+pub const MAX_MODEL_ORIGIN_TOOL_OUTPUT_BYTES: usize = 256 * 1024;
 const MAX_VOLATILE_JOURNAL_RECORDS: usize = 256;
 const MAX_ADMISSION_QUEUE: usize = 32;
 const MAX_REQUEST_WAITERS: usize = 32;
@@ -678,15 +680,35 @@ impl AgentDriverBinding {
 pub trait AgentScopeFactory: MaybeSendSync {
     fn driver_component_identity(&self) -> &'static str;
 
+    fn tool_consumer_edge(&self) -> Option<(&'static str, &'static str)> {
+        None
+    }
+
     fn build_driver(
         &self,
         model: ModelRegistryBinding,
         runtime: RuntimePrimitives,
     ) -> Result<AgentDriverBinding, ComponentBuildError>;
+
+    #[doc(hidden)]
+    fn build_driver_with_tools(
+        &self,
+        model: ModelRegistryBinding,
+        tool_binding: Option<GeneratedToolConsumerBinding>,
+        runtime: RuntimePrimitives,
+    ) -> Result<AgentDriverBinding, ComponentBuildError> {
+        if tool_binding.is_some() {
+            return Err(ComponentBuildError::InvalidConfig(
+                "driver does not consume cap:tool-executor".into(),
+            ));
+        }
+        self.build_driver(model, runtime)
+    }
 }
 
 struct RequestJournalFacade {
-    issuer: ModelRequestJournalIssuer,
+    model_issuer: ModelRequestJournalIssuer,
+    tool_issuer: Option<ToolCallJournalIssuer>,
     records: Mutex<VecDeque<Digest>>,
 }
 
@@ -722,13 +744,15 @@ impl fmt::Debug for AgentContext {
 
 impl AgentContext {
     fn new(
-        issuer: ModelRequestJournalIssuer,
+        model_issuer: ModelRequestJournalIssuer,
+        tool_issuer: Option<ToolCallJournalIssuer>,
         runtime: RuntimePrimitives,
         publisher: Arc<EventPublisher>,
     ) -> Self {
         Self {
             journal: Arc::new(RequestJournalFacade {
-                issuer,
+                model_issuer,
+                tool_issuer,
                 records: Mutex::new(VecDeque::new()),
             }),
             execution: Mutex::new(None),
@@ -803,7 +827,7 @@ impl AgentContext {
             }
             let proof = self
                 .journal
-                .issuer
+                .model_issuer
                 .seal_committed_record(
                     projection,
                     record_digest,
@@ -814,6 +838,53 @@ impl AgentContext {
                 )
                 .map_err(|_| AgentError::JournalUnavailable)?;
             plan.seal(proof).map_err(AgentError::from)
+        })
+    }
+
+    pub fn prepare_tool_call(
+        &self,
+        projection: ToolCallJournalProjection,
+    ) -> AgentFuture<'_, Result<ToolCallJournalProof, AgentError>> {
+        Box::pin(async move {
+            let (cancellation, deadline) = {
+                let execution = self
+                    .execution
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let execution = execution.as_ref().ok_or(AgentError::JournalUnavailable)?;
+                if execution.cancellation.is_cancelled() {
+                    return Err(AgentError::Cancelled);
+                }
+                (execution.cancellation.clone(), execution.deadline)
+            };
+            let issuer = self
+                .journal
+                .tool_issuer
+                .as_ref()
+                .ok_or(AgentError::JournalUnavailable)?;
+            let record_digest = projection.record_digest();
+            {
+                let mut records = self
+                    .journal
+                    .records
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                records.push_back(record_digest);
+                while records.len() > MAX_VOLATILE_JOURNAL_RECORDS {
+                    records.pop_front();
+                }
+            }
+            issuer
+                .seal_committed_record(
+                    projection,
+                    record_digest,
+                    cancellation,
+                    deadline,
+                    NonZeroUsize::new(MAX_MODEL_ORIGIN_TOOL_OUTPUT_BYTES)
+                        .expect("model-origin Tool output ceiling is nonzero"),
+                    self.runtime.clone(),
+                )
+                .map_err(|_| AgentError::JournalUnavailable)
         })
     }
 
@@ -2760,14 +2831,19 @@ async fn create_sessionless_agent(
     binding_assembly
         .bind_model_consumer(driver_component_identity, &provider_keys)
         .map_err(|_| AgentLifecycleError::JournalAuthority)?;
-    let (issuer, verifier) = binding_assembly
+    if let Some((consumer, provider)) = app.scope_factory.tool_consumer_edge() {
+        binding_assembly
+            .bind_tool_consumer(consumer, provider)
+            .map_err(|_| AgentLifecycleError::JournalAuthority)?;
+    }
+    let (model_issuer, model_verifier, tool_issuer, tool_binding) = binding_assembly
         .finish()
-        .and_then(|authority| authority.into_journal_parts(&app.binding_assembly))
+        .and_then(|authority| authority.into_agent_journal_parts(&app.binding_assembly))
         .map_err(|_| AgentLifecycleError::JournalAuthority)?;
-    let model = app.model.bind_generated_scope(verifier);
+    let model = app.model.bind_generated_scope(model_verifier);
     let driver = app
         .scope_factory
-        .build_driver(model, app.runtime.clone())
+        .build_driver_with_tools(model, tool_binding, app.runtime.clone())
         .map_err(AgentLifecycleError::Construction)?;
     if driver.generated_component_identity() != Some(driver_component_identity) {
         return Err(AgentLifecycleError::JournalAuthority);
@@ -2788,7 +2864,12 @@ async fn create_sessionless_agent(
         id: agent_id,
         lifecycle,
         driver,
-        context: AgentContext::new(issuer, app.runtime.clone(), Arc::clone(&publisher)),
+        context: AgentContext::new(
+            model_issuer,
+            tool_issuer,
+            app.runtime.clone(),
+            Arc::clone(&publisher),
+        ),
         publisher,
         commands: Mutex::new(None),
         app: Arc::downgrade(app),
@@ -3062,11 +3143,12 @@ mod tests {
         ModelRouteSelection, ModelStream, ProviderKey,
     };
     use rust_agent_runtime_api::{
-        AgentEventEnvelope, AgentEventKind, AppHandoffMode, DisposalEvent,
-        GeneratedModelBindingPlan, LifecycleNotificationContext, LifecycleObserverFuture,
-        PublicationEvent, PublicationSnapshot, PublicationState, PublicationTransactionView,
-        RuntimeAdapterIdentity, RuntimeClock, RuntimeFuture, RuntimePrimitiveError, RuntimeSleeper,
-        RuntimeSpawner, RuntimeTaskOwner, begin_composition_assembly,
+        AgentEventEnvelope, AgentEventKind, AppHandoffMode, CallId, DisposalEvent,
+        GeneratedModelBindingPlan, GeneratedToolConsumerBinding, LifecycleNotificationContext,
+        LifecycleObserverFuture, PublicationEvent, PublicationSnapshot, PublicationState,
+        PublicationTransactionView, RuntimeAdapterIdentity, RuntimeClock, RuntimeFuture,
+        RuntimePrimitiveError, RuntimeSleeper, RuntimeSpawner, RuntimeTaskOwner,
+        ToolCallJournalProjection, ToolCallJournalVerifier, begin_composition_assembly,
     };
 
     use super::*;
@@ -3364,6 +3446,56 @@ mod tests {
         }
     }
 
+    struct ToolAwareTestDriver {
+        model: ModelRegistryBinding,
+        verifier: ToolCallJournalVerifier,
+        proofs: Arc<AtomicUsize>,
+    }
+
+    impl AgentDriver for ToolAwareTestDriver {
+        fn run<'a>(
+            &'a self,
+            context: &'a AgentContext,
+            request: AgentRequest,
+        ) -> AgentFuture<'a, Result<AgentOutput, AgentError>> {
+            Box::pin(async move {
+                let projection = ToolCallJournalProjection::from_tool_plan(
+                    CallId::from_nonzero_u128(1).unwrap(),
+                    Digest::from_bytes([41; 32]),
+                    Digest::from_bytes([42; 32]),
+                    Digest::from_bytes([43; 32]),
+                    Digest::from_bytes([44; 32]),
+                    Digest::from_bytes([45; 32]),
+                    Digest::from_bytes([46; 32]),
+                );
+                let record_digest = projection.record_digest();
+                let proof = context.prepare_tool_call(projection.clone()).await?;
+                if !self.verifier.verifies(&proof, &projection, record_digest) {
+                    return Err(AgentError::JournalUnavailable);
+                }
+                self.proofs.fetch_add(1, Ordering::SeqCst);
+                let plan = self.model.plan_call(ModelCallDraft {
+                    request_id: context.allocate_model_request()?,
+                    purpose: ModelRequestPurpose::AgentTurn,
+                    route: request.model_route().clone(),
+                    request: ModelRequest {
+                        messages: vec![Message {
+                            role: MessageRole::User,
+                            content: vec![ContentBlock::Text(request.input().as_str().to_owned())],
+                        }],
+                        system: None,
+                        tools: Vec::new(),
+                        params: ModelParams::default(),
+                    },
+                    linked_from: None,
+                })?;
+                let prepared = context.prepare_model_call(plan).await?;
+                let response = context.complete_model_call(&self.model, prepared).await?;
+                AgentOutput::from_model_response(response)
+            })
+        }
+    }
+
     #[derive(Debug)]
     struct TestScopeFactory;
 
@@ -3380,6 +3512,55 @@ mod tests {
             AgentDriverBinding::from_generated_component(
                 self.driver_component_identity(),
                 Arc::new(DirectTestDriver { model }),
+            )
+        }
+    }
+
+    #[derive(Debug)]
+    struct ToolAwareScopeFactory {
+        proofs: Arc<AtomicUsize>,
+    }
+
+    impl AgentScopeFactory for ToolAwareScopeFactory {
+        fn driver_component_identity(&self) -> &'static str {
+            "driver-tools"
+        }
+
+        fn tool_consumer_edge(&self) -> Option<(&'static str, &'static str)> {
+            Some(("driver-tools", "tool-executor-guarded"))
+        }
+
+        fn build_driver(
+            &self,
+            _model: ModelRegistryBinding,
+            _runtime: RuntimePrimitives,
+        ) -> Result<AgentDriverBinding, ComponentBuildError> {
+            Err(ComponentBuildError::InvalidConfig(
+                "tool-aware driver requires its exact generated binding".into(),
+            ))
+        }
+
+        fn build_driver_with_tools(
+            &self,
+            model: ModelRegistryBinding,
+            tool_binding: Option<GeneratedToolConsumerBinding>,
+            _runtime: RuntimePrimitives,
+        ) -> Result<AgentDriverBinding, ComponentBuildError> {
+            let binding = tool_binding.ok_or_else(|| {
+                ComponentBuildError::InvalidConfig(
+                    "tool-aware driver is missing its generated binding".into(),
+                )
+            })?;
+            let verifier = binding
+                .into_verifier_for_edge(self.driver_component_identity(), "tool-executor-guarded")
+                .map_err(|error| ComponentBuildError::InvalidConfig(error.to_string()))?;
+            AgentDriverBinding::from_generated_component(
+                self.driver_component_identity(),
+                Arc::new(ToolAwareTestDriver {
+                    model,
+                    verifier,
+                    proofs: Arc::clone(&self.proofs),
+                }),
             )
         }
     }
@@ -3481,13 +3662,16 @@ mod tests {
                 )
             })
             .collect::<Vec<_>>();
-        let plan = GeneratedModelBindingPlan::checked(
+        let mut plan = GeneratedModelBindingPlan::checked(
             scope_factory.driver_component_identity(),
             model.generated_provider_identities(),
             observer_identities.clone(),
             Vec::new(),
         )
         .unwrap();
+        if let Some((consumer, provider)) = scope_factory.tool_consumer_edge() {
+            plan = plan.with_tool_consumer_edge(consumer, provider).unwrap();
+        }
         let runtime_owner = runtime
             .claim_generated_composition_owner(composition, catalog, plan)
             .unwrap();
@@ -3538,6 +3722,81 @@ mod tests {
             Err(AgentLifecycleError::JournalAuthority)
         ));
         assert!(app.publication_snapshot().entries().is_empty());
+        run(app.shutdown()).unwrap();
+    }
+
+    #[test]
+    fn generated_agent_context_issues_only_the_exact_tool_edge_proof() {
+        let proofs = Arc::new(AtomicUsize::new(0));
+        let model = ModelRegistry::from_compiled(
+            vec![ModelProviderBinding::from_provider(Arc::new(EchoModel {
+                calls: Arc::new(AtomicUsize::new(0)),
+            }))],
+            None,
+        )
+        .unwrap();
+        let app = app_with_registry_config_runtime_and_factory(
+            model,
+            Vec::new(),
+            Phase2RuntimeConfig::default(),
+            test_runtime(),
+            Arc::new(ToolAwareScopeFactory {
+                proofs: Arc::clone(&proofs),
+            }),
+        );
+        let sealed = run(app.seal_agent_operation(AgentOperationDraft::sessionless())).unwrap();
+        let allocated = run(app.allocate_agent_operation(sealed)).unwrap();
+        let agent = run(app.create_agent(allocated.into_create_request())).unwrap();
+        let request_id = agent.allocate_turn_request().unwrap();
+        let output = run(agent.send(AgentSendRequest::new(
+            request_id,
+            AgentInput::text("tool-aware").unwrap(),
+            Digest::from_bytes([47; 32]),
+            None,
+        )))
+        .unwrap();
+        assert_eq!(output.text, "echo:tool-aware");
+        assert_eq!(proofs.load(Ordering::SeqCst), 1);
+        run(agent.shutdown()).unwrap();
+        run(app.shutdown()).unwrap();
+    }
+
+    #[test]
+    fn agent_context_without_generated_tool_edge_rejects_proof() {
+        let app = app(Arc::new(AtomicUsize::new(0)), Vec::new());
+        let sealed = run(app.seal_agent_operation(AgentOperationDraft::sessionless())).unwrap();
+        let allocated = run(app.allocate_agent_operation(sealed)).unwrap();
+        let agent = run(app.create_agent(allocated.into_create_request())).unwrap();
+        let request_id = agent.allocate_turn_request().unwrap();
+        agent
+            .inner
+            .context
+            .begin_turn(request_id, CancellationToken::new(), None);
+        let projection = ToolCallJournalProjection::from_tool_plan(
+            CallId::from_nonzero_u128(2).unwrap(),
+            Digest::from_bytes([51; 32]),
+            Digest::from_bytes([52; 32]),
+            Digest::from_bytes([53; 32]),
+            Digest::from_bytes([54; 32]),
+            Digest::from_bytes([55; 32]),
+            Digest::from_bytes([56; 32]),
+        );
+        assert!(matches!(
+            run(agent.inner.context.prepare_tool_call(projection)),
+            Err(AgentError::JournalUnavailable)
+        ));
+        assert!(
+            agent
+                .inner
+                .context
+                .journal
+                .records
+                .lock()
+                .unwrap()
+                .is_empty()
+        );
+        agent.inner.context.end_turn();
+        run(agent.shutdown()).unwrap();
         run(app.shutdown()).unwrap();
     }
 

@@ -520,6 +520,7 @@ pub struct ToolCallJournalProjection {
     snapshot_digest: Digest,
     arguments_digest: Digest,
     effects_digest: Digest,
+    record_digest: Digest,
 }
 
 impl ToolCallJournalProjection {
@@ -531,6 +532,7 @@ impl ToolCallJournalProjection {
         snapshot_digest: Digest,
         arguments_digest: Digest,
         effects_digest: Digest,
+        record_digest: Digest,
     ) -> Self {
         Self {
             call_id,
@@ -539,6 +541,7 @@ impl ToolCallJournalProjection {
             snapshot_digest,
             arguments_digest,
             effects_digest,
+            record_digest,
         }
     }
 
@@ -564,6 +567,10 @@ impl ToolCallJournalProjection {
 
     pub const fn effects_digest(&self) -> Digest {
         self.effects_digest
+    }
+
+    pub const fn record_digest(&self) -> Digest {
+        self.record_digest
     }
 }
 
@@ -632,13 +639,12 @@ impl ToolCallJournalProof {
 
 /// Allocates paired tool journal authority for generated scope assembly.
 #[derive(Debug)]
-pub struct ToolCallJournalAuthority;
+struct ToolCallJournalAuthority;
 
 static NEXT_TOOL_JOURNAL_AUTHORITY: AtomicU64 = AtomicU64::new(1);
 
 impl ToolCallJournalAuthority {
-    #[doc(hidden)]
-    pub fn issue_for_generated_scope(
+    fn issue_for_generated_scope(
         scope: ToolCallScopeIdentity,
     ) -> Result<(ToolCallJournalIssuer, ToolCallJournalVerifier), JournalAuthorityError> {
         let tag = NEXT_TOOL_JOURNAL_AUTHORITY
@@ -730,6 +736,13 @@ pub struct GeneratedModelBindingPlan {
     provider_keys: Arc<[Arc<str>]>,
     lifecycle_observer_identities: Arc<[Arc<str>]>,
     runtime_primitives: Arc<[RuntimePrimitiveKind]>,
+    tool_consumer_edge: Option<GeneratedToolConsumerEdge>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct GeneratedToolConsumerEdge {
+    consumer: Arc<str>,
+    provider: Arc<str>,
 }
 
 impl GeneratedModelBindingPlan {
@@ -791,7 +804,28 @@ impl GeneratedModelBindingPlan {
             provider_keys: provider_keys.into(),
             lifecycle_observer_identities: lifecycle_observer_identities.into(),
             runtime_primitives: runtime_primitives.into(),
+            tool_consumer_edge: None,
         })
+    }
+
+    /// Binds the sole generated model-origin ToolExecutor consumer edge.
+    #[doc(hidden)]
+    pub fn with_tool_consumer_edge(
+        mut self,
+        consumer: impl Into<Arc<str>>,
+        provider: impl Into<Arc<str>>,
+    ) -> Result<Self, BindingAssemblyError> {
+        let consumer = consumer.into();
+        let provider = provider.into();
+        if self.tool_consumer_edge.is_some()
+            || consumer != self.consumer
+            || !valid_kebab_id(&consumer)
+            || !valid_kebab_id(&provider)
+        {
+            return Err(BindingAssemblyError::InvalidToolConsumerEdge);
+        }
+        self.tool_consumer_edge = Some(GeneratedToolConsumerEdge { consumer, provider });
+        Ok(self)
     }
 
     #[inline]
@@ -818,12 +852,17 @@ impl GeneratedModelBindingPlan {
     pub fn runtime_primitives(&self) -> &[RuntimePrimitiveKind] {
         &self.runtime_primitives
     }
+
+    fn tool_consumer_edge(&self) -> Option<&GeneratedToolConsumerEdge> {
+        self.tool_consumer_edge.as_ref()
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum BindingAssemblyError {
     InvalidIdentity(&'static str),
     InvalidProviderSet,
+    InvalidToolConsumerEdge,
     InvalidPrimitiveProjection,
     RuntimeOwnerUnavailable,
     RuntimeOwnerAlreadyClaimed,
@@ -843,6 +882,7 @@ impl fmt::Display for BindingAssemblyError {
         formatter.write_str(match self {
             Self::InvalidIdentity(field) => return write!(formatter, "invalid {field} identity"),
             Self::InvalidProviderSet => "invalid generated model provider set",
+            Self::InvalidToolConsumerEdge => "invalid generated ToolExecutor consumer edge",
             Self::InvalidPrimitiveProjection => "invalid runtime primitive projection",
             Self::RuntimeOwnerUnavailable => "runtime bundle cannot own a composition root",
             Self::RuntimeOwnerAlreadyClaimed => "runtime bundle already owns a composition root",
@@ -936,7 +976,8 @@ impl CompositionAssemblyBuilder {
 pub struct BindingAssembly {
     owner: BindingAssemblyOwner,
     scope: ModelCallScopeIdentity,
-    authority: Option<GeneratedScopeCallAuthority>,
+    model_authority: Option<(ModelRequestJournalIssuer, ModelRequestJournalVerifier)>,
+    tool_authority: Option<(ToolCallJournalIssuer, GeneratedToolConsumerBinding)>,
 }
 
 impl BindingAssemblyOwner {
@@ -990,7 +1031,8 @@ impl BindingAssemblyOwner {
         Ok(BindingAssembly {
             owner: self.clone(),
             scope,
-            authority: None,
+            model_authority: None,
+            tool_authority: None,
         })
     }
 
@@ -1004,8 +1046,18 @@ impl BindingAssemblyOwner {
 #[allow(missing_debug_implementations)]
 pub struct GeneratedScopeCallAuthority {
     assembly_identity: Arc<CompositionAssemblyIdentity>,
-    issuer: ModelRequestJournalIssuer,
-    verifier: ModelRequestJournalVerifier,
+    model_issuer: ModelRequestJournalIssuer,
+    model_verifier: ModelRequestJournalVerifier,
+    tool_issuer: Option<ToolCallJournalIssuer>,
+    tool_binding: Option<GeneratedToolConsumerBinding>,
+}
+
+/// Opaque exact-edge envelope for the model-origin `ToolExecutor` binding.
+#[allow(missing_debug_implementations)]
+pub struct GeneratedToolConsumerBinding {
+    consumer: Arc<str>,
+    provider: Arc<str>,
+    verifier: ToolCallJournalVerifier,
 }
 
 impl BindingAssembly {
@@ -1014,7 +1066,7 @@ impl BindingAssembly {
         consumer: &str,
         provider_keys: &[Arc<str>],
     ) -> Result<(), BindingAssemblyError> {
-        if self.authority.is_some() {
+        if self.model_authority.is_some() {
             return Err(BindingAssemblyError::AlreadyBound);
         }
         if consumer != self.owner.model_plan.consumer() {
@@ -1026,18 +1078,67 @@ impl BindingAssembly {
         let (issuer, verifier) =
             ModelRequestJournalAuthority::issue_for_generated_scope(self.scope.clone())
                 .map_err(|_| BindingAssemblyError::Incomplete)?;
-        self.authority = Some(GeneratedScopeCallAuthority {
-            assembly_identity: Arc::clone(&self.owner.identity),
-            issuer,
-            verifier,
-        });
+        self.model_authority = Some((issuer, verifier));
         Ok(())
     }
 
-    pub fn finish(mut self) -> Result<GeneratedScopeCallAuthority, BindingAssemblyError> {
-        self.authority
-            .take()
-            .ok_or(BindingAssemblyError::Incomplete)
+    pub fn bind_tool_consumer(
+        &mut self,
+        consumer: &str,
+        provider: &str,
+    ) -> Result<(), BindingAssemblyError> {
+        if self.model_authority.is_none() {
+            return Err(BindingAssemblyError::Incomplete);
+        }
+        if self.tool_authority.is_some() {
+            return Err(BindingAssemblyError::AlreadyBound);
+        }
+        let expected = self
+            .owner
+            .model_plan
+            .tool_consumer_edge()
+            .ok_or(BindingAssemblyError::InvalidToolConsumerEdge)?;
+        if expected.consumer.as_ref() != consumer || expected.provider.as_ref() != provider {
+            return Err(BindingAssemblyError::InvalidToolConsumerEdge);
+        }
+        let scope = ToolCallScopeIdentity::for_generated_agent(
+            self.scope.agent_id(),
+            self.scope.lifecycle(),
+            self.scope.session_id(),
+            self.scope.composition(),
+            self.scope.catalog(),
+        );
+        let (issuer, verifier) = ToolCallJournalAuthority::issue_for_generated_scope(scope)
+            .map_err(|_| BindingAssemblyError::Incomplete)?;
+        self.tool_authority = Some((
+            issuer,
+            GeneratedToolConsumerBinding {
+                consumer: Arc::clone(&expected.consumer),
+                provider: Arc::clone(&expected.provider),
+                verifier,
+            },
+        ));
+        Ok(())
+    }
+
+    pub fn finish(self) -> Result<GeneratedScopeCallAuthority, BindingAssemblyError> {
+        let (model_issuer, model_verifier) = self
+            .model_authority
+            .ok_or(BindingAssemblyError::Incomplete)?;
+        if self.owner.model_plan.tool_consumer_edge().is_some() != self.tool_authority.is_some() {
+            return Err(BindingAssemblyError::Incomplete);
+        }
+        let (tool_issuer, tool_binding) = match self.tool_authority {
+            Some((issuer, binding)) => (Some(issuer), Some(binding)),
+            None => (None, None),
+        };
+        Ok(GeneratedScopeCallAuthority {
+            assembly_identity: Arc::clone(&self.owner.identity),
+            model_issuer,
+            model_verifier,
+            tool_issuer,
+            tool_binding,
+        })
     }
 }
 
@@ -1051,7 +1152,49 @@ impl GeneratedScopeCallAuthority {
         if !Arc::ptr_eq(&self.assembly_identity, &owner.identity) {
             return Err(BindingAssemblyError::ScopeMismatch);
         }
-        Ok((self.issuer, self.verifier))
+        if self.tool_issuer.is_some() || self.tool_binding.is_some() {
+            return Err(BindingAssemblyError::Incomplete);
+        }
+        Ok((self.model_issuer, self.model_verifier))
+    }
+
+    #[doc(hidden)]
+    #[allow(clippy::type_complexity)]
+    pub fn into_agent_journal_parts(
+        self,
+        owner: &BindingAssemblyOwner,
+    ) -> Result<
+        (
+            ModelRequestJournalIssuer,
+            ModelRequestJournalVerifier,
+            Option<ToolCallJournalIssuer>,
+            Option<GeneratedToolConsumerBinding>,
+        ),
+        BindingAssemblyError,
+    > {
+        if !Arc::ptr_eq(&self.assembly_identity, &owner.identity) {
+            return Err(BindingAssemblyError::ScopeMismatch);
+        }
+        Ok((
+            self.model_issuer,
+            self.model_verifier,
+            self.tool_issuer,
+            self.tool_binding,
+        ))
+    }
+}
+
+impl GeneratedToolConsumerBinding {
+    #[doc(hidden)]
+    pub fn into_verifier_for_edge(
+        self,
+        consumer: &str,
+        provider: &str,
+    ) -> Result<ToolCallJournalVerifier, BindingAssemblyError> {
+        if self.consumer.as_ref() != consumer || self.provider.as_ref() != provider {
+            return Err(BindingAssemblyError::InvalidToolConsumerEdge);
+        }
+        Ok(self.verifier)
     }
 }
 
@@ -3387,6 +3530,7 @@ mod tests {
             Digest::from_bytes([6; 32]),
             Digest::from_bytes([7; 32]),
             Digest::from_bytes([8; 32]),
+            Digest::from_bytes([9; 32]),
         )
     }
 
@@ -3585,6 +3729,107 @@ mod tests {
         assert!(matches!(
             owner.begin_binding_assembly(wrong_scope),
             Err(BindingAssemblyError::CompositionMismatch)
+        ));
+    }
+
+    #[test]
+    fn generated_tool_consumer_binding_is_exact_and_proof_bound() {
+        let scope = model_scope();
+        let base_plan = GeneratedModelBindingPlan::checked(
+            "driver-tools",
+            vec![(Arc::<str>::from("model-replay"), Arc::<str>::from("replay"))],
+            Vec::new(),
+            Vec::new(),
+        )
+        .unwrap();
+        assert!(matches!(
+            base_plan
+                .clone()
+                .with_tool_consumer_edge("other-driver", "tool-executor-guarded"),
+            Err(BindingAssemblyError::InvalidToolConsumerEdge)
+        ));
+        let plan = base_plan
+            .with_tool_consumer_edge("driver-tools", "tool-executor-guarded")
+            .unwrap();
+        assert!(matches!(
+            plan.clone()
+                .with_tool_consumer_edge("driver-tools", "tool-executor-guarded"),
+            Err(BindingAssemblyError::InvalidToolConsumerEdge)
+        ));
+        let runtime = explicit_runtime();
+        let runtime_owner = runtime
+            .claim_generated_composition_owner(scope.composition(), scope.catalog(), plan)
+            .unwrap();
+        let owner = begin_composition_assembly(runtime_owner, scope.composition(), scope.catalog())
+            .unwrap()
+            .finish();
+        let mut assembly = owner.begin_binding_assembly(scope).unwrap();
+        assert_eq!(
+            assembly.bind_tool_consumer("driver-tools", "tool-executor-guarded"),
+            Err(BindingAssemblyError::Incomplete)
+        );
+        assembly
+            .bind_model_consumer("driver-tools", &[Arc::<str>::from("replay")])
+            .unwrap();
+        assert_eq!(
+            assembly.bind_tool_consumer("driver-tools", "substituted-executor"),
+            Err(BindingAssemblyError::InvalidToolConsumerEdge)
+        );
+        assembly
+            .bind_tool_consumer("driver-tools", "tool-executor-guarded")
+            .unwrap();
+        assert_eq!(
+            assembly.bind_tool_consumer("driver-tools", "tool-executor-guarded"),
+            Err(BindingAssemblyError::AlreadyBound)
+        );
+        let (_, _, tool_issuer, tool_binding) = assembly
+            .finish()
+            .unwrap()
+            .into_agent_journal_parts(&owner)
+            .unwrap();
+        let binding = tool_binding.unwrap();
+        let verifier = binding
+            .into_verifier_for_edge("driver-tools", "tool-executor-guarded")
+            .unwrap();
+        let projection = tool_projection(19);
+        let record_digest = projection.record_digest();
+        let proof = tool_issuer
+            .unwrap()
+            .seal_committed_record(
+                projection.clone(),
+                record_digest,
+                CancellationToken::new(),
+                None,
+                NonZeroUsize::new(1024).unwrap(),
+                RuntimePrimitives::new(RuntimeAdapterIdentity::checked("test-runtime").unwrap()),
+            )
+            .unwrap();
+        assert!(verifier.verifies(&proof, &projection, record_digest));
+
+        let foreign_scope = ModelCallScopeIdentity::for_generated_agent(
+            AgentId::from_nonzero_u128(2).unwrap(),
+            AgentLifecycleNonce::from_nonzero(NonZeroU64::new(1).unwrap()),
+            None,
+            owner.composition,
+            owner.catalog,
+        );
+        let mut foreign_assembly = owner.begin_binding_assembly(foreign_scope).unwrap();
+        foreign_assembly
+            .bind_model_consumer("driver-tools", &[Arc::<str>::from("replay")])
+            .unwrap();
+        foreign_assembly
+            .bind_tool_consumer("driver-tools", "tool-executor-guarded")
+            .unwrap();
+        let (_, _, _, foreign_binding) = foreign_assembly
+            .finish()
+            .unwrap()
+            .into_agent_journal_parts(&owner)
+            .unwrap();
+        assert!(matches!(
+            foreign_binding
+                .unwrap()
+                .into_verifier_for_edge("other-driver", "tool-executor-guarded"),
+            Err(BindingAssemblyError::InvalidToolConsumerEdge)
         ));
     }
 
