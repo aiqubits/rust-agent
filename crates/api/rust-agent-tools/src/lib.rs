@@ -11,10 +11,11 @@ mod registry;
 use std::{fmt, future::Future, num::NonZeroU64, pin::Pin, sync::Arc};
 
 pub use execution::{
-    GuardedToolExecutor, MAX_ACTIVE_TOOL_SESSIONS, MAX_TOOL_ARGUMENT_BYTES,
-    MAX_TOOL_ARGUMENT_DEPTH, MAX_TOOL_CALLS_PER_STEP, PreparedToolCall, StepId, ToolCallPlan,
-    ToolExecutionError, ToolExecutionRequest, ToolExecutionResult, ToolExecutionSession,
-    ToolExecutor, ToolExecutorBinding, ToolScope,
+    BorrowedToolExecutionSession, GuardedToolExecutor, MAX_ACTIVE_TOOL_SESSIONS,
+    MAX_NESTED_TOOL_CALLS, MAX_NESTED_TOOL_DEPTH, MAX_TOOL_ARGUMENT_BYTES, MAX_TOOL_ARGUMENT_DEPTH,
+    MAX_TOOL_CALLS_PER_STEP, PreparedToolCall, StepId, ToolCallPlan, ToolExecutionError,
+    ToolExecutionRequest, ToolExecutionResult, ToolExecutionSession, ToolExecutor,
+    ToolExecutorBinding, ToolScope,
 };
 pub use middleware::{
     MAX_TOOL_EXECUTION_MIDDLEWARE, MAX_TOOL_MIDDLEWARE_ERROR_BYTES, ToolAroundExecutionPhase,
@@ -209,7 +210,7 @@ fn json_depth(value: &JsonValue) -> usize {
 /// Only the guarded pipeline can construct this value.
 #[allow(missing_debug_implementations)]
 pub struct ExecutionPermit {
-    _private: (),
+    authority: Arc<execution::NestedToolAuthority>,
 }
 
 #[derive(Debug)]
@@ -217,6 +218,7 @@ pub struct ToolContext {
     cancellation: CancellationToken,
     deadline: Option<RuntimeInstant>,
     output_limits: output::ToolOutputLimits,
+    authority: Arc<execution::NestedToolAuthority>,
 }
 
 impl ToolContext {
@@ -230,6 +232,17 @@ impl ToolContext {
 
     pub const fn output_builder(&self) -> ToolOutputBuilder {
         ToolOutputBuilder::with_limits(self.output_limits)
+    }
+
+    pub fn root_call_id(&self) -> rust_agent_core::CallId {
+        self.authority.root_call_id()
+    }
+
+    pub fn prepare_nested<'a>(
+        &'a self,
+        parent: &'a ExecutionPermit,
+    ) -> Result<BorrowedToolExecutionSession<'a>, ToolExecutionError> {
+        execution::prepare_nested(self, parent)
     }
 }
 
@@ -619,6 +632,7 @@ mod tests {
             deadline: None,
             output_limits: output::ToolOutputLimits::checked(1, NonZeroUsize::new(2).unwrap(), 1)
                 .unwrap(),
+            authority: execution::test_nested_authority(),
         };
         let mut output = context.output_builder();
         output.append_text("ok").unwrap();
