@@ -5,8 +5,8 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
-    CargoPlannerGraphRoot, HostBuildClosureItemRole, NormalizedCargoPlannerRequest,
-    NormalizedHostBuildInputClosure, NormalizedLockedSourceClosure,
+    BuildPanicStrategy, CargoPlannerGraphRoot, HostBuildClosureItemRole,
+    NormalizedCargoPlannerRequest, NormalizedHostBuildInputClosure, NormalizedLockedSourceClosure,
     NormalizedProductionBuildPolicy, TrustedCargoBuildError, TrustedCargoBuildResult,
     TrustedCargoPlannerError, TrustedCargoPlannerResult, VerifiedCargoFetchCache,
     VerifiedHostClosureSnapshot, VerifiedLinuxSandboxBackend, VerifiedProductionBuildAttestation,
@@ -121,6 +121,8 @@ pub fn create_production_integration_pre_receipt(
     let manifest = composition_build.manifest();
     let attestation = composition_build.attestation();
     if manifest.composition.build_kind != BuildKind::Library
+        || (manifest.composition.requires_panic_unwind
+            && closure.build_context().panic_strategy != BuildPanicStrategy::Unwind)
         || manifest.composition.composition_hash != closure.composition_hash()
         || attestation.payload.composition_hash != closure.composition_hash()
         || attestation.payload.operation != crate::ProductionOperationKind::Build
@@ -296,6 +298,8 @@ fn create_production_integration_pre_receipt_unverified(
     let manifest = composition_build.manifest();
     let attestation = composition_build.attestation();
     if manifest.composition.build_kind != BuildKind::Library
+        || (manifest.composition.requires_panic_unwind
+            && closure.build_context().panic_strategy != BuildPanicStrategy::Unwind)
         || manifest.composition.composition_hash != closure.composition_hash()
         || attestation.payload.composition_hash != closure.composition_hash()
         || attestation.payload.operation != crate::ProductionOperationKind::Build

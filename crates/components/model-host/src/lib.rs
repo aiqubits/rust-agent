@@ -52,11 +52,25 @@ impl LanguageModel for HostModel {
 pub fn build(
     config: &host_api::Config,
     _dependencies: Dependencies,
-    _runtime: RuntimePrimitiveBindings,
+    runtime: RuntimePrimitiveBindings,
 ) -> Result<ComponentOutput<HostModel>, ComponentBuildError> {
+    validate_runtime_primitive_list(runtime.allowed())?;
+    drop(runtime);
     Ok(ComponentOutput::stateless(HostModel {
         inner: config.model.service(),
     }))
+}
+
+fn validate_runtime_primitive_list(
+    primitives: &[rust_agent_runtime_api::RuntimePrimitiveKind],
+) -> Result<(), ComponentBuildError> {
+    if primitives.is_empty() {
+        Ok(())
+    } else {
+        Err(ComponentBuildError::InvalidConfig(
+            "model-host declares no runtime primitives".into(),
+        ))
+    }
 }
 
 #[cfg(test)]
@@ -111,5 +125,11 @@ mod tests {
 
         assert!(Arc::ptr_eq(&first.service().inner, &service));
         assert!(Arc::ptr_eq(&first.service().inner, &second.service().inner));
+        assert!(
+            validate_runtime_primitive_list(
+                &[rust_agent_runtime_api::RuntimePrimitiveKind::Clock,]
+            )
+            .is_err()
+        );
     }
 }

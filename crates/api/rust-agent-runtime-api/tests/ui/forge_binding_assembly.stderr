@@ -1,0 +1,17 @@
+error: cannot construct `BindingAssemblyOwner` with struct literal syntax due to private fields
+ --> tests/ui/forge_binding_assembly.rs:4:18
+  |
+4 |     let _owner = BindingAssemblyOwner {};
+  |                  ^^^^^^^^^^^^^^^^^^^^
+
+error: cannot construct `GeneratedScopeCallAuthority` with struct literal syntax due to private fields
+ --> tests/ui/forge_binding_assembly.rs:5:22
+  |
+5 |     let _authority = GeneratedScopeCallAuthority {};
+  |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: cannot construct `RuntimeOwner` with struct literal syntax due to private fields
+ --> tests/ui/forge_binding_assembly.rs:6:26
+  |
+6 |     let _runtime_owner = RuntimeOwner {};
+  |                          ^^^^^^^^^^^^

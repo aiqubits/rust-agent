@@ -118,6 +118,7 @@ pub struct CommandResult {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CommandError {
     InvalidRequest(&'static str),
+    UnsupportedOperation,
     UnknownCommand(String),
     Closed,
     Busy,
@@ -128,6 +129,9 @@ impl fmt::Display for CommandError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::InvalidRequest(reason) => write!(formatter, "invalid command request: {reason}"),
+            Self::UnsupportedOperation => {
+                formatter.write_str("commands are not compiled into this Agent")
+            }
             Self::UnknownCommand(name) => write!(formatter, "unknown command `{name}`"),
             Self::Closed => formatter.write_str("command dispatcher is closed"),
             Self::Busy => formatter.write_str("Agent is busy"),
@@ -192,7 +196,8 @@ impl CommandDispatcher {
                     CommandAdmissionError::Busy => CommandError::Busy,
                     CommandAdmissionError::StaleLifecycle => CommandError::StaleLifecycle,
                 })?;
-            Err(CommandError::UnknownCommand(request.name))
+            drop((request.name, request.arguments, request.caller_digest));
+            Err(CommandError::UnsupportedOperation)
         })
     }
 }
@@ -269,7 +274,7 @@ mod tests {
         assert!(dispatcher.definitions().is_empty());
         assert_eq!(
             run(dispatcher.execute(request(agent(1), lifecycle(1)).unwrap())),
-            Err(CommandError::UnknownCommand("missing".into()))
+            Err(CommandError::UnsupportedOperation)
         );
         assert_eq!(
             run(dispatcher.execute(request(agent(2), lifecycle(1)).unwrap())),

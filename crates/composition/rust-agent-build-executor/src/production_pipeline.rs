@@ -7,17 +7,18 @@ use rust_agent_composition::{CompositionManifest, canonical, profile::BuildKind}
 use thiserror::Error;
 
 use crate::{
-    BuildArtifactTarget, CargoFetchCacheLayout, CargoPlannerGraphRoot, CargoUnitSelector,
-    DevelopmentHostFeatureVerification, HostFeaturePolicyError, HostFeaturePolicyStageDigests,
-    HostFeatureUnitObservation, NormalizedCargoFetchRequest, NormalizedCargoPlannerRequest,
-    NormalizedHostBuildInputClosure, NormalizedHostFeaturePolicy, NormalizedLockedSourceClosure,
-    NormalizedProductionBuildPolicy, ProductBuildContribution, ProductionArtifactError,
-    ProductionArtifactPublication, ProductionBuildAttestationInput, ProductionBuildOptionsIdentity,
-    ProductionCompletionHandle, ProductionEnforcementResultIdentity, ProductionExecutionEvidence,
-    ProductionIntegrationError, ProductionIntegrationPreReceipt, ProductionOperationKind,
-    TrustedCargoBuildError, TrustedCargoBuildResult, TrustedCargoFetchError,
-    TrustedCargoFetchResult, TrustedCargoPlannerError, TrustedCargoPlannerResult,
-    TrustedHostBuildResult, TrustedProductionPreflightError, TrustedProductionPreflightEvidence,
+    BuildArtifactTarget, BuildPanicStrategy, CargoFetchCacheLayout, CargoPlannerGraphRoot,
+    CargoUnitSelector, DevelopmentHostFeatureVerification, HostFeaturePolicyError,
+    HostFeaturePolicyStageDigests, HostFeatureUnitObservation, NormalizedCargoFetchRequest,
+    NormalizedCargoPlannerRequest, NormalizedHostBuildInputClosure, NormalizedHostFeaturePolicy,
+    NormalizedLockedSourceClosure, NormalizedProductionBuildPolicy, ProductBuildContribution,
+    ProductionArtifactError, ProductionArtifactPublication, ProductionBuildAttestationInput,
+    ProductionBuildOptionsIdentity, ProductionCompletionHandle,
+    ProductionEnforcementResultIdentity, ProductionExecutionEvidence, ProductionIntegrationError,
+    ProductionIntegrationPreReceipt, ProductionOperationKind, TrustedCargoBuildError,
+    TrustedCargoBuildResult, TrustedCargoFetchError, TrustedCargoFetchResult,
+    TrustedCargoPlannerError, TrustedCargoPlannerResult, TrustedHostBuildResult,
+    TrustedProductionPreflightError, TrustedProductionPreflightEvidence,
     TrustedWasmPostprocessError, TrustedWasmPostprocessResult, VerifiedHostClosureSnapshot,
     VerifiedLinuxSandboxBackend, VerifiedProductionBuildAttestation,
     VerifiedProductionHostFeatureReceipt, VerifiedProductionInputs,
@@ -346,7 +347,10 @@ pub fn execute_trusted_production_build(
             entry_artifact,
             artifacts,
             postprocessor,
-            gates: production_gates(options.composition.build_kind),
+            gates: production_gates(
+                options.composition.build_kind,
+                options.composition.requires_panic_unwind,
+            ),
         },
     )?;
     let evidence = build_evidence(&options, &preflight, &planner, &build, wasm.as_ref())?;
@@ -451,6 +455,10 @@ pub fn execute_trusted_production_integration_pre(
 pub fn reverify_trusted_production_integration_pre(
     options: &ProductionIntegrationPrePipelineOptions<'_>,
 ) -> Result<ProductionIntegrationPrePipelineResult, ProductionBuildPipelineError> {
+    validate_required_panic_strategy(
+        &options.composition_build.manifest().composition,
+        options.closure,
+    )?;
     if options.standalone_planner_request.root() != CargoPlannerGraphRoot::EmittedStandalone
         || options.final_planner_request.root() != CargoPlannerGraphRoot::FinalHost
         || options
@@ -571,6 +579,10 @@ pub fn execute_trusted_production_host_build(
     options: ProductionHostBuildPipelineOptions<'_>,
     completion_authority: &mut impl ProductionCompletionAuthority,
 ) -> Result<ProductionHostBuildPipelineResult, ProductionBuildPipelineError> {
+    validate_required_panic_strategy(
+        &options.composition_build.manifest().composition,
+        options.closure,
+    )?;
     options
         .pre_receipt
         .verify(options.closure, options.policy, options.composition_build)?;
@@ -708,7 +720,13 @@ pub fn execute_trusted_production_host_build(
             entry_artifact: artifact.path.clone(),
             artifacts: vec![artifact],
             postprocessor: None,
-            gates: production_host_gates(),
+            gates: production_host_gates(
+                options
+                    .composition_build
+                    .manifest()
+                    .composition
+                    .requires_panic_unwind,
+            ),
         },
     )?;
     let evidence = host_build_evidence(&options, &preflight, &host_build)?;
@@ -796,6 +814,7 @@ impl ProductionHostBuildPipelineResult {
 fn validate_pipeline_inputs(
     options: &ProductionBuildPipelineOptions<'_>,
 ) -> Result<(), ProductionBuildPipelineError> {
+    validate_required_panic_strategy(options.composition, options.closure)?;
     if options.planner_request.root() != CargoPlannerGraphRoot::EmittedStandalone
         || options.composition.composition_hash != options.closure.composition_hash()
         || options.composition.target != options.closure.build_context().target
@@ -809,6 +828,28 @@ fn validate_pipeline_inputs(
     {
         return Err(ProductionBuildPipelineError::InvalidInput(
             "composition, closure, policy, or standalone graph mismatch",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_required_panic_strategy(
+    composition: &CompositionManifest,
+    closure: &NormalizedHostBuildInputClosure,
+) -> Result<(), ProductionBuildPipelineError> {
+    validate_required_panic_strategy_value(
+        composition.requires_panic_unwind,
+        closure.build_context().panic_strategy,
+    )
+}
+
+fn validate_required_panic_strategy_value(
+    requires_panic_unwind: bool,
+    panic_strategy: BuildPanicStrategy,
+) -> Result<(), ProductionBuildPipelineError> {
+    if requires_panic_unwind && panic_strategy != BuildPanicStrategy::Unwind {
+        return Err(ProductionBuildPipelineError::InvalidInput(
+            "composition requires panic=unwind for in-process observer containment",
         ));
     }
     Ok(())
@@ -980,7 +1021,7 @@ fn feature_requirements_are_accounted(
         })
 }
 
-fn production_host_gates() -> Vec<String> {
+fn production_host_gates(requires_panic_unwind: bool) -> Vec<String> {
     let mut gates = vec![
         "artifact-tree-accounted".into(),
         "build-requirements-authorized".into(),
@@ -993,11 +1034,14 @@ fn production_host_gates() -> Vec<String> {
         "target-facts-reproduced".into(),
         "trusted-completion-handle-verified".into(),
     ];
+    if requires_panic_unwind {
+        gates.push("panic-unwind-containment-verified".into());
+    }
     gates.sort();
     gates
 }
 
-fn production_gates(kind: BuildKind) -> Vec<String> {
+fn production_gates(kind: BuildKind, requires_panic_unwind: bool) -> Vec<String> {
     let mut gates = vec![
         "artifact-tree-accounted".into(),
         "build-requirements-authorized".into(),
@@ -1008,6 +1052,9 @@ fn production_gates(kind: BuildKind) -> Vec<String> {
         "target-facts-reproduced".into(),
         "trusted-completion-handle-verified".into(),
     ];
+    if requires_panic_unwind {
+        gates.push("panic-unwind-containment-verified".into());
+    }
     if kind == BuildKind::Wasm {
         gates.extend([
             "wasm-bindgen-bytes-and-version-verified".into(),
@@ -1017,4 +1064,26 @@ fn production_gates(kind: BuildKind) -> Vec<String> {
     }
     gates.sort();
     gates
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn observer_panic_requirement_fails_closed_and_is_named_in_gates() {
+        assert!(validate_required_panic_strategy_value(true, BuildPanicStrategy::Abort).is_err());
+        assert!(validate_required_panic_strategy_value(true, BuildPanicStrategy::Unwind).is_ok());
+        assert!(validate_required_panic_strategy_value(false, BuildPanicStrategy::Abort).is_ok());
+        assert!(
+            production_gates(BuildKind::Library, true)
+                .iter()
+                .any(|gate| gate == "panic-unwind-containment-verified")
+        );
+        assert!(
+            production_host_gates(true)
+                .iter()
+                .any(|gate| gate == "panic-unwind-containment-verified")
+        );
+    }
 }

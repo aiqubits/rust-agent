@@ -1,4 +1,9 @@
-use std::{collections::BTreeSet, fs, path::PathBuf, process::Command};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fs,
+    path::PathBuf,
+    process::Command,
+};
 
 use toml::Value;
 use walkdir::WalkDir;
@@ -6,6 +11,7 @@ use walkdir::WalkDir;
 const PINNED_RUST_VERSION: &str = "1.97.1";
 const PINNED_WASM_BINDGEN_VERSION: &str = "0.2.127";
 const PINNED_WASM_BINDGEN_FUTURES_VERSION: &str = "0.4.77";
+const PINNED_WASM_BINDGEN_TEST_VERSION: &str = "0.3.77";
 const PINNED_TARGETS: [&str; 5] = [
     "wasm32-unknown-unknown",
     "aarch64-linux-android",
@@ -211,6 +217,10 @@ fn rust_toolchain_version_is_pinned_and_synchronized() {
     assert!(ci.contains(
         "cargo fetch --locked --manifest-path \"$(rustc --print sysroot)/lib/rustlib/src/rust/library/Cargo.toml\""
     ));
+    assert!(ci.contains("Verify browser-local runtime cancellation"));
+    assert!(ci.contains(
+        "cargo test -p rust-agent-runtime-wasm --target wasm32-unknown-unknown --all-features"
+    ));
     assert!(ci.contains("Verify exact Phase 0/1A/1B/2 acceptance mappings"));
     assert!(ci.contains(
         "phase_zero_through_two_acceptance_mappings_are_exact_complete_and_runnable -- --exact"
@@ -231,6 +241,32 @@ fn rust_toolchain_version_is_pinned_and_synchronized() {
         assert!(
             ci.contains(command),
             "missing Phase 2 CI command: {command}"
+        );
+    }
+    assert!(ci.contains("Verify Phase 2 claimed target matrix"));
+    assert!(ci.contains(
+        "cargo check --target wasm32-unknown-unknown --all-features \"${phase2_packages[@]}\""
+    ));
+    assert!(ci.contains(
+        "for target in aarch64-linux-android aarch64-apple-ios x86_64-apple-darwin x86_64-pc-windows-msvc"
+    ));
+    for package in [
+        "rust-agent-core",
+        "rust-agent-runtime-api",
+        "rust-agent-session",
+        "rust-agent-model",
+        "rust-agent-commands",
+        "rust-agent-agent",
+        "rust-agent-model-replay",
+        "rust-agent-model-host",
+        "rust-agent-driver-direct",
+        "rust-agent-lifecycle-observer-noop",
+        "rust-agent-runtime-wasm",
+        "rust-agent-runtime-tokio",
+    ] {
+        assert!(
+            ci.contains(&format!("-p {package}")),
+            "missing Phase 2 target-matrix package: {package}"
         );
     }
 
@@ -297,11 +333,11 @@ fn phase_zero_through_two_acceptance_mappings_are_exact_complete_and_runnable() 
     let architecture_phases = markdown_section(
         &architecture,
         "### Phase 0 — 独立仓库与 Architecture Contract",
-        "### Phase 2 — Minimal Runtime Spine",
+        "### Phase 3 — Tool Execution Plane",
     );
     let mapped_phases =
         markdown_section(&invariant_map, "## Phase 0", "## Accepted ADR amendments");
-    for prefix in ["P0-AC-", "P1A-AC-", "P1B-AC-"] {
+    for prefix in ["P0-AC-", "P1A-AC-", "P1B-AC-", "P2-AC-"] {
         let declared = acceptance_ids(architecture_phases, prefix);
         let mapped = acceptance_ids(mapped_phases, prefix);
         assert!(!declared.is_empty(), "no {prefix} criteria are declared");
@@ -333,8 +369,110 @@ fn phase_zero_through_two_acceptance_mappings_are_exact_complete_and_runnable() 
         })
         .filter_map(Result::ok)
         .filter(|entry| entry.path().extension().is_some_and(|value| value == "rs"))
-        .map(|entry| fs::read_to_string(entry.path()).unwrap())
+        .map(|entry| {
+            (
+                entry.path().to_path_buf(),
+                fs::read_to_string(entry.path()).unwrap(),
+            )
+        })
         .collect::<Vec<_>>();
+    let mut crate_roots = BTreeMap::new();
+    for entry in WalkDir::new(&root)
+        .into_iter()
+        .filter_entry(|entry| {
+            !matches!(
+                entry.file_name().to_string_lossy().as_ref(),
+                ".git" | "target" | ".rust-agent"
+            )
+        })
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_name() == "Cargo.toml")
+    {
+        let manifest: Value = toml::from_str(&fs::read_to_string(entry.path()).unwrap()).unwrap();
+        let Some(package) = manifest.get("package") else {
+            continue;
+        };
+        let Some(name) = package.get("name").and_then(Value::as_str) else {
+            continue;
+        };
+        crate_roots.insert(
+            name.replace('-', "_"),
+            entry.path().parent().unwrap().to_path_buf(),
+        );
+    }
+    let mut integration_sources: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+    for (index, (path, _)) in rust_sources.iter().enumerate() {
+        if path
+            .parent()
+            .and_then(|parent| parent.file_name())
+            .is_some_and(|name| name == "tests")
+            && let Some(stem) = path.file_stem().and_then(|stem| stem.to_str())
+        {
+            integration_sources
+                .entry(stem.to_owned())
+                .or_default()
+                .push(index);
+        }
+    }
+    let listed = Command::new("cargo")
+        .args([
+            "test",
+            "--workspace",
+            "--all-targets",
+            "--all-features",
+            "--",
+            "--list",
+            "--format",
+            "terse",
+        ])
+        .current_dir(&root)
+        .output()
+        .unwrap();
+    assert!(
+        listed.status.success(),
+        "could not enumerate runnable workspace tests:\n{}{}",
+        String::from_utf8_lossy(&listed.stdout),
+        String::from_utf8_lossy(&listed.stderr)
+    );
+    let mut runnable_tests = String::from_utf8(listed.stdout)
+        .unwrap()
+        .lines()
+        .filter_map(|line| line.strip_suffix(": test"))
+        .map(str::to_owned)
+        .collect::<BTreeSet<_>>();
+    let wasm_listed = Command::new("cargo")
+        .args([
+            "test",
+            "-p",
+            "rust-agent-runtime-wasm",
+            "--target",
+            "wasm32-unknown-unknown",
+            "--all-features",
+            "--",
+            "--list",
+            "--format",
+            "terse",
+        ])
+        .env(
+            "CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER",
+            "wasm-bindgen-test-runner",
+        )
+        .current_dir(&root)
+        .output()
+        .unwrap();
+    assert!(
+        wasm_listed.status.success(),
+        "could not enumerate runnable WASM tests:\n{}{}",
+        String::from_utf8_lossy(&wasm_listed.stdout),
+        String::from_utf8_lossy(&wasm_listed.stderr)
+    );
+    runnable_tests.extend(
+        String::from_utf8(wasm_listed.stdout)
+            .unwrap()
+            .lines()
+            .filter_map(|line| line.strip_suffix(": test"))
+            .map(str::to_owned),
+    );
     let mut mapped_rows = 0_usize;
     for line in mapped_phases.lines().filter(|line| line.starts_with('|')) {
         let cells = line
@@ -375,20 +513,97 @@ fn phase_zero_through_two_acceptance_mappings_are_exact_complete_and_runnable() 
                 );
                 continue;
             }
+            let owner_segments = owner.split("::").collect::<Vec<_>>();
+            let first_owner = owner_segments[0];
+            let mut candidate_sources = Vec::new();
+            let runnable_name = if let Some(crate_root) = crate_roots.get(first_owner) {
+                candidate_sources.extend(
+                    rust_sources
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, (path, _))| path.starts_with(crate_root.join("src")))
+                        .map(|(index, _)| index),
+                );
+                let module = owner_segments[1..].join("::");
+                if module.is_empty() {
+                    test_name.to_owned()
+                } else {
+                    format!("{module}::{test_name}")
+                }
+            } else if owner_segments.len() == 1
+                && let Some(sources) = integration_sources.get(first_owner)
+            {
+                candidate_sources.extend(sources.iter().copied());
+                test_name.to_owned()
+            } else {
+                candidate_sources.extend(
+                    rust_sources
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, (path, _))| {
+                            let module_file = path
+                                .file_stem()
+                                .and_then(|stem| stem.to_str())
+                                .is_some_and(|stem| stem == first_owner)
+                                && path
+                                    .parent()
+                                    .and_then(|parent| parent.file_name())
+                                    .is_some_and(|parent| parent == "src");
+                            let module_directory = path.ancestors().any(|ancestor| {
+                                ancestor.file_name().is_some_and(|name| name == first_owner)
+                                    && ancestor
+                                        .parent()
+                                        .and_then(|parent| parent.file_name())
+                                        .is_some_and(|name| name == "src")
+                            });
+                            module_file || module_directory
+                        })
+                        .map(|(index, _)| index),
+                );
+                if matches!(first_owner, "lib" | "main") {
+                    let module = owner_segments[1..].join("::");
+                    if module.is_empty() {
+                        test_name.to_owned()
+                    } else {
+                        format!("{module}::{test_name}")
+                    }
+                } else {
+                    format!("{owner}::{test_name}")
+                }
+            };
             let pattern = format!("fn {test_name}(");
             assert!(
-                rust_sources
+                candidate_sources
                     .iter()
-                    .any(|source| source.match_indices(&pattern).any(|(index, _)| {
-                        source[index.saturating_sub(256)..index].contains("#[test]")
-                    })),
-                "mapped Rust test does not exist or is not runnable: {reference}"
+                    .any(
+                        |source_index| rust_sources[*source_index].1.match_indices(&pattern).any(
+                            |(index, _)| {
+                                let prefix = &rust_sources[*source_index].1
+                                    [index.saturating_sub(256)..index];
+                                prefix.contains("#[test]")
+                                    || prefix.contains("#[tokio::test]")
+                                    || prefix.contains("#[wasm_bindgen_test]")
+                            }
+                        )
+                    ),
+                "mapped Rust test does not exist under its declared owner: {reference}"
+            );
+            assert!(
+                runnable_tests.contains(&runnable_name),
+                "mapped Rust test is not runnable at `{runnable_name}`: {reference}"
             );
         }
     }
     assert!(
+        !runnable_tests
+            .contains("observer::tests::bounded_dispatcher_contains_timeout_panic_and_shutdown")
+    );
+    assert!(runnable_tests.contains(
+        "observer::native::tests::bounded_dispatcher_contains_timeout_panic_and_shutdown"
+    ));
+    assert!(
         mapped_rows > 50,
-        "Phase 0/1A mapping table is unexpectedly empty"
+        "Phase 0 through Phase 2 mapping tables are unexpectedly empty"
     );
 }
 
@@ -472,6 +687,18 @@ fn wasm_bindgen_protocol_is_pinned_and_synchronized() {
         Some("=0.4.77")
     );
 
+    let runtime_wasm: Value = toml::from_str(
+        &fs::read_to_string(root.join("crates/runtime/rust-agent-runtime-wasm/Cargo.toml"))
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        runtime_wasm["target"]["cfg(all(target_arch = \"wasm32\", target_os = \"unknown\"))"]
+            ["dev-dependencies"]["wasm-bindgen-test"]["version"]
+            .as_str(),
+        Some("=0.3.77")
+    );
+
     let golden: Value =
         toml::from_str(&fs::read_to_string(root.join("tests/golden/wasm-js/Cargo.toml")).unwrap())
             .unwrap();
@@ -490,6 +717,7 @@ fn wasm_bindgen_protocol_is_pinned_and_synchronized() {
     for (name, version) in [
         ("wasm-bindgen", PINNED_WASM_BINDGEN_VERSION),
         ("wasm-bindgen-futures", PINNED_WASM_BINDGEN_FUTURES_VERSION),
+        ("wasm-bindgen-test", PINNED_WASM_BINDGEN_TEST_VERSION),
     ] {
         let versions: Vec<_> = packages
             .iter()

@@ -1,0 +1,37 @@
+[package]
+name = "rust-agent-runtime-wasm"
+description = "Owned browser-local runtime adapter for rust-agent compositions"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[package.metadata.rust-agent.runtime-adapter]
+schema = 1
+id = "runtime-wasm"
+constructor = "rust_agent_runtime_wasm::create_runtime_primitives"
+targets = ["cfg(all(target_arch = \"wasm32\", target_os = \"unknown\"))"]
+support = "experimental"
+primitives = ["clock", "sleeper", "spawner"]
+security = []
+app-coexistence = { mode = "requires-stop" }
+build-requirements = { executables = [], read-inputs = [], environment = [] }
+
+[features]
+default = []
+
+[dependencies]
+rust-agent-runtime-api = { version = "0.1.0", path = "../../api/rust-agent-runtime-api", default-features = false }
+
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+futures-util = { version = "0.3.34", default-features = false, features = ["alloc"] }
+js-sys = "=0.3.104"
+wasm-bindgen = { version = "=0.2.127", default-features = false, features = ["std"] }
+wasm-bindgen-futures = { version = "=0.4.77", default-features = false, features = ["std"] }
+
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dev-dependencies]
+wasm-bindgen-test = { version = "=0.3.77", default-features = false, features = ["std"] }
+
+[lints]
+workspace = true

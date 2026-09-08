@@ -1,18 +1,18 @@
 schema = 1
-name = "minimal-pure"
+name = "phase2-multi-model"
 build-kind = "library"
 target = "x86_64-unknown-linux-gnu"
 environment = "server"
 support-tier = "production"
 runtime-adapter = "runtime-tokio"
 resolver-decision-budget = 100
-denied-effects = ["code-execution", "host-bridge", "network-outbound", "persistent-storage", "process-exec", "read-local", "remote-execution", "secret-access", "write-local"]
+denied-effects = ["code-execution", "network-outbound", "persistent-storage", "process-exec", "read-local", "remote-execution", "secret-access", "write-local"]
 
 [components]
 driver-direct = "enabled"
 model-replay = "enabled"
-model-host = "disabled"
-lifecycle-observer-noop = "disabled"
+model-host = "enabled"
+lifecycle-observer-noop = "enabled"
 fixture-driver = "disabled"
 fixture-model = "disabled"
 fixture-model-fallback = "disabled"

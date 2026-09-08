@@ -6,12 +6,14 @@ use std::{
     fmt,
     future::Future,
     num::{NonZeroU64, NonZeroUsize},
+    ops::Add,
     pin::Pin,
     sync::{
-        Arc, RwLock,
+        Arc, Mutex, RwLock,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
-    time::{Duration, Instant},
+    task::{Context, Poll, Waker},
+    time::Duration,
 };
 
 pub use rust_agent_core::{
@@ -19,9 +21,61 @@ pub use rust_agent_core::{
     CompositionHash, Digest, MaybeSendSync, RequestId, SessionId,
 };
 
+/// Adapter-relative monotonic timestamp used by runtime-controlled deadlines.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct RuntimeInstant(Duration);
+
+impl RuntimeInstant {
+    #[doc(hidden)]
+    pub const fn from_monotonic_duration(value: Duration) -> Self {
+        Self(value)
+    }
+
+    #[doc(hidden)]
+    pub const fn monotonic_duration(self) -> Duration {
+        self.0
+    }
+
+    pub fn checked_add(self, duration: Duration) -> Option<Self> {
+        self.0.checked_add(duration).map(Self)
+    }
+
+    pub fn checked_sub(self, duration: Duration) -> Option<Self> {
+        self.0.checked_sub(duration).map(Self)
+    }
+
+    pub fn saturating_duration_since(self, earlier: Self) -> Duration {
+        self.0.saturating_sub(earlier.0)
+    }
+}
+
+impl Add<Duration> for RuntimeInstant {
+    type Output = Self;
+
+    fn add(self, rhs: Duration) -> Self::Output {
+        Self(self.0 + rhs)
+    }
+}
+
 /// Cloneable cooperative cancellation signal owned by a runtime scope.
+struct CancellationState {
+    cancelled: AtomicBool,
+    next_waiter: AtomicU64,
+    waiters: Mutex<BTreeMap<u64, Waker>>,
+}
+
+impl Default for CancellationState {
+    fn default() -> Self {
+        Self {
+            cancelled: AtomicBool::new(false),
+            next_waiter: AtomicU64::new(1),
+            waiters: Mutex::new(BTreeMap::new()),
+        }
+    }
+}
+
 #[derive(Clone, Default)]
-pub struct CancellationToken(Arc<AtomicBool>);
+pub struct CancellationToken(Arc<CancellationState>);
 
 impl CancellationToken {
     pub fn new() -> Self {
@@ -29,11 +83,102 @@ impl CancellationToken {
     }
 
     pub fn cancel(&self) -> bool {
-        !self.0.swap(true, Ordering::AcqRel)
+        if self.0.cancelled.swap(true, Ordering::AcqRel) {
+            return false;
+        }
+        let waiters = std::mem::take(
+            &mut *self
+                .0
+                .waiters
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        );
+        for waiter in waiters.into_values() {
+            waiter.wake();
+        }
+        true
     }
 
     pub fn is_cancelled(&self) -> bool {
-        self.0.load(Ordering::Acquire)
+        self.0.cancelled.load(Ordering::Acquire)
+    }
+
+    pub fn cancelled(&self) -> CancellationFuture {
+        CancellationFuture {
+            token: self.clone(),
+            waiter_id: None,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct CancellationFuture {
+    token: CancellationToken,
+    waiter_id: Option<u64>,
+}
+
+impl Future for CancellationFuture {
+    type Output = ();
+
+    fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
+        if self.token.is_cancelled() {
+            self.unregister();
+            return Poll::Ready(());
+        }
+        let waiter_id = match self.waiter_id {
+            Some(waiter_id) => waiter_id,
+            None => match self.token.0.next_waiter.fetch_update(
+                Ordering::AcqRel,
+                Ordering::Acquire,
+                |value| value.checked_add(1),
+            ) {
+                Ok(waiter_id) if waiter_id != 0 => {
+                    self.waiter_id = Some(waiter_id);
+                    waiter_id
+                }
+                _ => {
+                    self.token.cancel();
+                    return Poll::Ready(());
+                }
+            },
+        };
+        let mut waiters = self
+            .token
+            .0
+            .waiters
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if self.token.is_cancelled() {
+            return Poll::Ready(());
+        }
+        match waiters.get_mut(&waiter_id) {
+            Some(waiter) if waiter.will_wake(context.waker()) => {}
+            Some(waiter) => waiter.clone_from(context.waker()),
+            None => {
+                waiters.insert(waiter_id, context.waker().clone());
+            }
+        }
+        Poll::Pending
+    }
+}
+
+impl CancellationFuture {
+    fn unregister(&mut self) {
+        let Some(waiter_id) = self.waiter_id.take() else {
+            return;
+        };
+        self.token
+            .0
+            .waiters
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&waiter_id);
+    }
+}
+
+impl Drop for CancellationFuture {
+    fn drop(&mut self) {
+        self.unregister();
     }
 }
 
@@ -181,8 +326,9 @@ pub struct RequestJournalProof {
     projection: ModelCallJournalProjection,
     record_digest: Digest,
     cancellation: CancellationToken,
-    deadline: Option<Instant>,
+    deadline: Option<RuntimeInstant>,
     output_budget: NonZeroUsize,
+    runtime: RuntimePrimitives,
 }
 
 impl RequestJournalProof {
@@ -194,12 +340,17 @@ impl RequestJournalProof {
         self.cancellation.clone()
     }
 
-    pub const fn deadline(&self) -> Option<Instant> {
+    pub const fn deadline(&self) -> Option<RuntimeInstant> {
         self.deadline
     }
 
     pub const fn output_budget(&self) -> NonZeroUsize {
         self.output_budget
+    }
+
+    #[doc(hidden)]
+    pub fn runtime(&self) -> &RuntimePrimitives {
+        &self.runtime
     }
 }
 
@@ -225,11 +376,10 @@ impl std::error::Error for JournalAuthorityError {}
 static NEXT_MODEL_JOURNAL_AUTHORITY: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug)]
-pub struct ModelRequestJournalAuthority;
+struct ModelRequestJournalAuthority;
 
 impl ModelRequestJournalAuthority {
-    #[doc(hidden)]
-    pub fn issue_for_generated_scope(
+    fn issue_for_generated_scope(
         scope: ModelCallScopeIdentity,
     ) -> Result<(ModelRequestJournalIssuer, ModelRequestJournalVerifier), JournalAuthorityError>
     {
@@ -259,8 +409,9 @@ impl ModelRequestJournalIssuer {
         projection: ModelCallJournalProjection,
         record_digest: Digest,
         cancellation: CancellationToken,
-        deadline: Option<Instant>,
+        deadline: Option<RuntimeInstant>,
         output_budget: NonZeroUsize,
+        runtime: RuntimePrimitives,
     ) -> Result<RequestJournalProof, JournalAuthorityError> {
         let record_sequence = self
             .next_record
@@ -279,6 +430,7 @@ impl ModelRequestJournalIssuer {
             cancellation,
             deadline,
             output_budget,
+            runtime,
         })
     }
 
@@ -307,6 +459,341 @@ impl ModelRequestJournalVerifier {
     #[doc(hidden)]
     pub fn scope(&self) -> &ModelCallScopeIdentity {
         &self.witness.scope
+    }
+}
+
+const MAX_PHASE2_MODEL_PROVIDERS: usize = 64;
+
+/// Closed generated plan for the Phase 2 model consumer edge.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GeneratedModelBindingPlan {
+    consumer: Arc<str>,
+    provider_identities: Arc<[(Arc<str>, Arc<str>)]>,
+    provider_keys: Arc<[Arc<str>]>,
+    lifecycle_observer_identities: Arc<[Arc<str>]>,
+    runtime_primitives: Arc<[RuntimePrimitiveKind]>,
+}
+
+impl GeneratedModelBindingPlan {
+    #[doc(hidden)]
+    pub fn checked(
+        consumer: impl Into<Arc<str>>,
+        provider_identities: Vec<(Arc<str>, Arc<str>)>,
+        lifecycle_observer_identities: Vec<Arc<str>>,
+        runtime_primitives: Vec<RuntimePrimitiveKind>,
+    ) -> Result<Self, BindingAssemblyError> {
+        let consumer = consumer.into();
+        if !valid_kebab_id(&consumer) {
+            return Err(BindingAssemblyError::InvalidIdentity("consumer"));
+        }
+        if provider_identities.is_empty() || provider_identities.len() > MAX_PHASE2_MODEL_PROVIDERS
+        {
+            return Err(BindingAssemblyError::InvalidProviderSet);
+        }
+        if !provider_identities
+            .windows(2)
+            .all(|pair| pair[0].1 < pair[1].1)
+            || provider_identities
+                .iter()
+                .any(|(component, key)| !valid_kebab_id(component) || !valid_kebab_id(key))
+        {
+            return Err(BindingAssemblyError::InvalidProviderSet);
+        }
+        let mut components = provider_identities
+            .iter()
+            .map(|(component, _)| component.as_ref())
+            .collect::<Vec<_>>();
+        components.sort_unstable();
+        if components.windows(2).any(|pair| pair[0] == pair[1]) {
+            return Err(BindingAssemblyError::InvalidProviderSet);
+        }
+        if !runtime_primitives.windows(2).all(|pair| pair[0] < pair[1]) {
+            return Err(BindingAssemblyError::InvalidPrimitiveProjection);
+        }
+        let mut observer_set = lifecycle_observer_identities
+            .iter()
+            .map(AsRef::as_ref)
+            .collect::<Vec<&str>>();
+        observer_set.sort_unstable();
+        if lifecycle_observer_identities.len() > MAX_PHASE2_MODEL_PROVIDERS
+            || lifecycle_observer_identities
+                .iter()
+                .any(|observer| !valid_kebab_id(observer))
+            || observer_set.windows(2).any(|pair| pair[0] == pair[1])
+        {
+            return Err(BindingAssemblyError::InvalidProviderSet);
+        }
+        let provider_keys = provider_identities
+            .iter()
+            .map(|(_, key)| Arc::clone(key))
+            .collect::<Vec<_>>();
+        Ok(Self {
+            consumer,
+            provider_identities: provider_identities.into(),
+            provider_keys: provider_keys.into(),
+            lifecycle_observer_identities: lifecycle_observer_identities.into(),
+            runtime_primitives: runtime_primitives.into(),
+        })
+    }
+
+    #[inline]
+    pub fn consumer(&self) -> &str {
+        &self.consumer
+    }
+
+    #[inline]
+    pub fn provider_keys(&self) -> &[Arc<str>] {
+        &self.provider_keys
+    }
+
+    #[inline]
+    pub fn provider_identities(&self) -> &[(Arc<str>, Arc<str>)] {
+        &self.provider_identities
+    }
+
+    #[inline]
+    pub fn lifecycle_observer_identities(&self) -> &[Arc<str>] {
+        &self.lifecycle_observer_identities
+    }
+
+    #[inline]
+    pub fn runtime_primitives(&self) -> &[RuntimePrimitiveKind] {
+        &self.runtime_primitives
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum BindingAssemblyError {
+    InvalidIdentity(&'static str),
+    InvalidProviderSet,
+    InvalidPrimitiveProjection,
+    RuntimeOwnerUnavailable,
+    RuntimeOwnerAlreadyClaimed,
+    RuntimeOwnerMismatch,
+    CompositionMismatch,
+    CatalogMismatch,
+    ConsumerMismatch,
+    ProviderSetMismatch,
+    ObserverSetMismatch,
+    ScopeMismatch,
+    AlreadyBound,
+    Incomplete,
+}
+
+impl fmt::Display for BindingAssemblyError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::InvalidIdentity(field) => return write!(formatter, "invalid {field} identity"),
+            Self::InvalidProviderSet => "invalid generated model provider set",
+            Self::InvalidPrimitiveProjection => "invalid runtime primitive projection",
+            Self::RuntimeOwnerUnavailable => "runtime bundle cannot own a composition root",
+            Self::RuntimeOwnerAlreadyClaimed => "runtime bundle already owns a composition root",
+            Self::RuntimeOwnerMismatch => "binding assembly runtime owner mismatch",
+            Self::CompositionMismatch => "binding assembly composition mismatch",
+            Self::CatalogMismatch => "binding assembly catalog mismatch",
+            Self::ConsumerMismatch => "binding assembly consumer mismatch",
+            Self::ProviderSetMismatch => "binding assembly provider set mismatch",
+            Self::ObserverSetMismatch => "binding assembly observer set mismatch",
+            Self::ScopeMismatch => "binding assembly scope mismatch",
+            Self::AlreadyBound => "binding assembly edge was already bound",
+            Self::Incomplete => "binding assembly is incomplete",
+        })
+    }
+}
+
+impl std::error::Error for BindingAssemblyError {}
+
+#[derive(Debug)]
+struct CompositionAssemblyIdentity;
+
+/// Single-use ownership authority for one generated App composition root.
+///
+/// It is deliberately neither `Clone` nor serializable. A runtime bundle can
+/// issue it only once, bound to the generated composition and catalog identity.
+#[allow(missing_debug_implementations)]
+pub struct RuntimeOwner {
+    composition: CompositionHash,
+    catalog: Digest,
+    model_plan: GeneratedModelBindingPlan,
+    bundle_identity: Arc<RuntimePrimitiveBundleIdentity>,
+}
+
+/// One fresh generated App-root assembly transaction.
+#[allow(missing_debug_implementations)]
+pub struct CompositionAssemblyBuilder {
+    composition: CompositionHash,
+    catalog: Digest,
+    model_plan: GeneratedModelBindingPlan,
+    identity: Arc<CompositionAssemblyIdentity>,
+    runtime_bundle_identity: Arc<RuntimePrimitiveBundleIdentity>,
+}
+
+/// Starts an isolated generated composition assembly.
+#[doc(hidden)]
+#[inline]
+pub fn begin_composition_assembly(
+    runtime_owner: RuntimeOwner,
+    composition: CompositionHash,
+    catalog: Digest,
+) -> Result<CompositionAssemblyBuilder, BindingAssemblyError> {
+    if runtime_owner.composition != composition {
+        return Err(BindingAssemblyError::CompositionMismatch);
+    }
+    if runtime_owner.catalog != catalog {
+        return Err(BindingAssemblyError::CatalogMismatch);
+    }
+    Ok(CompositionAssemblyBuilder {
+        composition,
+        catalog,
+        model_plan: runtime_owner.model_plan,
+        identity: Arc::new(CompositionAssemblyIdentity),
+        runtime_bundle_identity: runtime_owner.bundle_identity,
+    })
+}
+
+#[derive(Clone)]
+#[allow(missing_debug_implementations)]
+pub struct BindingAssemblyOwner {
+    composition: CompositionHash,
+    catalog: Digest,
+    model_plan: GeneratedModelBindingPlan,
+    identity: Arc<CompositionAssemblyIdentity>,
+    runtime_bundle_identity: Arc<RuntimePrimitiveBundleIdentity>,
+}
+
+impl CompositionAssemblyBuilder {
+    #[inline]
+    pub fn finish(self) -> BindingAssemblyOwner {
+        BindingAssemblyOwner {
+            composition: self.composition,
+            catalog: self.catalog,
+            model_plan: self.model_plan,
+            identity: self.identity,
+            runtime_bundle_identity: self.runtime_bundle_identity,
+        }
+    }
+}
+
+#[allow(missing_debug_implementations)]
+pub struct BindingAssembly {
+    owner: BindingAssemblyOwner,
+    scope: ModelCallScopeIdentity,
+    authority: Option<GeneratedScopeCallAuthority>,
+}
+
+impl BindingAssemblyOwner {
+    #[doc(hidden)]
+    #[inline]
+    pub fn verify_generated_root(
+        &self,
+        composition: CompositionHash,
+        catalog: Digest,
+        provider_identities: &[(Arc<str>, Arc<str>)],
+        lifecycle_observer_identities: &[Arc<str>],
+        runtime: &RuntimePrimitives,
+    ) -> Result<(), BindingAssemblyError> {
+        if self.composition != composition {
+            return Err(BindingAssemblyError::CompositionMismatch);
+        }
+        if self.catalog != catalog {
+            return Err(BindingAssemblyError::CatalogMismatch);
+        }
+        if !Arc::ptr_eq(&self.runtime_bundle_identity, &runtime.bundle_identity) {
+            return Err(BindingAssemblyError::RuntimeOwnerMismatch);
+        }
+        if self.model_plan.provider_identities() != provider_identities {
+            return Err(BindingAssemblyError::ProviderSetMismatch);
+        }
+        if self.model_plan.lifecycle_observer_identities() != lifecycle_observer_identities {
+            return Err(BindingAssemblyError::ObserverSetMismatch);
+        }
+        if self
+            .model_plan
+            .runtime_primitives()
+            .iter()
+            .any(|primitive| !runtime.has(*primitive))
+        {
+            return Err(BindingAssemblyError::InvalidPrimitiveProjection);
+        }
+        Ok(())
+    }
+
+    #[inline]
+    pub fn begin_binding_assembly(
+        &self,
+        scope: ModelCallScopeIdentity,
+    ) -> Result<BindingAssembly, BindingAssemblyError> {
+        if scope.composition() != self.composition {
+            return Err(BindingAssemblyError::CompositionMismatch);
+        }
+        if scope.catalog() != self.catalog {
+            return Err(BindingAssemblyError::CatalogMismatch);
+        }
+        Ok(BindingAssembly {
+            owner: self.clone(),
+            scope,
+            authority: None,
+        })
+    }
+
+    #[inline]
+    pub fn model_plan(&self) -> &GeneratedModelBindingPlan {
+        &self.model_plan
+    }
+}
+
+/// Opaque paired journal authority emitted only by a finished binding assembly.
+#[allow(missing_debug_implementations)]
+pub struct GeneratedScopeCallAuthority {
+    assembly_identity: Arc<CompositionAssemblyIdentity>,
+    issuer: ModelRequestJournalIssuer,
+    verifier: ModelRequestJournalVerifier,
+}
+
+impl BindingAssembly {
+    pub fn bind_model_consumer(
+        &mut self,
+        consumer: &str,
+        provider_keys: &[Arc<str>],
+    ) -> Result<(), BindingAssemblyError> {
+        if self.authority.is_some() {
+            return Err(BindingAssemblyError::AlreadyBound);
+        }
+        if consumer != self.owner.model_plan.consumer() {
+            return Err(BindingAssemblyError::ConsumerMismatch);
+        }
+        if provider_keys != self.owner.model_plan.provider_keys() {
+            return Err(BindingAssemblyError::ProviderSetMismatch);
+        }
+        let (issuer, verifier) =
+            ModelRequestJournalAuthority::issue_for_generated_scope(self.scope.clone())
+                .map_err(|_| BindingAssemblyError::Incomplete)?;
+        self.authority = Some(GeneratedScopeCallAuthority {
+            assembly_identity: Arc::clone(&self.owner.identity),
+            issuer,
+            verifier,
+        });
+        Ok(())
+    }
+
+    pub fn finish(mut self) -> Result<GeneratedScopeCallAuthority, BindingAssemblyError> {
+        self.authority
+            .take()
+            .ok_or(BindingAssemblyError::Incomplete)
+    }
+}
+
+impl GeneratedScopeCallAuthority {
+    #[doc(hidden)]
+    pub fn into_journal_parts(
+        self,
+        owner: &BindingAssemblyOwner,
+    ) -> Result<(ModelRequestJournalIssuer, ModelRequestJournalVerifier), BindingAssemblyError>
+    {
+        if !Arc::ptr_eq(&self.assembly_identity, &owner.identity) {
+            return Err(BindingAssemblyError::ScopeMismatch);
+        }
+        Ok((self.issuer, self.verifier))
     }
 }
 
@@ -591,34 +1078,150 @@ impl RuntimeAdapterIdentity {
     }
 }
 
-/// An owned runtime primitive bundle. Phase 1A fixtures carry identity only.
+#[cfg(not(target_arch = "wasm32"))]
+pub type RuntimeFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+
+#[cfg(target_arch = "wasm32")]
+pub type RuntimeFuture<'a, T> = Pin<Box<dyn Future<Output = T> + 'a>>;
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum RuntimePrimitiveKind {
+    Clock,
+    Sleep,
+    Spawn,
+}
+
+pub trait RuntimeClock: MaybeSendSync {
+    fn now(&self) -> RuntimeInstant;
+}
+
+pub trait RuntimeSleeper: MaybeSendSync {
+    fn sleep_until(&self, deadline: RuntimeInstant) -> RuntimeFuture<'static, ()>;
+}
+
+#[derive(Debug)]
+struct RuntimeTaskOwnerIdentity {
+    id: NonZeroU64,
+    draining: AtomicBool,
+    admission: Mutex<()>,
+}
+
+/// Opaque owner identity used to account and drain spawned runtime work.
+#[derive(Clone)]
+pub struct RuntimeTaskOwner {
+    bundle_identity: Arc<RuntimePrimitiveBundleIdentity>,
+    identity: Arc<RuntimeTaskOwnerIdentity>,
+}
+
+impl fmt::Debug for RuntimeTaskOwner {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RuntimeTaskOwner")
+            .field("id", &self.identity.id)
+            .finish_non_exhaustive()
+    }
+}
+
+impl RuntimeTaskOwner {
+    #[doc(hidden)]
+    pub fn id(&self) -> u64 {
+        self.identity.id.get()
+    }
+
+    #[doc(hidden)]
+    pub fn is_draining(&self) -> bool {
+        self.identity.draining.load(Ordering::Acquire)
+    }
+
+    fn begin_drain(&self) {
+        self.identity.draining.store(true, Ordering::Release);
+    }
+}
+
+pub trait RuntimeSpawner: MaybeSendSync {
+    fn spawn(
+        &self,
+        owner: RuntimeTaskOwner,
+        task: RuntimeFuture<'static, ()>,
+    ) -> Result<(), RuntimePrimitiveError>;
+
+    fn drain(&self, owner: RuntimeTaskOwner) -> RuntimeFuture<'static, ()>;
+}
+
+/// An owned, explicit runtime primitive bundle.
 #[derive(Clone)]
 pub struct RuntimePrimitives {
     adapter: RuntimeAdapterIdentity,
     bundle_identity: Arc<RuntimePrimitiveBundleIdentity>,
     owner: Option<Arc<dyn Any + Send + Sync>>,
+    clock: Option<Arc<dyn RuntimeClock>>,
+    sleeper: Option<Arc<dyn RuntimeSleeper>>,
+    spawner: Option<Arc<dyn RuntimeSpawner>>,
+    next_task_owner: Arc<AtomicU64>,
 }
 
-#[derive(Debug, Eq, PartialEq)]
-struct RuntimePrimitiveBundleIdentity;
+#[derive(Debug)]
+struct RuntimePrimitiveBundleIdentity {
+    composition_root_claimed: AtomicBool,
+}
+
+impl RuntimePrimitiveBundleIdentity {
+    fn new() -> Self {
+        Self {
+            composition_root_claimed: AtomicBool::new(false),
+        }
+    }
+}
 
 impl RuntimePrimitives {
+    /// Identity-only constructor retained for Phase 1A contract fixtures.
     pub fn new(adapter: RuntimeAdapterIdentity) -> Self {
         Self {
             adapter,
-            bundle_identity: Arc::new(RuntimePrimitiveBundleIdentity),
+            bundle_identity: Arc::new(RuntimePrimitiveBundleIdentity::new()),
             owner: None,
+            clock: None,
+            sleeper: None,
+            spawner: None,
+            next_task_owner: Arc::new(AtomicU64::new(1)),
         }
     }
 
+    /// Owned identity-only constructor retained for non-runtime Phase 1A fixtures.
     pub fn new_owned<T>(adapter: RuntimeAdapterIdentity, owner: Arc<T>) -> Self
     where
         T: Any + Send + Sync,
     {
         Self {
             adapter,
-            bundle_identity: Arc::new(RuntimePrimitiveBundleIdentity),
+            bundle_identity: Arc::new(RuntimePrimitiveBundleIdentity::new()),
             owner: Some(owner),
+            clock: None,
+            sleeper: None,
+            spawner: None,
+            next_task_owner: Arc::new(AtomicU64::new(1)),
+        }
+    }
+
+    #[doc(hidden)]
+    pub fn from_adapter<T>(
+        adapter: RuntimeAdapterIdentity,
+        owner: Arc<T>,
+        clock: Arc<dyn RuntimeClock>,
+        sleeper: Arc<dyn RuntimeSleeper>,
+        spawner: Arc<dyn RuntimeSpawner>,
+    ) -> Self
+    where
+        T: Any + Send + Sync,
+    {
+        Self {
+            adapter,
+            bundle_identity: Arc::new(RuntimePrimitiveBundleIdentity::new()),
+            owner: Some(owner),
+            clock: Some(clock),
+            sleeper: Some(sleeper),
+            spawner: Some(spawner),
+            next_task_owner: Arc::new(AtomicU64::new(1)),
         }
     }
 
@@ -633,6 +1236,146 @@ impl RuntimePrimitives {
     pub fn has_owned_driver(&self) -> bool {
         self.owner.is_some()
     }
+
+    /// Claims the single generated composition root owned by this runtime bundle.
+    #[doc(hidden)]
+    #[inline]
+    pub fn claim_generated_composition_owner(
+        &self,
+        composition: CompositionHash,
+        catalog: Digest,
+        model_plan: GeneratedModelBindingPlan,
+    ) -> Result<RuntimeOwner, BindingAssemblyError> {
+        if !self.has_owned_driver()
+            || [
+                RuntimePrimitiveKind::Clock,
+                RuntimePrimitiveKind::Sleep,
+                RuntimePrimitiveKind::Spawn,
+            ]
+            .into_iter()
+            .any(|primitive| !self.has(primitive))
+        {
+            return Err(BindingAssemblyError::RuntimeOwnerUnavailable);
+        }
+        if model_plan
+            .runtime_primitives()
+            .iter()
+            .any(|primitive| !self.has(*primitive))
+        {
+            return Err(BindingAssemblyError::InvalidPrimitiveProjection);
+        }
+        self.bundle_identity
+            .composition_root_claimed
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| BindingAssemblyError::RuntimeOwnerAlreadyClaimed)?;
+        Ok(RuntimeOwner {
+            composition,
+            catalog,
+            model_plan,
+            bundle_identity: Arc::clone(&self.bundle_identity),
+        })
+    }
+
+    pub fn has(&self, primitive: RuntimePrimitiveKind) -> bool {
+        match primitive {
+            RuntimePrimitiveKind::Clock => self.clock.is_some(),
+            RuntimePrimitiveKind::Sleep => self.sleeper.is_some(),
+            RuntimePrimitiveKind::Spawn => self.spawner.is_some(),
+        }
+    }
+
+    pub fn now(&self) -> Result<RuntimeInstant, RuntimePrimitiveError> {
+        self.clock
+            .as_ref()
+            .map(|clock| clock.now())
+            .ok_or(RuntimePrimitiveError::MissingPrimitive(
+                RuntimePrimitiveKind::Clock,
+            ))
+    }
+
+    pub fn sleep_until(
+        &self,
+        deadline: RuntimeInstant,
+    ) -> Result<RuntimeFuture<'static, ()>, RuntimePrimitiveError> {
+        self.sleeper
+            .as_ref()
+            .map(|sleeper| sleeper.sleep_until(deadline))
+            .ok_or(RuntimePrimitiveError::MissingPrimitive(
+                RuntimePrimitiveKind::Sleep,
+            ))
+    }
+
+    pub fn new_task_owner(&self) -> Result<RuntimeTaskOwner, RuntimePrimitiveError> {
+        if self.spawner.is_none() {
+            return Err(RuntimePrimitiveError::MissingPrimitive(
+                RuntimePrimitiveKind::Spawn,
+            ));
+        }
+        let id = self
+            .next_task_owner
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| {
+                value.checked_add(1)
+            })
+            .map_err(|_| RuntimePrimitiveError::TaskOwnerExhausted)
+            .and_then(|value| {
+                NonZeroU64::new(value).ok_or(RuntimePrimitiveError::TaskOwnerExhausted)
+            })?;
+        Ok(RuntimeTaskOwner {
+            bundle_identity: Arc::clone(&self.bundle_identity),
+            identity: Arc::new(RuntimeTaskOwnerIdentity {
+                id,
+                draining: AtomicBool::new(false),
+                admission: Mutex::new(()),
+            }),
+        })
+    }
+
+    pub fn spawn(
+        &self,
+        owner: RuntimeTaskOwner,
+        task: RuntimeFuture<'static, ()>,
+    ) -> Result<(), RuntimePrimitiveError> {
+        if !Arc::ptr_eq(&self.bundle_identity, &owner.bundle_identity) {
+            return Err(RuntimePrimitiveError::TaskOwnerMismatch);
+        }
+        let spawner = self
+            .spawner
+            .as_ref()
+            .ok_or(RuntimePrimitiveError::MissingPrimitive(
+                RuntimePrimitiveKind::Spawn,
+            ))?;
+        let identity = Arc::clone(&owner.identity);
+        let _admission = identity
+            .admission
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if owner.is_draining() {
+            return Err(RuntimePrimitiveError::TaskOwnerClosed);
+        }
+        spawner.spawn(owner, task)
+    }
+
+    pub fn drain(
+        &self,
+        owner: RuntimeTaskOwner,
+    ) -> Result<RuntimeFuture<'static, ()>, RuntimePrimitiveError> {
+        if !Arc::ptr_eq(&self.bundle_identity, &owner.bundle_identity) {
+            return Err(RuntimePrimitiveError::TaskOwnerMismatch);
+        }
+        let spawner = self
+            .spawner
+            .as_ref()
+            .ok_or(RuntimePrimitiveError::MissingPrimitive(
+                RuntimePrimitiveKind::Spawn,
+            ))?;
+        let identity = Arc::clone(&owner.identity);
+        let _admission = identity
+            .admission
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        owner.begin_drain();
+        Ok(spawner.drain(owner))
+    }
 }
 
 impl fmt::Debug for RuntimePrimitives {
@@ -641,6 +1384,20 @@ impl fmt::Debug for RuntimePrimitives {
             .debug_struct("RuntimePrimitives")
             .field("adapter", &self.adapter)
             .field("has_owned_driver", &self.has_owned_driver())
+            .field(
+                "primitives",
+                &[
+                    self.has(RuntimePrimitiveKind::Clock)
+                        .then_some(RuntimePrimitiveKind::Clock),
+                    self.has(RuntimePrimitiveKind::Sleep)
+                        .then_some(RuntimePrimitiveKind::Sleep),
+                    self.has(RuntimePrimitiveKind::Spawn)
+                        .then_some(RuntimePrimitiveKind::Spawn),
+                ]
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>(),
+            )
             .finish_non_exhaustive()
     }
 }
@@ -650,6 +1407,21 @@ impl PartialEq for RuntimePrimitives {
         self.adapter == other.adapter
             && Arc::ptr_eq(&self.bundle_identity, &other.bundle_identity)
             && match (&self.owner, &other.owner) {
+                (Some(left), Some(right)) => Arc::ptr_eq(left, right),
+                (None, None) => true,
+                _ => false,
+            }
+            && match (&self.clock, &other.clock) {
+                (Some(left), Some(right)) => Arc::ptr_eq(left, right),
+                (None, None) => true,
+                _ => false,
+            }
+            && match (&self.sleeper, &other.sleeper) {
+                (Some(left), Some(right)) => Arc::ptr_eq(left, right),
+                (None, None) => true,
+                _ => false,
+            }
+            && match (&self.spawner, &other.spawner) {
                 (Some(left), Some(right)) => Arc::ptr_eq(left, right),
                 (None, None) => true,
                 _ => false,
@@ -664,6 +1436,11 @@ pub enum RuntimePrimitiveError {
     InvalidAdapterIdentity,
     AdapterMismatch { expected: String, actual: String },
     DriverConstructionFailed,
+    MissingPrimitive(RuntimePrimitiveKind),
+    TaskOwnerExhausted,
+    TaskOwnerMismatch,
+    TaskOwnerClosed,
+    SpawnFailed,
 }
 
 impl fmt::Display for RuntimePrimitiveError {
@@ -679,31 +1456,104 @@ impl fmt::Display for RuntimePrimitiveError {
             Self::DriverConstructionFailed => {
                 formatter.write_str("runtime driver construction failed")
             }
+            Self::MissingPrimitive(primitive) => {
+                write!(formatter, "missing runtime primitive {primitive:?}")
+            }
+            Self::TaskOwnerExhausted => formatter.write_str("runtime task owner ids exhausted"),
+            Self::TaskOwnerMismatch => {
+                formatter.write_str("runtime task owner belongs to another primitive bundle")
+            }
+            Self::TaskOwnerClosed => formatter.write_str("runtime task owner is draining"),
+            Self::SpawnFailed => formatter.write_str("runtime task spawn failed"),
         }
     }
 }
 
 impl std::error::Error for RuntimePrimitiveError {}
 
-/// Primitive projection passed to a Component factory.
+/// Exact primitive projection passed to one Component factory.
 #[derive(Clone, Debug, Default)]
 pub struct RuntimePrimitiveBindings {
     runtime: Option<RuntimePrimitives>,
+    allowed: Arc<[RuntimePrimitiveKind]>,
 }
 
 impl RuntimePrimitiveBindings {
     pub fn none() -> Self {
-        Self { runtime: None }
-    }
-
-    pub fn runtime(runtime: RuntimePrimitives) -> Self {
         Self {
-            runtime: Some(runtime),
+            runtime: None,
+            allowed: Arc::new([]),
         }
     }
 
-    pub fn get(&self) -> Option<&RuntimePrimitives> {
-        self.runtime.as_ref()
+    pub fn projected(
+        runtime: RuntimePrimitives,
+        allowed: &[RuntimePrimitiveKind],
+    ) -> Result<Self, RuntimePrimitiveError> {
+        if !allowed.windows(2).all(|pair| pair[0] < pair[1]) {
+            return Err(RuntimePrimitiveError::DriverConstructionFailed);
+        }
+        for primitive in allowed {
+            if !runtime.has(*primitive) {
+                return Err(RuntimePrimitiveError::MissingPrimitive(*primitive));
+            }
+        }
+        Ok(Self {
+            runtime: Some(runtime),
+            allowed: Arc::from(allowed),
+        })
+    }
+
+    pub fn allowed(&self) -> &[RuntimePrimitiveKind] {
+        &self.allowed
+    }
+
+    pub fn has(&self, primitive: RuntimePrimitiveKind) -> bool {
+        self.allowed.binary_search(&primitive).is_ok()
+    }
+
+    pub fn now(&self) -> Result<RuntimeInstant, RuntimePrimitiveError> {
+        self.require(RuntimePrimitiveKind::Clock)?.now()
+    }
+
+    pub fn sleep_until(
+        &self,
+        deadline: RuntimeInstant,
+    ) -> Result<RuntimeFuture<'static, ()>, RuntimePrimitiveError> {
+        self.require(RuntimePrimitiveKind::Sleep)?
+            .sleep_until(deadline)
+    }
+
+    pub fn new_task_owner(&self) -> Result<RuntimeTaskOwner, RuntimePrimitiveError> {
+        self.require(RuntimePrimitiveKind::Spawn)?.new_task_owner()
+    }
+
+    pub fn spawn(
+        &self,
+        owner: RuntimeTaskOwner,
+        task: RuntimeFuture<'static, ()>,
+    ) -> Result<(), RuntimePrimitiveError> {
+        self.require(RuntimePrimitiveKind::Spawn)?
+            .spawn(owner, task)
+    }
+
+    pub fn drain(
+        &self,
+        owner: RuntimeTaskOwner,
+    ) -> Result<RuntimeFuture<'static, ()>, RuntimePrimitiveError> {
+        self.require(RuntimePrimitiveKind::Spawn)?.drain(owner)
+    }
+
+    fn require(
+        &self,
+        primitive: RuntimePrimitiveKind,
+    ) -> Result<&RuntimePrimitives, RuntimePrimitiveError> {
+        if !self.has(primitive) {
+            return Err(RuntimePrimitiveError::MissingPrimitive(primitive));
+        }
+        self.runtime
+            .as_ref()
+            .ok_or(RuntimePrimitiveError::MissingPrimitive(primitive))
     }
 }
 
@@ -858,8 +1708,9 @@ impl LifecycleOperationReservationDraft {
 /// The authoritative reservation committed with a persistent operation id.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LifecycleOperationReservation {
+    operation_id: AgentLifecycleOperationId,
     draft: LifecycleOperationReservationDraft,
-    reserved_session_id: Option<SessionId>,
+    reserved_session_id: SessionId,
 }
 
 impl LifecycleOperationReservation {
@@ -888,17 +1739,22 @@ impl LifecycleOperationReservation {
             }
         };
         Ok(Self {
+            operation_id: *operation_id,
             draft,
-            reserved_session_id: Some(reserved_session_id),
+            reserved_session_id,
         })
+    }
+
+    pub const fn operation_id(&self) -> AgentLifecycleOperationId {
+        self.operation_id
     }
 
     pub const fn draft(&self) -> &LifecycleOperationReservationDraft {
         &self.draft
     }
 
-    pub const fn reserved_session_id(&self) -> Option<&SessionId> {
-        self.reserved_session_id.as_ref()
+    pub const fn reserved_session_id(&self) -> &SessionId {
+        &self.reserved_session_id
     }
 }
 
@@ -916,6 +1772,7 @@ pub enum AgentOperationAllocationError {
     OperationNotFound,
     ReservationStatusUnknown,
     UnsupportedRecovery,
+    ResourceExhausted,
 }
 
 impl fmt::Display for AgentOperationAllocationError {
@@ -937,6 +1794,7 @@ impl fmt::Display for AgentOperationAllocationError {
                 Self::OperationNotFound => "lifecycle operation was not found",
                 Self::ReservationStatusUnknown => "lifecycle reservation status is unknown",
                 Self::UnsupportedRecovery => "lifecycle operation cannot be recovered",
+                Self::ResourceExhausted => "lifecycle operation capacity is exhausted",
             }
         )
     }
@@ -962,6 +1820,78 @@ pub struct VolatileLifecycleOperation {
 impl VolatileLifecycleOperation {
     pub const fn id(&self) -> AgentLifecycleOperationId {
         self.id
+    }
+}
+
+/// A complete, process-local create reservation sealed around one volatile
+/// lifecycle capability. The capability is consumed with the reservation and
+/// cannot be reconstructed from its observable operation id.
+#[allow(missing_debug_implementations)]
+pub struct VolatileLifecycleOperationReservation {
+    operation: VolatileLifecycleOperation,
+    proposed_session_id: SessionId,
+    request_fingerprint: Digest,
+    projected_authority_digest: Digest,
+    projected_plan_digest: Digest,
+    composition: CompositionHash,
+    catalog: Digest,
+}
+
+impl VolatileLifecycleOperationReservation {
+    #[doc(hidden)]
+    pub fn from_projected_request(
+        operation: VolatileLifecycleOperation,
+        proposed_session_id: SessionId,
+        request_fingerprint: Digest,
+        projected_authority_digest: Digest,
+        projected_plan_digest: Digest,
+        composition: CompositionHash,
+        catalog: Digest,
+    ) -> Result<Self, LifecycleReservationEncodingError> {
+        if SessionId::from_canonical_v1_bytes(operation.id().to_canonical_v1_bytes())
+            != Ok(proposed_session_id)
+        {
+            return Err(LifecycleReservationEncodingError::InvalidCanonicalField(
+                "proposed-session-id",
+            ));
+        }
+        Ok(Self {
+            operation,
+            proposed_session_id,
+            request_fingerprint,
+            projected_authority_digest,
+            projected_plan_digest,
+            composition,
+            catalog,
+        })
+    }
+
+    pub const fn operation(&self) -> &VolatileLifecycleOperation {
+        &self.operation
+    }
+
+    pub const fn proposed_session_id(&self) -> SessionId {
+        self.proposed_session_id
+    }
+
+    pub const fn request_fingerprint(&self) -> Digest {
+        self.request_fingerprint
+    }
+
+    pub const fn projected_authority_digest(&self) -> Digest {
+        self.projected_authority_digest
+    }
+
+    pub const fn projected_plan_digest(&self) -> Digest {
+        self.projected_plan_digest
+    }
+
+    pub const fn composition(&self) -> CompositionHash {
+        self.composition
+    }
+
+    pub const fn catalog(&self) -> Digest {
+        self.catalog
     }
 }
 
@@ -1018,9 +1948,74 @@ impl VolatileLifecycleOperationIssuer {
     }
 
     #[doc(hidden)]
+    pub fn recover(
+        &self,
+        id: AgentLifecycleOperationId,
+    ) -> Result<VolatileLifecycleOperation, AgentOperationAllocationError> {
+        if id.kind() != AgentLifecycleOperationIdKind::Volatile {
+            return Err(AgentOperationAllocationError::UnsupportedRecovery);
+        }
+        let bytes = id.to_canonical_v1_bytes();
+        let generation = self.witness.generation.get().to_be_bytes();
+        let counter = u64::from_be_bytes(
+            bytes[42..50]
+                .try_into()
+                .map_err(|_| AgentOperationAllocationError::IssuerStateCorrupt)?,
+        );
+        if &bytes[2..24] != b"rust-agent-volatile-v1"
+            || bytes[24..26] != [0, 0]
+            || bytes[26..34] != generation
+            || bytes[34..42] != generation
+            || counter == 0
+            || counter >= self.next.load(Ordering::Acquire)
+        {
+            return Err(AgentOperationAllocationError::OperationNotFound);
+        }
+        Ok(VolatileLifecycleOperation {
+            id,
+            witness: Arc::clone(&self.witness),
+        })
+    }
+
+    #[doc(hidden)]
     pub fn owns(&self, operation: &VolatileLifecycleOperation) -> bool {
         Arc::ptr_eq(&self.witness, &operation.witness)
             && operation.id.kind() == AgentLifecycleOperationIdKind::Volatile
+    }
+}
+
+/// Lifecycle-bound identity for one Host-visible Agent turn.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct AgentRequestId {
+    agent_id: AgentId,
+    lifecycle: AgentLifecycleNonce,
+    sequence: NonZeroU64,
+}
+
+impl AgentRequestId {
+    #[doc(hidden)]
+    pub const fn from_agent(
+        agent_id: AgentId,
+        lifecycle: AgentLifecycleNonce,
+        sequence: NonZeroU64,
+    ) -> Self {
+        Self {
+            agent_id,
+            lifecycle,
+            sequence,
+        }
+    }
+
+    pub const fn agent_id(self) -> AgentId {
+        self.agent_id
+    }
+
+    pub const fn lifecycle(self) -> AgentLifecycleNonce {
+        self.lifecycle
+    }
+
+    pub const fn sequence(self) -> u64 {
+        self.sequence.get()
     }
 }
 
@@ -1080,8 +2075,35 @@ pub enum AgentEventFeedError {
         limit: u64,
     },
     UnsupportedReplay,
+    RuntimeUnavailable,
     Closed,
 }
+
+impl fmt::Display for AgentEventFeedError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::StaleLifecycle => formatter.write_str("event cursor lifecycle is stale"),
+            Self::CursorFromDifferentAgent => {
+                formatter.write_str("event cursor belongs to a different Agent")
+            }
+            Self::CursorExpired { .. } => formatter.write_str("event cursor has expired"),
+            Self::InvalidLimit => formatter.write_str("event feed limits are invalid"),
+            Self::AdmissionBudgetExceeded {
+                resource,
+                requested,
+                limit,
+            } => write!(
+                formatter,
+                "event feed {resource:?} budget exceeded: requested {requested}, limit {limit}"
+            ),
+            Self::UnsupportedReplay => formatter.write_str("event replay is unsupported"),
+            Self::RuntimeUnavailable => formatter.write_str("event feed runtime is unavailable"),
+            Self::Closed => formatter.write_str("event feed publisher is closed"),
+        }
+    }
+}
+
+impl std::error::Error for AgentEventFeedError {}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AgentPublicStatus {
@@ -1095,14 +2117,18 @@ pub enum AgentPublicStatus {
 pub enum AgentEventKind {
     RequestStarted,
     OutputDelta,
+    OutputFinal,
+    Usage,
     RequestCompleted,
     RequestCancelled,
+    RequestFailed,
     StatusChanged,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AgentEventEnvelope {
     pub cursor: AgentEventCursor,
+    pub request_id: Option<AgentRequestId>,
     pub kind: AgentEventKind,
     pub payload: String,
 }
@@ -1239,6 +2265,7 @@ pub enum PublicationDirectoryError {
     NotPublished,
     StaleLifecycle,
     GenerationExhausted,
+    InvalidStateTransition,
     SessionModeMismatch,
 }
 
@@ -1249,6 +2276,7 @@ impl fmt::Display for PublicationDirectoryError {
             Self::NotPublished => "Agent is not published",
             Self::StaleLifecycle => "Agent lifecycle is stale",
             Self::GenerationExhausted => "publication generation is exhausted",
+            Self::InvalidStateTransition => "publication state transition is invalid",
             Self::SessionModeMismatch => "publication Session mode does not match its identity",
         })
     }
@@ -1331,6 +2359,20 @@ impl PublicationDirectoryWriteHandle {
         if state.entries.contains_key(&candidate.entry.agent_id) {
             return Err(PublicationDirectoryError::AlreadyPublished);
         }
+        let remaining_transitions = state.entries.values().try_fold(0_u64, |total, entry| {
+            total.checked_add(match entry.state {
+                PublicationState::PublishedAdmissionClosed => 3,
+                PublicationState::Ready => 2,
+                PublicationState::Closing => 1,
+            })
+        });
+        if remaining_transitions
+            .and_then(|remaining| remaining.checked_add(4))
+            .and_then(|required| state.generation.checked_add(required))
+            .is_none()
+        {
+            return Err(PublicationDirectoryError::GenerationExhausted);
+        }
         state.generation = state
             .generation
             .checked_add(1)
@@ -1402,6 +2444,18 @@ impl PublicationDirectoryWriteHandle {
         if entry.lifecycle != lifecycle {
             return Err(PublicationDirectoryError::StaleLifecycle);
         }
+        if let Some(next_state) = next_state {
+            let valid = matches!(
+                (entry.state, next_state),
+                (
+                    PublicationState::PublishedAdmissionClosed,
+                    PublicationState::Ready
+                ) | (PublicationState::Ready, PublicationState::Closing)
+            );
+            if !valid {
+                return Err(PublicationDirectoryError::InvalidStateTransition);
+            }
+        }
         state.generation = state
             .generation
             .checked_add(1)
@@ -1440,15 +2494,21 @@ pub struct LifecycleObserverError {
 #[derive(Clone, Debug)]
 pub struct LifecycleNotificationContext {
     cancellation: CancellationToken,
-    deadline: Instant,
+    deadline: RuntimeInstant,
+    runtime: RuntimePrimitives,
 }
 
 impl LifecycleNotificationContext {
     #[doc(hidden)]
-    pub fn new(cancellation: CancellationToken, deadline: Instant) -> Self {
+    pub fn new(
+        cancellation: CancellationToken,
+        deadline: RuntimeInstant,
+        runtime: RuntimePrimitives,
+    ) -> Self {
         Self {
             cancellation,
             deadline,
+            runtime,
         }
     }
 
@@ -1457,11 +2517,13 @@ impl LifecycleNotificationContext {
     }
 
     pub fn is_expired(&self) -> bool {
-        Instant::now() >= self.deadline
+        self.runtime.now().map_or(true, |now| now >= self.deadline)
     }
 
     pub fn remaining(&self) -> Duration {
-        self.deadline.saturating_duration_since(Instant::now())
+        self.runtime.now().map_or(Duration::ZERO, |now| {
+            self.deadline.saturating_duration_since(now)
+        })
     }
 }
 
@@ -1495,12 +2557,80 @@ pub trait LifecycleObserver: MaybeSendSync {
     ) -> LifecycleObserverFuture<'a>;
 }
 
+#[derive(Clone)]
+pub struct LifecycleObserverBinding {
+    component: Option<Arc<str>>,
+    observer: Arc<dyn LifecycleObserver>,
+}
+
+impl fmt::Debug for LifecycleObserverBinding {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("LifecycleObserverBinding(<opaque>)")
+    }
+}
+
+impl LifecycleObserverBinding {
+    pub fn from_provider<T>(provider: Arc<T>) -> Self
+    where
+        T: LifecycleObserver + 'static,
+    {
+        Self {
+            component: None,
+            observer: provider,
+        }
+    }
+
+    #[doc(hidden)]
+    pub fn from_generated_component(
+        component: impl Into<Arc<str>>,
+        provider: Arc<dyn LifecycleObserver>,
+    ) -> Result<Self, BindingAssemblyError> {
+        let component = component.into();
+        if !valid_kebab_id(&component) {
+            return Err(BindingAssemblyError::InvalidIdentity("lifecycle observer"));
+        }
+        Ok(Self {
+            component: Some(component),
+            observer: provider,
+        })
+    }
+
+    #[doc(hidden)]
+    #[inline]
+    pub fn generated_component_identity(&self) -> Option<&str> {
+        self.component.as_deref()
+    }
+
+    #[doc(hidden)]
+    #[inline]
+    pub fn into_generated_parts(
+        self,
+    ) -> Result<(Arc<str>, Arc<dyn LifecycleObserver>), BindingAssemblyError> {
+        let component = self
+            .component
+            .ok_or(BindingAssemblyError::InvalidIdentity("lifecycle observer"))?;
+        Ok((component, self.observer))
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CommandAdmissionError {
     Closed,
     Busy,
     StaleLifecycle,
 }
+
+impl fmt::Display for CommandAdmissionError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Closed => "command admission is closed",
+            Self::Busy => "Agent is busy",
+            Self::StaleLifecycle => "command lifecycle is stale",
+        })
+    }
+}
+
+impl std::error::Error for CommandAdmissionError {}
 
 /// Weakly held admission seam used by the command dispatcher without importing
 /// the Agent or Session API crates.
@@ -1566,12 +2696,227 @@ impl From<AppHandoffError> for BuildError {
 mod tests {
     use super::*;
 
+    #[derive(Debug, Default)]
+    struct TestRuntimeDriver {
+        tasks: Arc<AtomicU64>,
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[derive(Debug)]
+    struct BlockingRegistrationDriver {
+        spawn_entered: std::sync::Barrier,
+        release_spawn: std::sync::Barrier,
+        registered: AtomicBool,
+        drain_saw_registration: AtomicBool,
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    impl BlockingRegistrationDriver {
+        fn new() -> Self {
+            Self {
+                spawn_entered: std::sync::Barrier::new(2),
+                release_spawn: std::sync::Barrier::new(2),
+                registered: AtomicBool::new(false),
+                drain_saw_registration: AtomicBool::new(false),
+            }
+        }
+    }
+
+    impl RuntimeClock for TestRuntimeDriver {
+        fn now(&self) -> RuntimeInstant {
+            RuntimeInstant::from_monotonic_duration(Duration::ZERO)
+        }
+    }
+
+    impl RuntimeSleeper for TestRuntimeDriver {
+        fn sleep_until(&self, _deadline: RuntimeInstant) -> RuntimeFuture<'static, ()> {
+            Box::pin(async {})
+        }
+    }
+
+    impl RuntimeSpawner for TestRuntimeDriver {
+        fn spawn(
+            &self,
+            _owner: RuntimeTaskOwner,
+            _task: RuntimeFuture<'static, ()>,
+        ) -> Result<(), RuntimePrimitiveError> {
+            self.tasks.fetch_add(1, Ordering::AcqRel);
+            Ok(())
+        }
+
+        fn drain(&self, _owner: RuntimeTaskOwner) -> RuntimeFuture<'static, ()> {
+            let tasks = Arc::clone(&self.tasks);
+            Box::pin(async move {
+                tasks.store(0, Ordering::Release);
+            })
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    impl RuntimeClock for BlockingRegistrationDriver {
+        fn now(&self) -> RuntimeInstant {
+            RuntimeInstant::from_monotonic_duration(Duration::ZERO)
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    impl RuntimeSleeper for BlockingRegistrationDriver {
+        fn sleep_until(&self, _deadline: RuntimeInstant) -> RuntimeFuture<'static, ()> {
+            Box::pin(async {})
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    impl RuntimeSpawner for BlockingRegistrationDriver {
+        fn spawn(
+            &self,
+            _owner: RuntimeTaskOwner,
+            _task: RuntimeFuture<'static, ()>,
+        ) -> Result<(), RuntimePrimitiveError> {
+            self.spawn_entered.wait();
+            self.release_spawn.wait();
+            self.registered.store(true, Ordering::Release);
+            Ok(())
+        }
+
+        fn drain(&self, _owner: RuntimeTaskOwner) -> RuntimeFuture<'static, ()> {
+            self.drain_saw_registration
+                .store(self.registered.load(Ordering::Acquire), Ordering::Release);
+            Box::pin(async {})
+        }
+    }
+
+    fn explicit_runtime() -> RuntimePrimitives {
+        let driver = Arc::new(TestRuntimeDriver::default());
+        let clock: Arc<dyn RuntimeClock> = driver.clone();
+        let sleeper: Arc<dyn RuntimeSleeper> = driver.clone();
+        let spawner: Arc<dyn RuntimeSpawner> = driver.clone();
+        RuntimePrimitives::from_adapter(
+            RuntimeAdapterIdentity::checked("test-explicit-runtime").unwrap(),
+            driver,
+            clock,
+            sleeper,
+            spawner,
+        )
+    }
+
     #[test]
     fn runtime_identity_is_checked_and_owned() {
         assert!(RuntimeAdapterIdentity::checked("").is_err());
         let identity = RuntimeAdapterIdentity::checked("fixture-runtime").unwrap();
         let runtime = RuntimePrimitives::new(identity);
         assert_eq!(runtime.adapter().as_str(), "fixture-runtime");
+    }
+
+    #[test]
+    fn explicit_runtime_primitives_are_projected_and_owner_tasks_drain() {
+        let runtime = explicit_runtime();
+        let projection = RuntimePrimitiveBindings::projected(
+            runtime.clone(),
+            &[RuntimePrimitiveKind::Clock, RuntimePrimitiveKind::Spawn],
+        )
+        .unwrap();
+        assert!(projection.has(RuntimePrimitiveKind::Clock));
+        assert!(!projection.has(RuntimePrimitiveKind::Sleep));
+        assert!(projection.now().is_ok());
+        assert!(matches!(
+            projection.sleep_until(runtime.now().unwrap()),
+            Err(RuntimePrimitiveError::MissingPrimitive(
+                RuntimePrimitiveKind::Sleep
+            ))
+        ));
+        let owner = runtime.new_task_owner().unwrap();
+        runtime.spawn(owner.clone(), Box::pin(async {})).unwrap();
+        run_ready(runtime.drain(owner.clone()).unwrap());
+        assert_eq!(
+            runtime.spawn(owner, Box::pin(async {})),
+            Err(RuntimePrimitiveError::TaskOwnerClosed)
+        );
+
+        let foreign = explicit_runtime();
+        let foreign_owner = foreign.new_task_owner().unwrap();
+        assert_eq!(
+            runtime.spawn(foreign_owner, Box::pin(async {})),
+            Err(RuntimePrimitiveError::TaskOwnerMismatch)
+        );
+        let foreign_owner = foreign.new_task_owner().unwrap();
+        assert!(matches!(
+            runtime.drain(foreign_owner),
+            Err(RuntimePrimitiveError::TaskOwnerMismatch)
+        ));
+        assert!(
+            RuntimePrimitiveBindings::projected(
+                runtime,
+                &[RuntimePrimitiveKind::Spawn, RuntimePrimitiveKind::Clock]
+            )
+            .is_err()
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn drain_cannot_overtake_an_in_flight_task_registration() {
+        let driver = Arc::new(BlockingRegistrationDriver::new());
+        let clock: Arc<dyn RuntimeClock> = driver.clone();
+        let sleeper: Arc<dyn RuntimeSleeper> = driver.clone();
+        let spawner: Arc<dyn RuntimeSpawner> = driver.clone();
+        let runtime = RuntimePrimitives::from_adapter(
+            RuntimeAdapterIdentity::checked("blocking-registration-runtime").unwrap(),
+            driver.clone(),
+            clock,
+            sleeper,
+            spawner,
+        );
+        let owner = runtime.new_task_owner().unwrap();
+
+        let spawn_runtime = runtime.clone();
+        let spawn_owner = owner.clone();
+        let spawn =
+            std::thread::spawn(move || spawn_runtime.spawn(spawn_owner, Box::pin(async {})));
+        driver.spawn_entered.wait();
+        assert!(owner.identity.admission.try_lock().is_err());
+
+        let drain_runtime = runtime.clone();
+        let drain_owner = owner.clone();
+        let drain = std::thread::spawn(move || drain_runtime.drain(drain_owner));
+        driver.release_spawn.wait();
+
+        spawn.join().unwrap().unwrap();
+        run_ready(drain.join().unwrap().unwrap());
+        assert!(driver.drain_saw_registration.load(Ordering::Acquire));
+        assert_eq!(
+            runtime.spawn(owner, Box::pin(async {})),
+            Err(RuntimePrimitiveError::TaskOwnerClosed)
+        );
+    }
+
+    #[test]
+    fn lifecycle_notification_deadlines_use_the_projected_monotonic_clock() {
+        let runtime = explicit_runtime();
+        let context = LifecycleNotificationContext::new(
+            CancellationToken::new(),
+            RuntimeInstant::from_monotonic_duration(Duration::from_secs(1)),
+            runtime,
+        );
+        assert!(!context.is_expired());
+        assert_eq!(context.remaining(), Duration::from_secs(1));
+
+        let unavailable = LifecycleNotificationContext::new(
+            CancellationToken::new(),
+            RuntimeInstant::from_monotonic_duration(Duration::from_secs(1)),
+            RuntimePrimitives::new(RuntimeAdapterIdentity::checked("no-clock").unwrap()),
+        );
+        assert!(unavailable.is_expired());
+        assert_eq!(unavailable.remaining(), Duration::ZERO);
+    }
+
+    fn run_ready<F: Future>(future: F) -> F::Output {
+        let mut future = std::pin::pin!(future);
+        let mut context = Context::from_waker(Waker::noop());
+        match future.as_mut().poll(&mut context) {
+            Poll::Ready(value) => value,
+            Poll::Pending => panic!("test future unexpectedly pending"),
+        }
     }
 
     #[test]
@@ -1745,6 +3090,7 @@ mod tests {
                 CancellationToken::new(),
                 None,
                 NonZeroUsize::new(1024).unwrap(),
+                RuntimePrimitives::new(RuntimeAdapterIdentity::checked("test-runtime").unwrap()),
             )
             .unwrap();
         assert!(verifier.verifies(&proof, &projection, record_digest));
@@ -1753,6 +3099,151 @@ mod tests {
         let (_, foreign) =
             ModelRequestJournalAuthority::issue_for_generated_scope(model_scope()).unwrap();
         assert!(!foreign.verifies(&proof, &projection, record_digest));
+    }
+
+    #[test]
+    fn binding_assembly_accepts_only_the_exact_manifest_plan() {
+        let scope = model_scope();
+        let observer_identities = [Arc::<str>::from("observer-a")];
+        let plan = GeneratedModelBindingPlan::checked(
+            "driver-direct",
+            vec![
+                (Arc::<str>::from("model-host"), Arc::<str>::from("host")),
+                (Arc::<str>::from("model-replay"), Arc::<str>::from("replay")),
+            ],
+            observer_identities.to_vec(),
+            vec![RuntimePrimitiveKind::Clock],
+        )
+        .unwrap();
+        let incomplete_runtime = RuntimePrimitives::new_owned(
+            RuntimeAdapterIdentity::checked("incomplete-runtime").unwrap(),
+            Arc::new(()),
+        );
+        assert!(matches!(
+            incomplete_runtime.claim_generated_composition_owner(
+                scope.composition(),
+                scope.catalog(),
+                plan.clone(),
+            ),
+            Err(BindingAssemblyError::RuntimeOwnerUnavailable)
+        ));
+        let runtime = explicit_runtime();
+        let runtime_owner = runtime
+            .claim_generated_composition_owner(scope.composition(), scope.catalog(), plan.clone())
+            .unwrap();
+        let owner = begin_composition_assembly(runtime_owner, scope.composition(), scope.catalog())
+            .unwrap()
+            .finish();
+        let identities = [
+            (Arc::<str>::from("model-host"), Arc::<str>::from("host")),
+            (Arc::<str>::from("model-replay"), Arc::<str>::from("replay")),
+        ];
+        owner
+            .verify_generated_root(
+                scope.composition(),
+                scope.catalog(),
+                &identities,
+                &observer_identities,
+                &runtime,
+            )
+            .unwrap();
+        assert!(matches!(
+            owner.verify_generated_root(
+                CompositionHash::from_digest(Digest::from_bytes([99; 32])),
+                scope.catalog(),
+                &identities,
+                &observer_identities,
+                &explicit_runtime(),
+            ),
+            Err(BindingAssemblyError::CompositionMismatch)
+        ));
+        assert!(matches!(
+            owner.verify_generated_root(
+                scope.composition(),
+                scope.catalog(),
+                &identities,
+                &observer_identities,
+                &RuntimePrimitives::new(RuntimeAdapterIdentity::checked("identity-only").unwrap()),
+            ),
+            Err(BindingAssemblyError::RuntimeOwnerMismatch)
+        ));
+        assert!(matches!(
+            runtime.claim_generated_composition_owner(
+                scope.composition(),
+                scope.catalog(),
+                plan.clone(),
+            ),
+            Err(BindingAssemblyError::RuntimeOwnerAlreadyClaimed)
+        ));
+        let substituted = [
+            (Arc::<str>::from("attacker-host"), Arc::<str>::from("host")),
+            (Arc::<str>::from("model-replay"), Arc::<str>::from("replay")),
+        ];
+        assert!(matches!(
+            owner.verify_generated_root(
+                scope.composition(),
+                scope.catalog(),
+                &substituted,
+                &observer_identities,
+                &runtime,
+            ),
+            Err(BindingAssemblyError::ProviderSetMismatch)
+        ));
+        assert!(matches!(
+            owner.verify_generated_root(
+                scope.composition(),
+                scope.catalog(),
+                &identities,
+                &[Arc::<str>::from("observer-b")],
+                &runtime,
+            ),
+            Err(BindingAssemblyError::ObserverSetMismatch)
+        ));
+        let mut assembly = owner.begin_binding_assembly(scope.clone()).unwrap();
+        assert_eq!(
+            assembly.bind_model_consumer(
+                "driver-direct",
+                &[Arc::<str>::from("replay"), Arc::<str>::from("host")]
+            ),
+            Err(BindingAssemblyError::ProviderSetMismatch)
+        );
+        assembly
+            .bind_model_consumer(
+                "driver-direct",
+                &[Arc::<str>::from("host"), Arc::<str>::from("replay")],
+            )
+            .unwrap();
+        let authority = assembly.finish().unwrap();
+        let foreign_runtime = explicit_runtime();
+        let foreign_plan = GeneratedModelBindingPlan::checked(
+            "driver-direct",
+            identities.to_vec(),
+            observer_identities.to_vec(),
+            vec![RuntimePrimitiveKind::Clock],
+        )
+        .unwrap();
+        let foreign_runtime_owner = foreign_runtime
+            .claim_generated_composition_owner(scope.composition(), scope.catalog(), foreign_plan)
+            .unwrap();
+        let foreign_owner =
+            begin_composition_assembly(foreign_runtime_owner, scope.composition(), scope.catalog())
+                .unwrap()
+                .finish();
+        assert!(matches!(
+            authority.into_journal_parts(&foreign_owner),
+            Err(BindingAssemblyError::ScopeMismatch)
+        ));
+        let wrong_scope = ModelCallScopeIdentity::for_generated_agent(
+            scope.agent_id(),
+            scope.lifecycle(),
+            None,
+            CompositionHash::from_digest(Digest::from_bytes([99; 32])),
+            scope.catalog(),
+        );
+        assert!(matches!(
+            owner.begin_binding_assembly(wrong_scope),
+            Err(BindingAssemblyError::CompositionMismatch)
+        ));
     }
 
     #[test]
@@ -1766,6 +3257,48 @@ mod tests {
 
         let foreign = VolatileLifecycleOperationIssuer::for_generated_app().unwrap();
         assert!(!foreign.owns(&first));
+    }
+
+    #[test]
+    fn volatile_session_reservation_seals_the_complete_projected_request() {
+        let issuer = VolatileLifecycleOperationIssuer::for_generated_app().unwrap();
+        let volatile_operation = issuer.allocate().unwrap();
+        let proposed_session_id =
+            SessionId::from_canonical_v1_bytes(volatile_operation.id().to_canonical_v1_bytes())
+                .unwrap();
+        let reservation = VolatileLifecycleOperationReservation::from_projected_request(
+            volatile_operation,
+            proposed_session_id,
+            Digest::from_bytes([1; 32]),
+            Digest::from_bytes([2; 32]),
+            Digest::from_bytes([3; 32]),
+            CompositionHash::from_digest(Digest::from_bytes([4; 32])),
+            Digest::from_bytes([5; 32]),
+        )
+        .unwrap();
+        assert_eq!(reservation.proposed_session_id(), proposed_session_id);
+        assert_eq!(
+            reservation.request_fingerprint(),
+            Digest::from_bytes([1; 32])
+        );
+        assert!(issuer.owns(reservation.operation()));
+
+        let volatile_operation = issuer.allocate().unwrap();
+        let foreign_session = SessionId::from_persistent_operation(operation(2, 8)).unwrap();
+        assert!(matches!(
+            VolatileLifecycleOperationReservation::from_projected_request(
+                volatile_operation,
+                foreign_session,
+                Digest::from_bytes([1; 32]),
+                Digest::from_bytes([2; 32]),
+                Digest::from_bytes([3; 32]),
+                CompositionHash::from_digest(Digest::from_bytes([4; 32])),
+                Digest::from_bytes([5; 32]),
+            ),
+            Err(LifecycleReservationEncodingError::InvalidCanonicalField(
+                "proposed-session-id"
+            ))
+        ));
     }
 
     #[test]
@@ -1789,9 +3322,53 @@ mod tests {
         assert_eq!(published.entries().len(), 1);
         let ready = writer.mark_ready(agent, lifecycle).unwrap();
         assert_eq!(ready.entries()[0].state(), PublicationState::Ready);
+        let closing = writer.mark_closing(agent, lifecycle).unwrap();
+        assert_eq!(closing.entries()[0].state(), PublicationState::Closing);
         let (_, removed) = writer.remove(agent, lifecycle).unwrap();
         assert!(removed.entries().is_empty());
-        assert_eq!(removed.generation(), 3);
+        assert_eq!(removed.generation(), 4);
+    }
+
+    #[test]
+    fn publication_directory_reserves_terminal_generation_capacity_before_publish() {
+        let (directory, writer) = new_publication_directory();
+        let agent = AgentId::from_nonzero_u128(12).unwrap();
+        let lifecycle = AgentLifecycleNonce::from_nonzero(NonZeroU64::new(13).unwrap());
+        let candidate = PublicationCandidate::for_generated_agent(
+            agent,
+            lifecycle,
+            None,
+            PublishedSessionMode::Sessionless,
+        );
+        writer
+            .state
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .generation = u64::MAX - 3;
+        assert_eq!(
+            writer.publish(candidate.clone()),
+            Err(PublicationDirectoryError::GenerationExhausted)
+        );
+        let unchanged = directory.snapshot();
+        assert_eq!(unchanged.generation(), u64::MAX - 3);
+        assert!(unchanged.entries().is_empty());
+
+        writer
+            .state
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .generation = u64::MAX - 4;
+        writer.publish(candidate).unwrap();
+        assert_eq!(
+            writer.mark_closing(agent, lifecycle),
+            Err(PublicationDirectoryError::InvalidStateTransition)
+        );
+        writer.mark_ready(agent, lifecycle).unwrap();
+        writer.mark_closing(agent, lifecycle).unwrap();
+        writer.remove(agent, lifecycle).unwrap();
+        let terminal = directory.snapshot();
+        assert_eq!(terminal.generation(), u64::MAX);
+        assert!(terminal.entries().is_empty());
     }
 
     fn recovery_key() -> AgentOperationRecoveryKey {
@@ -1833,12 +3410,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            reservation
-                .reserved_session_id()
-                .unwrap()
-                .to_canonical_v1_bytes(),
+            reservation.reserved_session_id().to_canonical_v1_bytes(),
             operation.to_canonical_v1_bytes()
         );
+        assert_eq!(reservation.operation_id(), operation);
         assert_eq!(
             reservation.draft().request_fingerprint(),
             &Digest::from_bytes([1; 32])
@@ -1863,7 +3438,7 @@ mod tests {
             &operation(2, 9),
         )
         .unwrap();
-        assert_eq!(reservation.reserved_session_id(), Some(&existing));
+        assert_eq!(reservation.reserved_session_id(), &existing);
 
         assert!(
             LifecycleOperationReservationDraft::from_projected_request(

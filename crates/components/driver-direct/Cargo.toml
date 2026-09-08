@@ -16,7 +16,10 @@ dependencies-type = "rust_agent_driver_direct::Dependencies"
 config-type = "rust_agent_driver_direct::Config"
 config-source = "none"
 targets = ["cfg(true)"]
-support = "production"
+target-support = [
+    { predicate = 'cfg(target_os = "linux")', tier = "production" },
+    { predicate = 'cfg(not(target_os = "linux"))', tier = "experimental" },
+]
 lifecycle-effects = []
 provides = [{ capability = "cap:agent-driver", priority = 100, effects = [] }]
 requires = [{ capability = "cap:model", mode = "required", field = "model" }]

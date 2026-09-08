@@ -18,7 +18,10 @@ config-source = "host"
 config-key = "model-host"
 host-api = "rust_agent_model_host::host_api"
 targets = ["cfg(true)"]
-support = "production"
+target-support = [
+    { predicate = 'cfg(target_os = "linux")', tier = "production" },
+    { predicate = 'cfg(not(target_os = "linux"))', tier = "experimental" },
+]
 lifecycle-effects = []
 provides = [{ capability = "cap:model", key = "host", priority = 50, effects = ["host-bridge"] }]
 requires = []

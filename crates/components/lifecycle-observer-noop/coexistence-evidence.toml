@@ -1,0 +1,6 @@
+schema = 1
+owner = "lifecycle-observer-noop"
+mode = "concurrent-independent"
+rule-set = "phase-1a-independent-v1"
+claims = ["boundary-config", "different-config", "identical-config", "independent-real-resources", "two-app-in-process"]
+tests = ["rust_agent_lifecycle_observer_noop::tests::observer_is_stateless_and_requires_no_runtime_primitive"]

@@ -1,0 +1,55 @@
+error[E0616]: field `schema_version` of struct `SessionIndexCursor` is private
+ --> tests/ui/access_private_session_protocol_fields.rs:7:20
+  |
+7 |     let _ = cursor.schema_version;
+  |                    ^^^^^^^^^^^^^^ private field
+  |
+help: a method `schema_version` also exists, call it with parentheses
+  |
+7 |     let _ = cursor.schema_version();
+  |                                  ++
+
+error[E0616]: field `creation_commit_order` of struct `SessionIndexOrderingKey` is private
+  --> tests/ui/access_private_session_protocol_fields.rs:11:17
+   |
+11 |     let _ = key.creation_commit_order;
+   |                 ^^^^^^^^^^^^^^^^^^^^^ private field
+   |
+help: a method `creation_commit_order` also exists, call it with parentheses
+   |
+11 |     let _ = key.creation_commit_order();
+   |                                      ++
+
+error[E0616]: field `backend` of struct `SessionEventCursor` is private
+  --> tests/ui/access_private_session_protocol_fields.rs:15:20
+   |
+15 |     let _ = cursor.backend;
+   |                    ^^^^^^^ private field
+   |
+help: a method `backend` also exists, call it with parentheses
+   |
+15 |     let _ = cursor.backend();
+   |                           ++
+
+error[E0616]: field `session_id` of struct `SessionProjectionCursor` is private
+  --> tests/ui/access_private_session_protocol_fields.rs:19:20
+   |
+19 |     let _ = cursor.session_id;
+   |                    ^^^^^^^^^^ private field
+   |
+help: a method `session_id` also exists, call it with parentheses
+   |
+19 |     let _ = cursor.session_id();
+   |                              ++
+
+error[E0616]: field `allocation` of struct `NewSessionReservation` is private
+  --> tests/ui/access_private_session_protocol_fields.rs:23:25
+   |
+23 |     let _ = reservation.allocation;
+   |                         ^^^^^^^^^^ private field
+
+error[E0616]: field `reservation` of struct `ExistingSessionReservation` is private
+  --> tests/ui/access_private_session_protocol_fields.rs:27:25
+   |
+27 |     let _ = reservation.reservation;
+   |                         ^^^^^^^^^^^ private field

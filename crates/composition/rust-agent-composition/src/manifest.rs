@@ -202,6 +202,8 @@ pub struct CompositionIdentityPayload<'a> {
     #[serde(rename = "custom-target-spec")]
     pub custom_target_spec: Option<&'a CustomTargetSpecRecord>,
     pub resolution: &'a Resolution,
+    #[serde(rename = "requires-panic-unwind")]
+    pub requires_panic_unwind: bool,
     #[serde(rename = "component-runtime-effects")]
     pub component_runtime_effects: &'a BTreeSet<String>,
     #[serde(rename = "host-runtime-effects")]
@@ -217,61 +219,170 @@ pub struct CompositionIdentityPayload<'a> {
     pub cargo_resolution: &'a CargoResolutionRecord,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 #[serde(deny_unknown_fields)]
+pub struct CompositionIdentityPayloadV1<'a> {
+    pub schema: u32,
+    pub profile: &'a CompositionProfile,
+    pub target: &'a Target,
+    #[serde(rename = "target-facts")]
+    pub target_facts: &'a TargetFactsRecord,
+    #[serde(rename = "compose-rustc")]
+    pub compose_rustc: &'a ComposeRustcProvenance,
+    #[serde(rename = "generator-inputs")]
+    pub generator_inputs: &'a GeneratorInputCommitment,
+    #[serde(rename = "custom-target-spec")]
+    pub custom_target_spec: Option<&'a CustomTargetSpecRecord>,
+    pub resolution: &'a Resolution,
+    #[serde(rename = "component-runtime-effects")]
+    pub component_runtime_effects: &'a BTreeSet<String>,
+    #[serde(rename = "host-runtime-effects")]
+    pub host_runtime_effects: &'a BTreeSet<String>,
+    #[serde(rename = "direct-root-build-requirements")]
+    pub direct_root_build_requirements: &'a BTreeMap<String, BuildRequirements>,
+    pub sources: &'a [SourcePackageRecord],
+    #[serde(rename = "generated-files")]
+    pub generated_files: &'a [GeneratedFileRecord],
+    #[serde(rename = "cargo-lock-digest")]
+    pub cargo_lock_digest: &'a str,
+    #[serde(rename = "cargo-resolution")]
+    pub cargo_resolution: &'a CargoResolutionRecord,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CompositionManifest {
     pub schema: u32,
     pub algorithm: String,
-    #[serde(rename = "composition-hash")]
     pub composition_hash: String,
-    #[serde(rename = "build-kind")]
     pub build_kind: BuildKind,
-    #[serde(rename = "profile-name")]
     pub profile: String,
-    #[serde(rename = "normalized-profile")]
     pub normalized_profile: CompositionProfile,
     pub target: String,
-    #[serde(rename = "normalized-target")]
     pub normalized_target: Target,
-    #[serde(rename = "target-fact-digest")]
     pub target_fact_digest: String,
-    #[serde(rename = "target-facts")]
     pub target_facts: TargetFactsRecord,
-    #[serde(rename = "compose-rustc")]
     pub compose_rustc: ComposeRustcProvenance,
-    #[serde(rename = "generator-inputs")]
     pub generator_inputs: GeneratorInputCommitment,
-    #[serde(rename = "custom-target-spec")]
     pub custom_target_spec: Option<CustomTargetSpecRecord>,
-    #[serde(rename = "selected-components")]
     pub selected_components: Vec<String>,
-    #[serde(rename = "runtime-adapter")]
     pub runtime_adapter: String,
-    #[serde(rename = "host-boundary")]
     pub host_boundary: Option<String>,
-    #[serde(rename = "component-runtime-effects")]
     pub component_runtime_effects: BTreeSet<String>,
-    #[serde(rename = "host-runtime-effects")]
     pub host_runtime_effects: BTreeSet<String>,
-    #[serde(rename = "compiled-runtime-effects")]
     pub compiled_runtime_effects: BTreeSet<String>,
-    #[serde(rename = "build-requirements")]
     pub build_requirements: BuildRequirements,
-    #[serde(rename = "direct-root-build-requirements")]
     pub direct_root_build_requirements: BTreeMap<String, BuildRequirements>,
-    #[serde(rename = "app-handoff")]
     pub app_handoff: AppHandoff,
+    pub requires_panic_unwind: bool,
     pub deployable: bool,
     pub resolution: Resolution,
     pub sources: Vec<SourcePackageRecord>,
-    #[serde(rename = "generated-files")]
     pub generated_files: Vec<GeneratedFileRecord>,
-    #[serde(rename = "cargo-lock-digest")]
     pub cargo_lock_digest: String,
-    #[serde(rename = "cargo-resolution-digest")]
     pub cargo_resolution_digest: String,
-    #[serde(rename = "cargo-resolution")]
     pub cargo_resolution: CargoResolutionRecord,
+}
+
+#[derive(Serialize)]
+struct CompositionManifestWire<'a> {
+    schema: u32,
+    algorithm: &'a str,
+    #[serde(rename = "composition-hash")]
+    composition_hash: &'a str,
+    #[serde(rename = "build-kind")]
+    build_kind: &'a BuildKind,
+    #[serde(rename = "profile-name")]
+    profile: &'a str,
+    #[serde(rename = "normalized-profile")]
+    normalized_profile: &'a CompositionProfile,
+    target: &'a str,
+    #[serde(rename = "normalized-target")]
+    normalized_target: &'a Target,
+    #[serde(rename = "target-fact-digest")]
+    target_fact_digest: &'a str,
+    #[serde(rename = "target-facts")]
+    target_facts: &'a TargetFactsRecord,
+    #[serde(rename = "compose-rustc")]
+    compose_rustc: &'a ComposeRustcProvenance,
+    #[serde(rename = "generator-inputs")]
+    generator_inputs: &'a GeneratorInputCommitment,
+    #[serde(rename = "custom-target-spec")]
+    custom_target_spec: Option<&'a CustomTargetSpecRecord>,
+    #[serde(rename = "selected-components")]
+    selected_components: &'a [String],
+    #[serde(rename = "runtime-adapter")]
+    runtime_adapter: &'a str,
+    #[serde(rename = "host-boundary")]
+    host_boundary: Option<&'a String>,
+    #[serde(rename = "component-runtime-effects")]
+    component_runtime_effects: &'a BTreeSet<String>,
+    #[serde(rename = "host-runtime-effects")]
+    host_runtime_effects: &'a BTreeSet<String>,
+    #[serde(rename = "compiled-runtime-effects")]
+    compiled_runtime_effects: &'a BTreeSet<String>,
+    #[serde(rename = "build-requirements")]
+    build_requirements: &'a BuildRequirements,
+    #[serde(rename = "direct-root-build-requirements")]
+    direct_root_build_requirements: &'a BTreeMap<String, BuildRequirements>,
+    #[serde(rename = "app-handoff")]
+    app_handoff: &'a AppHandoff,
+    #[serde(
+        rename = "requires-panic-unwind",
+        skip_serializing_if = "Option::is_none"
+    )]
+    requires_panic_unwind: Option<bool>,
+    deployable: bool,
+    resolution: &'a Resolution,
+    sources: &'a [SourcePackageRecord],
+    #[serde(rename = "generated-files")]
+    generated_files: &'a [GeneratedFileRecord],
+    #[serde(rename = "cargo-lock-digest")]
+    cargo_lock_digest: &'a str,
+    #[serde(rename = "cargo-resolution-digest")]
+    cargo_resolution_digest: &'a str,
+    #[serde(rename = "cargo-resolution")]
+    cargo_resolution: &'a CargoResolutionRecord,
+}
+
+impl Serialize for CompositionManifest {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        CompositionManifestWire {
+            schema: self.schema,
+            algorithm: &self.algorithm,
+            composition_hash: &self.composition_hash,
+            build_kind: &self.build_kind,
+            profile: &self.profile,
+            normalized_profile: &self.normalized_profile,
+            target: &self.target,
+            normalized_target: &self.normalized_target,
+            target_fact_digest: &self.target_fact_digest,
+            target_facts: &self.target_facts,
+            compose_rustc: &self.compose_rustc,
+            generator_inputs: &self.generator_inputs,
+            custom_target_spec: self.custom_target_spec.as_ref(),
+            selected_components: &self.selected_components,
+            runtime_adapter: &self.runtime_adapter,
+            host_boundary: self.host_boundary.as_ref(),
+            component_runtime_effects: &self.component_runtime_effects,
+            host_runtime_effects: &self.host_runtime_effects,
+            compiled_runtime_effects: &self.compiled_runtime_effects,
+            build_requirements: &self.build_requirements,
+            direct_root_build_requirements: &self.direct_root_build_requirements,
+            app_handoff: &self.app_handoff,
+            requires_panic_unwind: (self.schema != 1).then_some(self.requires_panic_unwind),
+            deployable: self.deployable,
+            resolution: &self.resolution,
+            sources: &self.sources,
+            generated_files: &self.generated_files,
+            cargo_lock_digest: &self.cargo_lock_digest,
+            cargo_resolution_digest: &self.cargo_resolution_digest,
+            cargo_resolution: &self.cargo_resolution,
+        }
+        .serialize(serializer)
+    }
 }
 
 #[derive(Deserialize)]
@@ -333,6 +444,8 @@ struct UncheckedCompositionManifest {
     direct_root_build_requirements: BTreeMap<String, BuildRequirements>,
     #[serde(rename = "app-handoff")]
     app_handoff: AppHandoff,
+    #[serde(rename = "requires-panic-unwind")]
+    requires_panic_unwind: Option<bool>,
     deployable: bool,
     resolution: Resolution,
     #[serde(deserialize_with = "deserialize_composition_sources")]
@@ -356,6 +469,25 @@ impl<'de> Deserialize<'de> for CompositionManifest {
         D: Deserializer<'de>,
     {
         let unchecked = UncheckedCompositionManifest::deserialize(deserializer)?;
+        let requires_panic_unwind = match (unchecked.schema, unchecked.requires_panic_unwind) {
+            (1, None) => false,
+            (1, Some(_)) => {
+                return Err(de::Error::custom(
+                    "composition manifest schema 1 does not define requires-panic-unwind",
+                ));
+            }
+            (2, Some(value)) => value,
+            (2, None) => {
+                return Err(de::Error::custom(
+                    "composition manifest schema 2 requires requires-panic-unwind",
+                ));
+            }
+            (schema, _) => {
+                return Err(de::Error::custom(format!(
+                    "unsupported composition manifest schema {schema}"
+                )));
+            }
+        };
         Ok(Self {
             schema: unchecked.schema,
             algorithm: unchecked.algorithm,
@@ -379,6 +511,7 @@ impl<'de> Deserialize<'de> for CompositionManifest {
             build_requirements: unchecked.build_requirements,
             direct_root_build_requirements: unchecked.direct_root_build_requirements,
             app_handoff: unchecked.app_handoff,
+            requires_panic_unwind,
             deployable: unchecked.deployable,
             resolution: unchecked.resolution,
             sources: unchecked.sources,

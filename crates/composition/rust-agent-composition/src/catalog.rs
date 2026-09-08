@@ -30,7 +30,7 @@ const RUNTIME_EFFECTS: &[&str] = &[
     "secret-access",
     "write-local",
 ];
-const RUNTIME_PRIMITIVES: &[&str] = &["clock", "sleep", "spawn", "blocking-spawn", "entropy"];
+const RUNTIME_PRIMITIVES: &[&str] = &["clock", "sleeper", "spawner"];
 
 #[derive(Clone, Debug)]
 pub struct NormalizedCatalog {
@@ -1006,6 +1006,28 @@ provides = [{ capability = "cap:model", priority = 1, effects = [] }]
         let document = CatalogDocument::from_toml(BASE).unwrap();
         let catalog = NormalizedCatalog::normalize(document).unwrap();
         assert!(catalog.components.contains_key("model"));
+    }
+
+    #[test]
+    fn schema_one_runtime_primitive_vocabulary_is_closed() {
+        for primitive in ["clock", "sleeper", "spawner"] {
+            let input = BASE.replace(
+                "runtime-primitives = []",
+                &format!("runtime-primitives = [\"{primitive}\"]"),
+            );
+            NormalizedCatalog::normalize(CatalogDocument::from_toml(&input).unwrap()).unwrap();
+        }
+
+        for primitive in ["sleep", "spawn", "blocking-spawn", "entropy"] {
+            let input = BASE.replace(
+                "runtime-primitives = []",
+                &format!("runtime-primitives = [\"{primitive}\"]"),
+            );
+            assert!(matches!(
+                NormalizedCatalog::normalize(CatalogDocument::from_toml(&input).unwrap()),
+                Err(CatalogError::UnknownRuntimePrimitive { .. })
+            ));
+        }
     }
 
     fn catalog_with_component_target_support(targets: &str, support: &str) -> String {

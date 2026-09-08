@@ -43,14 +43,15 @@ use crate::{
     discovery::{DiscoveredCatalog, DiscoveryError, discover_workspace_catalog},
     generator_input::{GeneratorInputCommitment, GeneratorInputError},
     manifest::{
-        CargoResolutionRecord, CompositionIdentityPayload, CompositionManifest,
-        GeneratedFileRecord, MAX_CARGO_SOURCE_IDENTITIES, MAX_COMPOSITION_SOURCE_ENTRIES,
-        MAX_COMPOSITION_SOURCE_FILE_BYTES, MAX_COMPOSITION_SOURCE_PACKAGES, SecurityManifest,
-        SourcePackageRecord, canonical_cargo_config,
+        CargoResolutionRecord, CompositionIdentityPayload, CompositionIdentityPayloadV1,
+        CompositionManifest, GeneratedFileRecord, MAX_CARGO_SOURCE_IDENTITIES,
+        MAX_COMPOSITION_SOURCE_ENTRIES, MAX_COMPOSITION_SOURCE_FILE_BYTES,
+        MAX_COMPOSITION_SOURCE_PACKAGES, SecurityManifest, SourcePackageRecord,
+        canonical_cargo_config,
     },
     metadata::{
-        AppCoexistence, BuildRequirements, CatalogTrustPolicy, ConfigSource, HostBoundaryKind,
-        MAX_CATALOG_TRUST_POLICY_BYTES,
+        AppCoexistence, BuildRequirements, CatalogTrustPolicy, ComponentSpec, ConfigSource,
+        HostBoundaryKind, MAX_CATALOG_TRUST_POLICY_BYTES,
     },
     profile::{BuildKind, CompositionProfile, MAX_PROFILE_DOCUMENT_BYTES},
     resolver::{ResolutionError, resolve},
@@ -441,8 +442,10 @@ fn compose_in_staging(
         .map_or_else(BTreeSet::new, |id| {
             catalog.host_boundaries[id].security.clone()
         });
+    let requires_panic_unwind =
+        selected_observers_require_panic_unwind(&generator_inputs.normalized_catalog, resolution);
     let payload = CompositionIdentityPayload {
-        schema: 1,
+        schema: 2,
         profile,
         target,
         target_facts: &target_facts,
@@ -450,6 +453,7 @@ fn compose_in_staging(
         generator_inputs,
         custom_target_spec,
         resolution,
+        requires_panic_unwind,
         component_runtime_effects: &component_runtime_effects,
         host_runtime_effects: &host_runtime_effects,
         direct_root_build_requirements: &direct_root_build_requirements,
@@ -459,7 +463,7 @@ fn compose_in_staging(
         cargo_resolution: &cargo_resolution,
     };
     let composition_hash = hex::encode(canonical::domain_hash(
-        b"rust-agent-composition-v1\0",
+        b"rust-agent-composition-v2\0",
         &payload,
     )?);
     write_text(
@@ -469,8 +473,8 @@ fn compose_in_staging(
 
     let cargo_resolution_digest = file_digest(&staging.join("cargo-resolution.json"))?;
     let manifest = CompositionManifest {
-        schema: 1,
-        algorithm: "sha256-rust-agent-composition-v1".into(),
+        schema: 2,
+        algorithm: "sha256-rust-agent-composition-v2".into(),
         composition_hash: composition_hash.clone(),
         build_kind: profile.build_kind,
         profile: profile.name.clone(),
@@ -491,6 +495,7 @@ fn compose_in_staging(
         build_requirements: build_requirements.clone(),
         direct_root_build_requirements,
         app_handoff: resolution.app_handoff,
+        requires_panic_unwind,
         deployable: false,
         resolution: resolution.clone(),
         sources,
@@ -915,7 +920,10 @@ fn verify_composition_with_location_policy(
             manifest.composition_hash
         )));
     }
-    if manifest.schema != 1 || manifest.algorithm != "sha256-rust-agent-composition-v1" {
+    if !matches!(
+        (manifest.schema, manifest.algorithm.as_str()),
+        (1, "sha256-rust-agent-composition-v1") | (2, "sha256-rust-agent-composition-v2")
+    ) {
         return Err(ComposeError::Verification(
             "unknown manifest schema or algorithm".into(),
         ));
@@ -961,6 +969,12 @@ fn verify_composition_with_location_policy(
         || manifest.runtime_adapter != manifest.resolution.runtime_adapter
         || manifest.host_boundary != manifest.resolution.host_boundary
         || manifest.app_handoff != manifest.resolution.app_handoff
+        || (manifest.schema >= 2
+            && manifest.requires_panic_unwind
+                != selected_observers_require_panic_unwind(
+                    &manifest.generator_inputs.normalized_catalog,
+                    &manifest.resolution,
+                ))
         || manifest.compiled_runtime_effects != manifest.resolution.compiled_runtime_effects
         || manifest.cargo_resolution.target != manifest.target
         || manifest.cargo_resolution.cargo_target_input
@@ -1483,27 +1497,52 @@ fn verify_composition_with_location_policy(
             )));
         }
     }
-    let payload = CompositionIdentityPayload {
-        schema: 1,
-        profile: &manifest.normalized_profile,
-        target: &manifest.normalized_target,
-        target_facts: &manifest.target_facts,
-        compose_rustc: &manifest.compose_rustc,
-        generator_inputs: &manifest.generator_inputs,
-        custom_target_spec: manifest.custom_target_spec.as_ref(),
-        resolution: &manifest.resolution,
-        component_runtime_effects: &manifest.component_runtime_effects,
-        host_runtime_effects: &manifest.host_runtime_effects,
-        direct_root_build_requirements: &manifest.direct_root_build_requirements,
-        sources: &manifest.sources,
-        generated_files: &manifest.generated_files,
-        cargo_lock_digest: &manifest.cargo_lock_digest,
-        cargo_resolution: &manifest.cargo_resolution,
+    let expected = if manifest.schema == 1 {
+        let payload = CompositionIdentityPayloadV1 {
+            schema: 1,
+            profile: &manifest.normalized_profile,
+            target: &manifest.normalized_target,
+            target_facts: &manifest.target_facts,
+            compose_rustc: &manifest.compose_rustc,
+            generator_inputs: &manifest.generator_inputs,
+            custom_target_spec: manifest.custom_target_spec.as_ref(),
+            resolution: &manifest.resolution,
+            component_runtime_effects: &manifest.component_runtime_effects,
+            host_runtime_effects: &manifest.host_runtime_effects,
+            direct_root_build_requirements: &manifest.direct_root_build_requirements,
+            sources: &manifest.sources,
+            generated_files: &manifest.generated_files,
+            cargo_lock_digest: &manifest.cargo_lock_digest,
+            cargo_resolution: &manifest.cargo_resolution,
+        };
+        hex::encode(canonical::domain_hash(
+            b"rust-agent-composition-v1\0",
+            &payload,
+        )?)
+    } else {
+        let payload = CompositionIdentityPayload {
+            schema: 2,
+            profile: &manifest.normalized_profile,
+            target: &manifest.normalized_target,
+            target_facts: &manifest.target_facts,
+            compose_rustc: &manifest.compose_rustc,
+            generator_inputs: &manifest.generator_inputs,
+            custom_target_spec: manifest.custom_target_spec.as_ref(),
+            resolution: &manifest.resolution,
+            requires_panic_unwind: manifest.requires_panic_unwind,
+            component_runtime_effects: &manifest.component_runtime_effects,
+            host_runtime_effects: &manifest.host_runtime_effects,
+            direct_root_build_requirements: &manifest.direct_root_build_requirements,
+            sources: &manifest.sources,
+            generated_files: &manifest.generated_files,
+            cargo_lock_digest: &manifest.cargo_lock_digest,
+            cargo_resolution: &manifest.cargo_resolution,
+        };
+        hex::encode(canonical::domain_hash(
+            b"rust-agent-composition-v2\0",
+            &payload,
+        )?)
     };
-    let expected = hex::encode(canonical::domain_hash(
-        b"rust-agent-composition-v1\0",
-        &payload,
-    )?);
     if expected != manifest.composition_hash {
         return Err(ComposeError::Verification(format!(
             "composition identity mismatch: expected {expected}"
@@ -3817,9 +3856,6 @@ fn generate_lib_rs(
         "    if runtime.adapter().as_str() != {:?} {{\n        return Err(BuildError::InvalidComposition(\"runtime adapter identity mismatch\"));\n    }}\n",
         adapter.id
     ));
-    if file_components.is_empty() {
-        output.push_str("    let _ = runtime_config;\n");
-    }
     if host_components.is_empty() {
         output.push_str("    let _ = host_bindings;\n");
     }
@@ -3988,6 +4024,69 @@ fn generate_lib_rs(
     Ok(output)
 }
 
+fn phase2_runtime_primitive_list(primitives: &BTreeSet<String>) -> Result<String, ComposeError> {
+    let mut values = Vec::new();
+    for primitive in primitives {
+        let value = match primitive.as_str() {
+            "clock" => "rust_agent_runtime_api::RuntimePrimitiveKind::Clock",
+            "sleeper" => "rust_agent_runtime_api::RuntimePrimitiveKind::Sleep",
+            "spawner" => "rust_agent_runtime_api::RuntimePrimitiveKind::Spawn",
+            unsupported => {
+                return Err(ComposeError::UnsupportedPhase1A(format!(
+                    "Phase 2 generated runtime projection does not support `{unsupported}`"
+                )));
+            }
+        };
+        values.push(value);
+    }
+    Ok(format!("vec![{}]", values.join(", ")))
+}
+
+fn selected_observers_require_panic_unwind(
+    catalog: &crate::metadata::CatalogDocument,
+    resolution: &crate::resolver::Resolution,
+) -> bool {
+    catalog.components.iter().any(|component| {
+        resolution
+            .selected_components
+            .binary_search(&component.id)
+            .is_ok()
+            && component.provides.iter().any(|provide| {
+                matches!(
+                    provide.capability.as_str(),
+                    "cap:lifecycle-observer" | "cap:session-observer"
+                )
+            })
+    })
+}
+
+fn sort_phase2_observer_components(components: &mut [&ComponentSpec]) {
+    components.sort_by(|left, right| {
+        let order = |component: &ComponentSpec| {
+            component
+                .provides
+                .iter()
+                .find(|provide| provide.capability == "cap:lifecycle-observer")
+                .map_or(0, |provide| provide.order)
+        };
+        order(left)
+            .cmp(&order(right))
+            .then_with(|| left.id.cmp(&right.id))
+    });
+}
+
+fn phase2_runtime_binding_expression(
+    primitives: &BTreeSet<String>,
+) -> Result<String, ComposeError> {
+    if primitives.is_empty() {
+        return Ok("rust_agent_runtime_api::RuntimePrimitiveBindings::none()".into());
+    }
+    let list = phase2_runtime_primitive_list(primitives)?;
+    Ok(format!(
+        "rust_agent_runtime_api::RuntimePrimitiveBindings::projected(runtime.clone(), &{list}).map_err(rust_agent_runtime_api::ComponentBuildError::Runtime)?"
+    ))
+}
+
 fn generate_phase2_lib_rs(
     catalog: &NormalizedCatalog,
     resolution: &crate::resolver::Resolution,
@@ -4050,6 +4149,71 @@ fn generate_phase2_lib_rs(
             )));
         }
     }
+    let mut expected_model_provider_identities = model_components
+        .iter()
+        .map(|component| {
+            let key = component
+                .provides
+                .iter()
+                .find(|provide| provide.capability == "cap:model")
+                .and_then(|provide| provide.key.as_deref())
+                .ok_or_else(|| {
+                    ComposeError::UnsupportedPhase1A(format!(
+                        "model provider `{}` has no generated provider key",
+                        component.id
+                    ))
+                })?;
+            Ok((component.id.as_str(), key))
+        })
+        .collect::<Result<Vec<_>, ComposeError>>()?;
+    expected_model_provider_identities.sort_unstable_by(|left, right| left.1.cmp(right.1));
+    let mut observer_components = resolution
+        .construction_order
+        .iter()
+        .map(|id| &catalog.components[id])
+        .filter(|component| {
+            component
+                .provides
+                .iter()
+                .any(|provide| provide.capability == "cap:lifecycle-observer")
+        })
+        .collect::<Vec<_>>();
+    sort_phase2_observer_components(&mut observer_components);
+    for component in &observer_components {
+        if component.scope != crate::metadata::ScopeKind::App
+            || component.config_source != ConfigSource::None
+            || !component.requires.is_empty()
+        {
+            return Err(ComposeError::UnsupportedPhase1A(format!(
+                "lifecycle observer `{}` does not implement the supported Phase 2 App-scope contract",
+                component.id
+            )));
+        }
+    }
+    let mut assembled_components = BTreeSet::from([driver.id.as_str()]);
+    for component in model_components.iter().chain(&observer_components) {
+        if !assembled_components.insert(component.id.as_str()) {
+            return Err(ComposeError::UnsupportedPhase1A(format!(
+                "Phase 2 component `{}` participates in more than one generated role",
+                component.id
+            )));
+        }
+    }
+    let selected_components = resolution
+        .selected_components
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    if assembled_components != selected_components {
+        let unsupported = selected_components
+            .difference(&assembled_components)
+            .copied()
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(ComposeError::UnsupportedPhase1A(format!(
+            "Phase 2 generated root does not support selected component(s): {unsupported}"
+        )));
+    }
 
     let file_components = model_components
         .iter()
@@ -4063,8 +4227,13 @@ fn generate_phase2_lib_rs(
         .collect::<Vec<_>>();
 
     let mut output = String::from(
-        "#![forbid(unsafe_code)]\n\nmod identity;\n\npub use identity::COMPOSITION_HASH;\npub use rust_agent_agent::{AgentHandle, AgentInput, AgentOperationDraft, AgentSendRequest, AppBuildError, AppHandle};\npub use rust_agent_runtime_api::{AppHandoffError, AppHandoffMode, RuntimePrimitives};\n",
+        "#![forbid(unsafe_code)]\n\nmod identity;\n\npub use identity::COMPOSITION_HASH;\npub use rust_agent_agent::{AgentHandle, AgentInput, AgentOperationDraft, AgentSendRequest, AppBuildError, AppHandle, ModelRouteSelection, ProviderKey};\npub use rust_agent_runtime_api::{AppHandoffError, AppHandoffMode, RuntimePrimitives};\n",
     );
+    if !observer_components.is_empty() {
+        output.push_str(
+            "#[cfg(not(panic = \"unwind\"))]\ncompile_error!(\"in-process lifecycle observers require panic=unwind\");\n\n",
+        );
+    }
     output.push_str(&format!(
         "pub use {} as create_runtime_primitives;\n\npub const CATALOG_DIGEST: &str = {catalog_digest:?};\n\n",
         adapter.constructor
@@ -4087,10 +4256,38 @@ fn generate_phase2_lib_rs(
         output.push_str("}\n\n");
     }
 
+    output.push_str(
+        "#[derive(Clone, Copy, Debug, Eq, PartialEq)]\npub enum CompiledModelProvider {\n",
+    );
+    for component in &model_components {
+        output.push_str(&format!("    {},\n", rust_type_ident(&component.id)));
+    }
+    output.push_str("}\n\nimpl CompiledModelProvider {\n    pub fn key(self) -> &'static str {\n        match self {\n");
+    for component in &model_components {
+        let key = component
+            .provides
+            .iter()
+            .find(|provide| provide.capability == "cap:model")
+            .and_then(|provide| provide.key.as_deref())
+            .ok_or_else(|| {
+                ComposeError::UnsupportedPhase1A(format!(
+                    "model provider `{}` has no Registry key",
+                    component.id
+                ))
+            })?;
+        output.push_str(&format!(
+            "            Self::{} => {key:?},\n",
+            rust_type_ident(&component.id)
+        ));
+    }
+    output.push_str("        }\n    }\n\n    pub fn route(self) -> ModelRouteSelection {\n        ModelRouteSelection::Explicit(\n            ProviderKey::new(self.key()).expect(\"generated provider key is canonical\"),\n        )\n    }\n}\n\n#[derive(Clone, Copy, Debug, Eq, PartialEq)]\npub enum ModelRouting {\n    Default(CompiledModelProvider),\n    ExplicitPerRequest,\n}\n\n");
+
     if file_components.is_empty() {
         output.push_str("#[derive(Default)]\n");
     }
     output.push_str("pub struct RuntimeConfig {\n");
+    output.push_str("    pub runtime: rust_agent_agent::Phase2RuntimeConfig,\n");
+    output.push_str("    pub model_routing: Option<ModelRouting>,\n");
     for component in &file_components {
         let field = rust_ident(component.config_key.as_deref().ok_or_else(|| {
             ComposeError::UnsupportedPhase1A(format!(
@@ -4174,9 +4371,38 @@ fn generate_phase2_lib_rs(
     }
     output.push_str("        })\n    }\n}\n\n");
 
+    let driver_runtime_binding = phase2_runtime_binding_expression(&driver.runtime_primitives)?;
+    let driver_primitives = phase2_runtime_primitive_list(&driver.runtime_primitives)?;
+    let expected_model_provider_keys = expected_model_provider_identities
+        .iter()
+        .map(|(_, key)| {
+            format!(
+                "rust_agent_model::ProviderKey::new({key:?}).expect(\"generated provider key is canonical\")"
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let expected_model_provider_identity_expression = format!(
+        "vec![{}]",
+        expected_model_provider_identities
+            .iter()
+            .map(|(component, key)| format!(
+                "(std::sync::Arc::<str>::from({component:?}), std::sync::Arc::<str>::from({key:?}))"
+            ))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    let lifecycle_observer_identities = format!(
+        "vec![{}]",
+        observer_components
+            .iter()
+            .map(|component| format!("std::sync::Arc::<str>::from({:?})", component.id))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
     output.push_str(&format!(
-        "#[derive(Debug)]\nstruct GeneratedAgentScopeFactory {{\n    runtime: RuntimePrimitives,\n}}\n\nimpl rust_agent_agent::AgentScopeFactory for GeneratedAgentScopeFactory {{\n    fn build_driver(\n        &self,\n        model: rust_agent_model::ModelRegistryBinding,\n        runtime: RuntimePrimitives,\n    ) -> Result<rust_agent_agent::AgentDriverBinding, rust_agent_runtime_api::ComponentBuildError> {{\n        if !self.runtime.same_bundle_identity(&runtime) {{\n            return Err(rust_agent_runtime_api::ComponentBuildError::Runtime(\n                rust_agent_runtime_api::RuntimePrimitiveError::AdapterMismatch {{\n                    expected: self.runtime.adapter().as_str().to_owned(),\n                    actual: runtime.adapter().as_str().to_owned(),\n                }},\n            ));\n        }}\n        let output = {}(\n            &Default::default(),\n            {} {{ model }},\n            rust_agent_runtime_api::RuntimePrimitiveBindings::none(),\n        )?;\n        Ok(rust_agent_agent::AgentDriverBinding::from_provider(output.into_service()))\n    }}\n}}\n\n",
-        driver.factory, driver.dependencies_type
+        "#[derive(Debug)]\nstruct GeneratedAgentScopeFactory {{\n    runtime: RuntimePrimitives,\n}}\n\nimpl rust_agent_agent::AgentScopeFactory for GeneratedAgentScopeFactory {{\n    fn driver_component_identity(&self) -> &'static str {{\n        {:?}\n    }}\n\n    fn build_driver(\n        &self,\n        model: rust_agent_model::ModelRegistryBinding,\n        runtime: RuntimePrimitives,\n    ) -> Result<rust_agent_agent::AgentDriverBinding, rust_agent_runtime_api::ComponentBuildError> {{\n        if !self.runtime.same_bundle_identity(&runtime) {{\n            return Err(rust_agent_runtime_api::ComponentBuildError::Runtime(\n                rust_agent_runtime_api::RuntimePrimitiveError::AdapterMismatch {{\n                    expected: self.runtime.adapter().as_str().to_owned(),\n                    actual: runtime.adapter().as_str().to_owned(),\n                }},\n            ));\n        }}\n        let output = {}(\n            &Default::default(),\n            {} {{ model }},\n            {driver_runtime_binding},\n        )?;\n        rust_agent_agent::AgentDriverBinding::from_generated_component(\n            self.driver_component_identity(),\n            output.into_service(),\n        )\n    }}\n}}\n\n",
+        driver.id, driver.factory, driver.dependencies_type
     ));
 
     output.push_str("pub fn build(runtime_config: RuntimeConfig, host_bindings: HostBindings, runtime: RuntimePrimitives) -> Result<AppHandle, AppBuildError> {\n");
@@ -4184,12 +4410,16 @@ fn generate_phase2_lib_rs(
         "    if runtime.adapter().as_str() != {:?} {{\n        return Err(AppBuildError::RuntimeAdapterMismatch);\n    }}\n",
         adapter.id
     ));
-    if file_components.is_empty() {
-        output.push_str("    let _ = runtime_config;\n");
-    }
+    output.push_str("    let composition = rust_agent_core::CompositionHash::from_digest(rust_agent_core::Digest::from_lower_hex(COMPOSITION_HASH).expect(\"generator emitted a canonical composition digest\"));\n    let catalog = rust_agent_core::Digest::from_lower_hex(CATALOG_DIGEST).expect(\"generator emitted a canonical catalog digest\");\n");
     if host_components.is_empty() {
         output.push_str("    let _ = host_bindings;\n");
     }
+    output.push_str("    let infrastructure_config = runtime_config.runtime;\n");
+    output.push_str("    let model_routing = runtime_config.model_routing.map(|routing| match routing {\n        ModelRouting::Default(provider) => rust_agent_model::ModelRoutingMode::Default { provider: rust_agent_model::ProviderKey::new(provider.key()).expect(\"generated provider key is canonical\") },\n        ModelRouting::ExplicitPerRequest => rust_agent_model::ModelRoutingMode::ExplicitPerRequest,\n    });\n");
+    output.push_str(&format!(
+        "    let model_routing = rust_agent_model::ModelRegistry::validate_generated_routing(\n        vec![{expected_model_provider_keys}],\n        model_routing,\n    )?;\n    let binding_plan = rust_agent_runtime_api::GeneratedModelBindingPlan::checked(\n        {:?},\n        {expected_model_provider_identity_expression},\n        {lifecycle_observer_identities},\n        {driver_primitives},\n    )?;\n    let runtime_owner = runtime.claim_generated_composition_owner(\n        composition,\n        catalog,\n        binding_plan,\n    )?;\n",
+        driver.id
+    ));
     let mut shared_host_fields = model_components
         .iter()
         .filter_map(|component| {
@@ -4258,18 +4488,28 @@ fn generate_phase2_lib_rs(
                 })?)
             ),
         };
-        let runtime_binding = if component.runtime_primitives.is_empty() {
-            "rust_agent_runtime_api::RuntimePrimitiveBindings::none()"
-        } else {
-            "rust_agent_runtime_api::RuntimePrimitiveBindings::runtime(runtime.clone())"
-        };
+        let runtime_binding = phase2_runtime_binding_expression(&component.runtime_primitives)?;
         output.push_str(&format!(
-            "        {{\n            let config: {} = {config_expression};\n            let output = {}(\n                &config,\n                {} {{}},\n                {runtime_binding},\n            )?;\n            rust_agent_model::ModelProviderBinding::from_provider(output.into_service())\n        }}, // {component_var}\n",
-            component.config_type, component.factory, component.dependencies_type
+            "        {{\n            let config: {} = {config_expression};\n            let output = {}(\n                &config,\n                {} {{}},\n                {runtime_binding},\n            )?;\n            rust_agent_model::ModelProviderBinding::from_generated_component({:?}, output.into_service())?\n        }}, // {component_var}\n",
+            component.config_type,
+            component.factory,
+            component.dependencies_type,
+            component.id,
         ));
     }
-    output.push_str("    ];\n    let model = rust_agent_model::ModelRegistry::from_compiled(model_providers, None)?;\n");
-    output.push_str("    let composition = rust_agent_core::CompositionHash::from_digest(rust_agent_core::Digest::from_lower_hex(COMPOSITION_HASH).expect(\"generator emitted a canonical composition digest\"));\n    let catalog = rust_agent_core::Digest::from_lower_hex(CATALOG_DIGEST).expect(\"generator emitted a canonical catalog digest\");\n    let scope_factory = std::sync::Arc::new(GeneratedAgentScopeFactory { runtime: runtime.clone() });\n    rust_agent_agent::AppHandle::from_generated(\n        composition,\n        catalog,\n        handoff,\n        runtime,\n        model,\n        scope_factory,\n        Vec::new(),\n    )\n}\n");
+    output.push_str("    ];\n    let model = rust_agent_model::ModelRegistry::from_compiled_validated(model_providers, model_routing)?;\n");
+    output.push_str("    let lifecycle_observers = vec![\n");
+    for component in &observer_components {
+        let runtime_binding = phase2_runtime_binding_expression(&component.runtime_primitives)?;
+        output.push_str(&format!(
+            "        {{\n            let output = {}(\n                &Default::default(),\n                {} {{}},\n                {runtime_binding},\n            )?;\n            rust_agent_runtime_api::LifecycleObserverBinding::from_generated_component(\n                {:?},\n                output.into_service(),\n            )?\n        }}, // {}\n",
+            component.factory, component.dependencies_type, component.id, component.id
+        ));
+    }
+    output.push_str("    ];\n");
+    output.push_str(
+        "    let binding_assembly = rust_agent_runtime_api::begin_composition_assembly(\n        runtime_owner,\n        composition,\n        catalog,\n    )?.finish();\n    let scope_factory = std::sync::Arc::new(GeneratedAgentScopeFactory { runtime: runtime.clone() });\n    rust_agent_agent::AppHandle::from_generated(\n        composition,\n        catalog,\n        handoff,\n        infrastructure_config,\n        runtime,\n        model,\n        binding_assembly,\n        scope_factory,\n        lifecycle_observers,\n    )\n}\n"
+    );
     if file_components.is_empty() && host_components.is_empty() {
         output.push_str(
             "\n#[cfg(test)]\nmod tests {\n    use std::{future::Future, sync::Arc, task::{Context, Poll, Wake, Waker}, thread};\n    use super::*;\n\n    struct ThreadWake(thread::Thread);\n\n    impl Wake for ThreadWake {\n        fn wake(self: Arc<Self>) { self.0.unpark(); }\n        fn wake_by_ref(self: &Arc<Self>) { self.0.unpark(); }\n    }\n\n    fn run<F: Future>(future: F) -> F::Output {\n        let mut future = std::pin::pin!(future);\n        let waker = Waker::from(Arc::new(ThreadWake(thread::current())));\n        let mut context = Context::from_waker(&waker);\n        loop {\n            match future.as_mut().poll(&mut context) {\n                Poll::Ready(value) => return value,\n                Poll::Pending => thread::park(),\n            }\n        }\n    }\n\n    #[test]\n    fn generated_factory_executes_request_model_response_path() {\n        let runtime = create_runtime_primitives().unwrap();\n        let app = build(RuntimeConfig::default(), HostBindings::default(), runtime).unwrap();\n        assert!(app.publication_snapshot().entries().is_empty());\n        let sealed = run(app.seal_agent_operation(AgentOperationDraft::sessionless())).unwrap();\n        let allocated = run(app.allocate_agent_operation(sealed)).unwrap();\n        let agent = run(app.create_agent(allocated.into_create_request())).unwrap();\n        assert_eq!(app.publication_snapshot().entries().len(), 1);\n        let request_id = agent.allocate_turn_request().unwrap();\n        let request = AgentSendRequest::new(\n            request_id,\n            AgentInput::text(\"hello\").unwrap(),\n            rust_agent_core::Digest::from_bytes([7; 32]),\n            None,\n        );\n        let output = run(agent.send(request)).unwrap();\n        assert_eq!(output.text, \"replay:hello\");\n        run(agent.shutdown()).unwrap();\n        assert!(app.publication_snapshot().entries().is_empty());\n        run(app.shutdown()).unwrap();\n    }\n}\n",
@@ -4823,6 +5063,22 @@ fn rust_ident(value: &str) -> String {
     value.replace(['-', ':'], "_")
 }
 
+fn rust_type_ident(value: &str) -> String {
+    value
+        .split(['-', ':'])
+        .filter(|part| !part.is_empty())
+        .map(|part| {
+            let mut characters = part.chars();
+            let mut output = String::new();
+            if let Some(first) = characters.next() {
+                output.extend(first.to_uppercase());
+            }
+            output.extend(characters);
+            output
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use std::{env, ffi::OsString, process::Command};
@@ -4868,8 +5124,30 @@ mod tests {
     }
 
     fn composition_hash_for_manifest(manifest: &CompositionManifest) -> String {
+        if manifest.schema == 1 {
+            let payload = CompositionIdentityPayloadV1 {
+                schema: 1,
+                profile: &manifest.normalized_profile,
+                target: &manifest.normalized_target,
+                target_facts: &manifest.target_facts,
+                compose_rustc: &manifest.compose_rustc,
+                generator_inputs: &manifest.generator_inputs,
+                custom_target_spec: manifest.custom_target_spec.as_ref(),
+                resolution: &manifest.resolution,
+                component_runtime_effects: &manifest.component_runtime_effects,
+                host_runtime_effects: &manifest.host_runtime_effects,
+                direct_root_build_requirements: &manifest.direct_root_build_requirements,
+                sources: &manifest.sources,
+                generated_files: &manifest.generated_files,
+                cargo_lock_digest: &manifest.cargo_lock_digest,
+                cargo_resolution: &manifest.cargo_resolution,
+            };
+            return hex::encode(
+                canonical::domain_hash(b"rust-agent-composition-v1\0", &payload).unwrap(),
+            );
+        }
         let payload = CompositionIdentityPayload {
-            schema: 1,
+            schema: 2,
             profile: &manifest.normalized_profile,
             target: &manifest.normalized_target,
             target_facts: &manifest.target_facts,
@@ -4877,6 +5155,7 @@ mod tests {
             generator_inputs: &manifest.generator_inputs,
             custom_target_spec: manifest.custom_target_spec.as_ref(),
             resolution: &manifest.resolution,
+            requires_panic_unwind: manifest.requires_panic_unwind,
             component_runtime_effects: &manifest.component_runtime_effects,
             host_runtime_effects: &manifest.host_runtime_effects,
             direct_root_build_requirements: &manifest.direct_root_build_requirements,
@@ -4885,7 +5164,7 @@ mod tests {
             cargo_lock_digest: &manifest.cargo_lock_digest,
             cargo_resolution: &manifest.cargo_resolution,
         };
-        hex::encode(canonical::domain_hash(b"rust-agent-composition-v1\0", &payload).unwrap())
+        hex::encode(canonical::domain_hash(b"rust-agent-composition-v2\0", &payload).unwrap())
     }
 
     fn reseal_manifest(path: &Path, manifest: &mut CompositionManifest) -> PathBuf {
@@ -5318,7 +5597,7 @@ mod tests {
         config_record.digest = sha256_hex(forged_config.as_bytes());
         config_record.bytes = forged_config.len() as u64;
         let payload = CompositionIdentityPayload {
-            schema: 1,
+            schema: 2,
             profile: &resealed.normalized_profile,
             target: &resealed.normalized_target,
             target_facts: &resealed.target_facts,
@@ -5326,6 +5605,7 @@ mod tests {
             generator_inputs: &resealed.generator_inputs,
             custom_target_spec: resealed.custom_target_spec.as_ref(),
             resolution: &resealed.resolution,
+            requires_panic_unwind: resealed.requires_panic_unwind,
             component_runtime_effects: &resealed.component_runtime_effects,
             host_runtime_effects: &resealed.host_runtime_effects,
             direct_root_build_requirements: &resealed.direct_root_build_requirements,
@@ -5335,7 +5615,7 @@ mod tests {
             cargo_resolution: &resealed.cargo_resolution,
         };
         resealed.composition_hash =
-            hex::encode(canonical::domain_hash(b"rust-agent-composition-v1\0", &payload).unwrap());
+            hex::encode(canonical::domain_hash(b"rust-agent-composition-v2\0", &payload).unwrap());
         write_text(
             &generated.path.join("src/identity.rs"),
             &format!(
@@ -5848,6 +6128,7 @@ helper = { path = "../link" }
             "opentelemetry",
             "rust-agent-network-connector-native",
             "rust-agent-http-client-native",
+            "rust-agent-runtime-wasm",
         ] {
             assert!(!source_packages.contains(forbidden), "leaked {forbidden}");
         }
@@ -5889,6 +6170,259 @@ helper = { path = "../link" }
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
+    }
+
+    #[test]
+    fn phase_two_observer_assembly_uses_metadata_order_then_component_id() {
+        let document = crate::metadata::CatalogDocument::from_toml(include_str!(
+            "../../../../tests/fixtures/catalog.toml"
+        ))
+        .unwrap();
+        let template = document
+            .components
+            .into_iter()
+            .find(|component| component.id == "lifecycle-observer-noop")
+            .unwrap();
+        let mut later = template.clone();
+        later.id = "a-later-observer".into();
+        later.provides[0].order = 20;
+        let mut tie_last = template.clone();
+        tie_last.id = "z-first-order-observer".into();
+        tie_last.provides[0].order = 10;
+        let mut tie_first = template;
+        tie_first.id = "a-first-order-observer".into();
+        tie_first.provides[0].order = 10;
+        let mut observers = vec![&later, &tie_last, &tie_first];
+
+        sort_phase2_observer_components(&mut observers);
+
+        assert_eq!(
+            observers
+                .iter()
+                .map(|component| component.id.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "a-first-order-observer",
+                "z-first-order-observer",
+                "a-later-observer",
+            ]
+        );
+    }
+
+    #[test]
+    fn phase_two_multi_provider_routing_and_observer_assembly_are_generated() {
+        let temp = TempDir::new().unwrap();
+        let mut compose_options = options(&temp, "tests/fixtures/profiles/phase2-multi-model.toml");
+        compose_options.registry_cache_path = Some(registry_cache());
+        let generated = compose(&compose_options).unwrap();
+        let source = fs::read_to_string(generated.path.join("src/lib.rs")).unwrap();
+        let selected = generated
+            .manifest
+            .selected_components
+            .iter()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>();
+
+        assert_eq!(
+            selected,
+            BTreeSet::from([
+                "driver-direct",
+                "lifecycle-observer-noop",
+                "model-host",
+                "model-replay",
+            ])
+        );
+        assert!(generated.manifest.requires_panic_unwind);
+        for generated_contract in [
+            "#[cfg(not(panic = \"unwind\"))]",
+            "pub enum CompiledModelProvider",
+            "ModelHost",
+            "ModelReplay",
+            "pub enum ModelRouting",
+            "ExplicitPerRequest",
+            "pub fn route(self) -> ModelRouteSelection",
+            "ProviderKey::new(self.key())",
+            "ModelRegistry::from_compiled_validated(model_providers, model_routing)",
+            "rust_agent_lifecycle_observer_noop::build",
+            "LifecycleObserverBinding::from_generated_component",
+            "AgentDriverBinding::from_generated_component",
+            "fn driver_component_identity(&self) -> &'static str",
+            "begin_composition_assembly",
+            "GeneratedModelBindingPlan::checked",
+            "RuntimePrimitiveBindings::none()",
+        ] {
+            assert!(
+                source.contains(generated_contract),
+                "missing generated Phase 2 contract `{generated_contract}`"
+            );
+        }
+        assert!(source.contains(
+            "vec![(std::sync::Arc::<str>::from(\"model-host\"), std::sync::Arc::<str>::from(\"host\")), (std::sync::Arc::<str>::from(\"model-replay\"), std::sync::Arc::<str>::from(\"replay\"))]"
+        ));
+        assert!(source.contains("vec![std::sync::Arc::<str>::from(\"lifecycle-observer-noop\")]"));
+        let routing_validation = source
+            .find("ModelRegistry::validate_generated_routing")
+            .unwrap();
+        let runtime_claim = source
+            .find("runtime.claim_generated_composition_owner")
+            .unwrap();
+        let first_provider_factory = source.find("rust_agent_model_host::build").unwrap();
+        assert!(routing_validation < runtime_claim);
+        assert!(runtime_claim < first_provider_factory);
+        assert!(!source.contains("model.generated_provider_identities()"));
+        assert!(!source.contains("rust_agent_session_local"));
+        assert!(
+            !generated
+                .manifest
+                .sources
+                .iter()
+                .any(|source| source.package == "rust-agent-session-local")
+        );
+
+        let output = Command::new(tool("cargo"))
+            .args(["check", "--manifest-path"])
+            .arg(generated.path.join("Cargo.toml"))
+            .args(["--locked", "--offline"])
+            .env("CARGO_TARGET_DIR", temp.path().join("generated-target"))
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "generated multi-provider composition failed to compile:\n{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let abort_output = Command::new(tool("cargo"))
+            .args(["check", "--manifest-path"])
+            .arg(generated.path.join("Cargo.toml"))
+            .args(["--locked", "--offline"])
+            .env("RUSTFLAGS", "-Cpanic=abort")
+            .env(
+                "CARGO_TARGET_DIR",
+                temp.path().join("generated-abort-target"),
+            )
+            .output()
+            .unwrap();
+        assert!(
+            !abort_output.status.success(),
+            "observer composition unexpectedly compiled without unwind containment"
+        );
+        assert!(
+            String::from_utf8_lossy(&abort_output.stderr)
+                .contains("lifecycle observers require panic=unwind"),
+            "generated panic-strategy rejection was not diagnostic:\n{}{}",
+            String::from_utf8_lossy(&abort_output.stdout),
+            String::from_utf8_lossy(&abort_output.stderr)
+        );
+    }
+
+    #[test]
+    fn phase_two_generation_rejects_selected_components_without_an_assembly_role() {
+        let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../..")
+            .canonicalize()
+            .unwrap();
+        let test_root = workspace.join("target/generator-tests");
+        fs::create_dir_all(&test_root).unwrap();
+        let temp = TempDir::new_in(test_root).unwrap();
+        let profile_path = temp.path().join("unsupported-phase2-component.toml");
+        let profile =
+            fs::read_to_string(workspace.join("tests/fixtures/profiles/minimal-pure.toml"))
+                .unwrap()
+                .replace(
+                    "name = \"minimal-pure\"",
+                    "name = \"unsupported-phase2-component\"",
+                )
+                .replace("\"read-local\", ", "")
+                .replace(
+                    "fixture-fs-read = \"disabled\"",
+                    "fixture-fs-read = \"enabled\"",
+                );
+        fs::write(&profile_path, profile).unwrap();
+        let mut compose_options = options(&temp, "tests/fixtures/profiles/minimal-pure.toml");
+        compose_options.profile_path = profile_path;
+        compose_options.registry_cache_path = Some(registry_cache());
+
+        assert!(matches!(
+            compose(&compose_options),
+            Err(ComposeError::UnsupportedPhase1A(message))
+                if message.contains("does not support selected component(s): fixture-fs-read")
+        ));
+    }
+
+    #[test]
+    fn phase_two_wasm_runtime_composition_compiles() {
+        let temp = TempDir::new().unwrap();
+        let mut compose_options = options(&temp, "tests/fixtures/profiles/phase2-wasm.toml");
+        compose_options.registry_cache_path = Some(registry_cache());
+        let generated = compose(&compose_options).unwrap();
+
+        assert_eq!(generated.manifest.runtime_adapter, "runtime-wasm");
+        assert_eq!(
+            generated.manifest.normalized_profile.support_tier,
+            crate::metadata::SupportTier::Experimental
+        );
+        assert!(
+            generated
+                .manifest
+                .sources
+                .iter()
+                .any(|source| source.package == "rust-agent-runtime-wasm")
+        );
+        assert!(
+            !generated
+                .manifest
+                .sources
+                .iter()
+                .any(|source| source.package == "rust-agent-runtime-tokio")
+        );
+
+        let output = Command::new(tool("cargo"))
+            .args(["check", "--manifest-path"])
+            .arg(generated.path.join("Cargo.toml"))
+            .args([
+                "--target",
+                "wasm32-unknown-unknown",
+                "--locked",
+                "--offline",
+            ])
+            .env(
+                "CARGO_TARGET_DIR",
+                temp.path().join("generated-wasm-target"),
+            )
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "generated Phase 2 WASM composition failed to compile:\n{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let unsupported_observer = options(
+            &temp,
+            "tests/fixtures/profiles/phase2-wasm-observer-invalid.toml",
+        );
+        assert!(matches!(
+            compose(&unsupported_observer),
+            Err(ComposeError::Resolution(ResolutionError::Unsatisfiable {
+                component,
+                ..
+            })) if component == "lifecycle-observer-noop"
+        ));
+
+        let unsupported_wasi = options(
+            &temp,
+            "tests/fixtures/profiles/phase2-wasi-runtime-invalid.toml",
+        );
+        assert!(matches!(
+            compose(&unsupported_wasi),
+            Err(ComposeError::Resolution(ResolutionError::InvalidRuntimeAdapter {
+                id,
+                target,
+            })) if id == "runtime-wasm" && target == "wasm32-wasip1"
+        ));
     }
 
     #[test]
@@ -6659,6 +7193,86 @@ helper = { path = "../link" }
     }
 
     #[test]
+    fn composition_manifest_schema_two_is_explicit_and_schema_one_remains_verifiable() {
+        let temp = TempDir::new().unwrap();
+        let mut compose_options = options(&temp, "tests/fixtures/profiles/phase2-multi-model.toml");
+        compose_options.registry_cache_path = Some(registry_cache());
+        let generated = compose(&compose_options).unwrap();
+        assert_eq!(generated.manifest.schema, 2);
+        assert!(generated.manifest.requires_panic_unwind);
+        assert_eq!(
+            generated.manifest.algorithm,
+            "sha256-rust-agent-composition-v2"
+        );
+
+        let manifest_path = generated.path.join("rust-agent-composition.json");
+        let canonical_v2 = fs::read(&manifest_path).unwrap();
+        let marker = b"  \"requires-panic-unwind\": true,\n";
+        let mut missing_required_field = canonical_v2.clone();
+        let offset = missing_required_field
+            .windows(marker.len())
+            .position(|window| window == marker)
+            .unwrap();
+        missing_required_field.drain(offset..offset + marker.len());
+        fs::write(&manifest_path, missing_required_field).unwrap();
+        assert!(matches!(
+            load_manifest(&generated.path),
+            Err(ComposeError::ManifestNormalization { message, .. })
+                if message.contains("schema 2 requires requires-panic-unwind")
+        ));
+        fs::write(&manifest_path, &canonical_v2).unwrap();
+
+        let mut legacy = generated.manifest.clone();
+        assert!(legacy.requires_panic_unwind);
+        legacy.schema = 1;
+        legacy.algorithm = "sha256-rust-agent-composition-v1".into();
+        legacy.composition_hash = composition_hash_for_manifest(&legacy);
+        write_text(
+            &generated.path.join("src/identity.rs"),
+            &format!(
+                "pub const COMPOSITION_HASH: &str = {:?};\n",
+                legacy.composition_hash
+            ),
+        )
+        .unwrap();
+        write_json(
+            &generated.path.join("rust-agent-security.json"),
+            &SecurityManifest {
+                schema: 1,
+                composition_hash: legacy.composition_hash.clone(),
+                component_runtime_effects: legacy.component_runtime_effects.clone(),
+                host_runtime_effects: legacy.host_runtime_effects.clone(),
+                compiled_runtime_effects: legacy.compiled_runtime_effects.clone(),
+                build_requirements: legacy.build_requirements.clone(),
+            },
+        )
+        .unwrap();
+        let bytes = deterministic_json_bytes(&legacy).unwrap();
+        fs::write(generated.path.join("rust-agent-composition.json"), bytes).unwrap();
+        let legacy_path = generated
+            .path
+            .parent()
+            .unwrap()
+            .join(&legacy.composition_hash);
+        fs::rename(&generated.path, &legacy_path).unwrap();
+
+        let verified = verify_composition(&legacy_path).unwrap();
+        assert_eq!(verified.schema, 1);
+        assert!(!verified.requires_panic_unwind);
+        let round_trip = deterministic_json_bytes(&verified).unwrap();
+        assert!(
+            !round_trip
+                .windows(b"\"requires-panic-unwind\"".len())
+                .any(|window| window == b"\"requires-panic-unwind\"")
+        );
+        assert_eq!(
+            serde_json::from_slice::<CompositionManifest>(&round_trip).unwrap(),
+            verified
+        );
+        make_staging_tree_owner_writable(&legacy_path).unwrap();
+    }
+
+    #[test]
     fn composition_manifest_load_rederives_resolution_from_committed_inputs() {
         let temp = TempDir::new().unwrap();
         let generated = compose(&options(&temp, "tests/fixtures/profiles/minimal.toml")).unwrap();
@@ -6972,7 +7586,7 @@ helper = { path = "../link" }
     fn composition_record_sequences_require_canonical_order_after_resealing() {
         fn reseal(path: &Path, manifest: &mut CompositionManifest) -> PathBuf {
             let payload = CompositionIdentityPayload {
-                schema: 1,
+                schema: 2,
                 profile: &manifest.normalized_profile,
                 target: &manifest.normalized_target,
                 target_facts: &manifest.target_facts,
@@ -6980,6 +7594,7 @@ helper = { path = "../link" }
                 generator_inputs: &manifest.generator_inputs,
                 custom_target_spec: manifest.custom_target_spec.as_ref(),
                 resolution: &manifest.resolution,
+                requires_panic_unwind: manifest.requires_panic_unwind,
                 component_runtime_effects: &manifest.component_runtime_effects,
                 host_runtime_effects: &manifest.host_runtime_effects,
                 direct_root_build_requirements: &manifest.direct_root_build_requirements,
@@ -6989,7 +7604,7 @@ helper = { path = "../link" }
                 cargo_resolution: &manifest.cargo_resolution,
             };
             manifest.composition_hash = hex::encode(
-                canonical::domain_hash(b"rust-agent-composition-v1\0", &payload).unwrap(),
+                canonical::domain_hash(b"rust-agent-composition-v2\0", &payload).unwrap(),
             );
             write_text(
                 &path.join("src/identity.rs"),

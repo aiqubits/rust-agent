@@ -21,6 +21,15 @@ binding = "singleton"
 scope = "agent"
 
 [[capabilities]]
+id = "cap:lifecycle-observer"
+api-package = "rust-agent-runtime-api"
+rust-api = "rust_agent_runtime_api::LifecycleObserver"
+binding-type = "rust_agent_runtime_api::LifecycleObserverBinding"
+binding-adapter = "rust_agent_runtime_api::LifecycleObserverBinding::from_provider"
+binding = "ordered-multi"
+scope = "app"
+
+[[capabilities]]
 id = "cap:fixture-model"
 api-package = "rust-agent-fixture-api"
 rust-api = "rust_agent_fixture_api::Model"
@@ -66,7 +75,10 @@ dependencies-type = "rust_agent_model_replay::Dependencies"
 config-type = "rust_agent_model_replay::Config"
 config-source = "none"
 targets = "cfg(true)"
-support = "production"
+target-support = [
+    { predicate = 'cfg(target_os = "linux")', tier = "production" },
+    { predicate = 'cfg(not(target_os = "linux"))', tier = "experimental" },
+]
 lifecycle-effects = []
 provides = [{ capability = "cap:model", key = "replay", priority = 100, effects = [] }]
 requires = []
@@ -89,7 +101,10 @@ config-source = "host"
 config-key = "model-host"
 host-api = "rust_agent_model_host::host_api"
 targets = "cfg(true)"
-support = "production"
+target-support = [
+    { predicate = 'cfg(target_os = "linux")', tier = "production" },
+    { predicate = 'cfg(not(target_os = "linux"))', tier = "experimental" },
+]
 lifecycle-effects = []
 provides = [{ capability = "cap:model", key = "host", priority = 50, effects = ["host-bridge"] }]
 requires = []
@@ -110,7 +125,10 @@ dependencies-type = "rust_agent_driver_direct::Dependencies"
 config-type = "rust_agent_driver_direct::Config"
 config-source = "none"
 targets = "cfg(true)"
-support = "production"
+target-support = [
+    { predicate = 'cfg(target_os = "linux")', tier = "production" },
+    { predicate = 'cfg(not(target_os = "linux"))', tier = "experimental" },
+]
 lifecycle-effects = []
 provides = [{ capability = "cap:agent-driver", priority = 100, effects = [] }]
 requires = [{ capability = "cap:model", mode = "required", field = "model" }]
@@ -118,6 +136,30 @@ conflicts = []
 security = []
 runtime-primitives = []
 build-requirements = { executables = [], read-inputs = [], environment = [] }
+cargo-features = []
+
+[[components]]
+id = "lifecycle-observer-noop"
+package = "rust-agent-lifecycle-observer-noop"
+package-path = "crates/components/lifecycle-observer-noop"
+scope = "app"
+factory = "rust_agent_lifecycle_observer_noop::build"
+dependencies-type = "rust_agent_lifecycle_observer_noop::Dependencies"
+config-type = "rust_agent_lifecycle_observer_noop::Config"
+config-source = "none"
+targets = "cfg(not(target_arch = \"wasm32\"))"
+target-support = [
+    { predicate = 'cfg(all(not(target_arch = "wasm32"), target_os = "linux"))', tier = "production" },
+    { predicate = 'cfg(all(not(target_arch = "wasm32"), not(target_os = "linux")))', tier = "experimental" },
+]
+lifecycle-effects = []
+provides = [{ capability = "cap:lifecycle-observer", priority = 100, effects = [] }]
+requires = []
+conflicts = []
+security = []
+runtime-primitives = []
+build-requirements = { executables = [], read-inputs = [], environment = [] }
+app-coexistence = { mode = "concurrent-independent", evidence = { source = "coexistence-evidence.toml", algorithm = "sha256", digest = "56b67f9cdfb997c9b7bcb696854a733dabb26912f9731c4c04d3b753a6f6d378", reviewer-policy = "phase-2-runtime-review-v1" } }
 cargo-features = []
 
 [[components]]
@@ -254,10 +296,25 @@ package = "rust-agent-runtime-tokio"
 package-path = "crates/runtime/rust-agent-runtime-tokio"
 constructor = "rust_agent_runtime_tokio::create_runtime_primitives"
 targets = "cfg(not(target_arch = \"wasm32\"))"
-support = "production"
-primitives = []
+target-support = [
+    { predicate = 'cfg(all(not(target_arch = "wasm32"), target_os = "linux"))', tier = "production" },
+    { predicate = 'cfg(all(not(target_arch = "wasm32"), not(target_os = "linux")))', tier = "experimental" },
+]
+primitives = ["clock", "sleeper", "spawner"]
 security = []
 app-coexistence = { mode = "concurrent-independent", evidence = { source = "coexistence-evidence.toml", algorithm = "sha256", digest = "f642016b020fb815f750ab5e5441f6c951aa3b4eb16ee8f2e66a75e74e9b1299", reviewer-policy = "phase-2-runtime-review-v1" } }
+build-requirements = { executables = [], read-inputs = [], environment = [] }
+
+[[runtime-adapters]]
+id = "runtime-wasm"
+package = "rust-agent-runtime-wasm"
+package-path = "crates/runtime/rust-agent-runtime-wasm"
+constructor = "rust_agent_runtime_wasm::create_runtime_primitives"
+targets = "cfg(all(target_arch = \"wasm32\", target_os = \"unknown\"))"
+support = "experimental"
+primitives = ["clock", "sleeper", "spawner"]
+security = []
+app-coexistence = { mode = "requires-stop" }
 build-requirements = { executables = [], read-inputs = [], environment = [] }
 
 [[runtime-adapters]]

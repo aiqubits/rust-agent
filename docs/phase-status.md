@@ -8,7 +8,7 @@ represented in `docs/invariant-tests.md` and all applicable gates pass.
 | 0 — repository and contract | Complete | Rust/Cargo 1.97.1 synchronization, workspace/deny/ADR gates, effect-free core/runtime contracts, checked lifecycle identities, closed target-fact/custom-target records, globally bounded catalog owners and symbolic per-target support analysis, resource-namespace bootstrap contracts, Host/runtime metadata, canonical Host Cargo unit-graph schemas and privacy fixtures are implemented. Production composition discovers schema-owned Capability/Component/runtime/Host and direct-root build-requirement metadata from workspace package manifests through bounded, timed, offline, isolated `cargo metadata`; package/path ownership is derived from the exact workspace-member result, unknown/mixed/spoofed metadata and default-feature drift fail closed, and a real discovery round-trip is checked against the test-only catalog fixture. All 12 Phase 0 acceptance criteria have exact non-wildcard mappings, and the mapping/CI gate passes. |
 | 1A — generated graph proof | Complete | The development-only generator/resolver/build path, path-free compose rustc executable/version/full-sysroot provenance, canonical target-fact and custom-spec snapshots with rustc/Cargo before/after drift checks, schema-owned Cargo package-metadata discovery, bounded/shared target-support analysis, direct-serde-bounded metadata/profile/trust/diagnostic/composition/security/Cargo-source collections, an identity-bound normalized catalog/trust-policy/evidence-byte/root-requirement generator-input commitment with resolver/attribution/generated-source/source-closure rederivation, selected-evidence snapshot verification, conservative aggregate App handoff, generated namespaced host APIs and required-field HostBindings builders, shared-host Config-field type/identity sealing with a real two-App same-identity/no-reopen external Host fixture, committed-built-in-fact Cargo target-dependency rewriting with transitive active path-package snapshots, composition-wide source entry/byte preflight before copy or hash, checked canonical resolution/manifests, exact Cargo.lock source projection, Cargo-config ancestor rejection, source snapshots, real graph presence/absence, integration verification, topology fixtures, target matrix and WASM packaging are implemented. A checked-in custom target now completes compose, lockfile generation and locked offline development build with the real pinned Rust/Cargo 1.97.1 toolchain. All 10 Phase 1A acceptance criteria have exact non-wildcard mappings, and every applicable local gate passes. Phase 1A artifacts remain `deployable=false`; immutable production mounted-view enforcement remains a Phase 1B gate. |
 | 1B — Linux production build | Complete | All 12 acceptance criteria have exact non-wildcard mappings. GitHub run `34059521196` at commit `2dd4a21` passed the 20-step Quality job and the 15-step Ubuntu 24.04 Phase 1B Linux production job. The latter passed the real Landlock ABI 2 and namespace escape gates and all nine serial trusted fetch/planner/build, standalone, Host integration and pinned-WASM production fixtures, including signed `deployable=true` publication and inspection. |
-| 2 — minimal runtime spine | Complete | The lightweight Session API independently compiles in normal/development/all-feature modes without Agent or a backend. The model, commands and Agent contracts plus replay/Host model, direct driver and Tokio runtime Components implement the sessionless `Request → LanguageModel → Response` path with exact proof-before-provider authorization, transactional publication/rollback, process-bound lifecycle operations, targeted cancellation and bounded lifecycle-scoped event feeds. `minimal-pure` deterministically composes, locks, builds and executes the generated request path while graph-absence tests exclude Session/persistence/query/heavy/Host providers. Every Phase 2 acceptance contract has exact named evidence and every applicable local gate passes. The development artifact remains `deployable=false`; durable Session providers remain Phase 5. |
+| 2 — minimal runtime spine | Complete | All 12 `P2-AC-*` identities have exact runnable mappings: closed runtime primitives and binding authority, independent lightweight Session contracts, proof-bound single/multiple model routing, owned App/Agent lifecycle and bounded admission, atomic event feeds, contained observers, guarded commands, native and browser-local runtime adapters, and generated native/WASM compositions. The applicable local quality, API-closure, claimed-target compile, dependency-isolation, generated-package and end-to-end gates pass. Durable Session providers remain Phase 5. |
 | 3 — tool execution plane | Not started | The Phase 1A contract is stable; no Phase 3 implementation has started. |
 | 4 — local execution providers | Not started | Real-target security regressions required. |
 | 5 — session plane | Not started | Exact composition/catalog durable compatibility required. |
@@ -101,7 +101,8 @@ Named tests cover:
 - development artifact/integration production rejection and end-to-end CLI mutation checks.
 
 No test result above, by itself, is evidence for Phase 1B deployability or Phase 2 runtime
-completion; the separate closing evidence follows.
+completion. Phase 2 is complete only because its separate acceptance map and evidence below also
+pass.
 
 ## Phase 1B evidence
 
@@ -320,31 +321,124 @@ claim.
 
 ## Phase 2 evidence
 
+- schema-v1 runtime projection is closed to `clock`, `sleeper` and `spawner`. Request, lifecycle
+  notification and shutdown deadlines use the target-compatible monotonic `RuntimeInstant`; each
+  generated owner receives only its declared opaque bindings, owner drain remains retryable after
+  cancellation and still reaches quiescence after drain-waiter identity exhaustion. Task
+  registration and drain admission closure share one owner-local linearization gate, so drain
+  cannot complete ahead of a task whose registration is already in flight; no API relies on an
+  ambient executor. A runtime bundle can mint exactly one non-cloneable,
+  composition/catalog-bound `RuntimeOwner`, binding it at claim time to the exact Phase 2
+  Component/provider, observer, consumer and runtime-primitive plan. Binding assembly then validates
+  its runtime identity plus exact dependency and scope identities; observer and driver identities
+  travel with their actual bindings and are checked before publication. Compile-fail authority
+  fixtures protect the private ownership surface;
 - `rust-agent-session` owns the backend-neutral persistence, query, journal and read-store seams and
+  their structured lifecycle-operation conflict and captured-cursor expiry/scope errors, and
   compiles independently before its Agent consumer. CI checks the `core → runtime-api → session →
   agent` sequence in normal, development and all-feature modes, while an architecture test inspects
-  all three Session dependency graphs and rejects any Agent dependency;
-- model routing creates an opaque plan, the Agent-owned volatile journal commits its exact
-  projection, and only the matching process- and scope-bound proof can create a
-  `PreparedModelCall`. Compile-fail fixtures protect the proof, context and prepared envelope;
-  foreign proof and missing-route tests reject before any provider callback;
+  all three Session dependency graphs and rejects any Agent dependency. The versioned Session-list
+  cursor binds its backend/store snapshot identity, captured index high-water and complete
+  `(creation commit order, SessionId)` continuation key; event/projection cursors also bind Session
+  identity, and every cursor rejects positions beyond its captured high-water while preserving
+  invalid-position as a distinct query error instead of misclassifying it as an invalid limit. The
+  new-Session reservation now seals either the exact persistent allocation or an issuer-bound
+  volatile allocation, existing-Session recovery compares the complete expected projected draft,
+  and the prepared-new ABI exposes unpublished abort plus a NewEphemeral genesis/index commit whose
+  type can return only `Committed` or `NotCommitted`;
+- model routing supports a closed default route plus explicit selected-provider overrides and an
+  explicit-per-request mode. `AgentSendRequest` carries that typed route through the generated
+  direct driver, and the generated `CompiledModelProvider::route` prevents stringly Host routing.
+  Generated routing validation runs before runtime-root claim and before any Component factory. The
+  Agent-owned volatile journal commits the exact projection, and only a proof matching its process
+  and scope authority, projection, record digest and output budget can create a
+  `PreparedModelCall`; execution re-verifies the seal before provider effects. Missing or foreign
+  routes/proofs reject before provider effects; cancellation, deadline and request/output byte budgets remain enforced while the
+  stream is polled. Optional parameter presence is encoded
+  separately from every valid value in the request digest, and both guarded and default collectors
+  reject a delta after the unique completion event or EOF before completion as protocol violations;
 - generated App/Agent ownership constructs App-scoped model providers and Agent-scoped drivers,
-  publishes an Agent atomically, marks it ready, and removes it during shutdown. Observer veto or
-  panic rolls back before publication and before model effects; the native observer worker has
-  bounded reservation capacity, callback deadlines, cancellation and shutdown joining;
-- sessionless turns admit one active request, allocate lifecycle-bound request identities, preserve
-  the first targeted cancellation cause, and retain a bounded terminal-result window. Public event
-  feeds validate Agent/lifecycle/high-water cursors, enforce per-feed and aggregate budgets, release
-  reservations on drop, report only the last event actually delivered when lagging, and terminate
-  with an explicit closed status;
-- the empty Phase 2 command dispatcher performs lifecycle and admission checks before returning an
-  unknown-command result. Replay, shared Host model and Tokio runtime Components have explicit
-  independent/shared-handle ownership evidence and no ambient service locator;
+  publishes a complete Agent atomically, marks it ready, retains it strongly, and removes it only
+  after asynchronous owner-scoped teardown; while teardown is blocked, the directory continues to
+  expose the Agent in `Closing` and no disposed notification is enqueued. The directory reserves enough monotonic generation
+  capacity for every new entry to reach terminal removal before the initial map mutation and rejects
+  non-monotonic state transitions. Publication and shutdown share one commit boundary, so an App
+  that has entered closing cannot publish a late Agent. All construction, veto, publication
+  and create/shutdown race failures close the publisher and drain constructed runtime work before
+  returning; a Ready-event publication failure also removes the directory entry and delivers the
+  paired disposal notification before construction rollback. App shutdown closes turn, command and feed admission on every retained child before it
+  waits for an in-flight creation or drains the first child. Process-local operation recovery
+  validates the exact App, fingerprint and issuer and cannot recover an operation after its single
+  consumption. Runtime and per-Agent duration budgets compare the complete `Duration`, so even a
+  one-nanosecond excess over a generated hard ceiling is rejected instead of being hidden by
+  millisecond truncation;
+- sessionless turns implement one-active plus bounded queued admission, lifecycle-bound request
+  identity, same-id/same-fingerprint joining and terminal replay, conflict rejection, deadline
+  wakeup, exact idempotent cancellation with first-cause preservation, and bounded terminal
+  retention, including when the active executor future is dropped; that drop also releases the
+  turn-local request/cancellation/deadline context instead of leaving stale execution state. The
+  first admission fixes execution cancellation and deadline lineage; retry tokens and retry deadlines end only their own
+  wait, even when they differ from the first admission. Cancellation wakers run only after the
+  Agent state lock is released, preventing callback re-entry from deadlocking admission. Conflict and capacity rejection happen
+  before waiter-authority allocation, so rejected retries cannot exhaust later valid admission. A
+  queued request is promoted onto an
+  Agent-owned task, so execution continues to a replayable terminal result after all retry waiters
+  leave and shutdown can drain it. Allocated-but-unsubmitted identities remain valid across
+  out-of-order completion eviction under a fixed reservation bound. Shutdown is asynchronous and
+  idempotent even if the initiating future is dropped; a dropped App or Agent shutdown future also
+  unregisters any pre-ownership waker immediately, so cancellation cannot accumulate stale waiters.
+  Queued `Closed` outcomes enter the same bounded terminal-retention window, and App ownership remains
+  strong until the Agent publisher has drained and the lifecycle is terminal;
+- event-feed subscription and baseline/high-water capture share one publisher linearization point.
+  Typed cursors are bound to Agent/lifecycle, payloads are UTF-8 safely bounded before storage,
+  a maximum-size event remains replayable after older history is evicted,
+  aggregate count/event/byte reservations release exactly once, one owner-scoped reaper expires idle
+  readers without per-feed task churn, unread events survive orderly close or forced publisher
+  drop, and each feed emits exactly one terminal `Lagged` or `Closed` result. Closing is linearized
+  with registration so no new feed can
+  enter after shutdown begins, streamed model deltas are published with the current typed request
+  identity before final output, each terminal event is published before a queued successor can be
+  promoted, and publisher sequence exhaustion becomes a structured request failure before any
+  provider side effect when it occurs at admission. Every internal publication failure moves the
+  Agent through `RecoveryRequired`, closes subsequent turn/command/feed admission, and reports that
+  terminal state to existing feeds; shutdown then continues monotonically through `Closing` to
+  `Closed`. Delta/terminal publication exhaustion likewise cannot be reported as request success.
+  All stream Wakers are invoked only after publisher and queue locks are released;
+- observer veto executes before publication; generated contributors are ordered by metadata
+  `(order, component_id)`, and post-commit delivery uses pre-reserved bounded native capacity with a
+  callback deadline driven by the selected runtime Sleeper, cancellation and panic/error containment.
+  Graceful shutdown drains reserved notifications until its bound, then cooperatively cancels the
+  remainder without extending resource release; Drop has a nonblocking forced fallback. Saturating diagnostics expose callback
+  error, timeout, panic, forced cancellation, runtime failure, dropped-notification and worker-panic
+  counts without retaining unbounded messages. The
+  generated compile guard, production pre/build relation, attested gate and artifact/post verifier
+  all require `panic=unwind` whenever in-process observers are selected by schema 2. A verified
+  schema-1 manifest retains its versioned semantics and round-trips without serializing the schema-2
+  field rather than being rejected by a requirement introduced in the current catalog. The empty
+  Phase 2 command dispatcher checks lifecycle and
+  admission before returning `UnsupportedOperation`;
+- replay, shared Host model, direct driver and runtime Components declare exact ownership,
+  coexistence, effects and primitive needs. `runtime-tokio` has native functional drain/ownership
+  tests and Linux Production metadata; its owner also has a nested-runtime drop regression. Android,
+  iOS, macOS and Windows are explicitly Experimental compile-compatible targets. `runtime-wasm`
+  targets only `wasm32-unknown-unknown`, uses a browser-compatible monotonic clock plus owned
+  timer/spawn implementation whose cancellable JS timers are tested on the real WASM target, and is
+  conservatively `requires-stop` until a real two-App browser resource test exists. WASI is rejected
+  during resolution and no production browser claim is made;
+- a generated multi-provider profile first validates the closed routing mode, then claims a runtime
+  root bound to the catalog-derived exact provider/consumer/observer/primitive plan and constructs
+  the selected Components. A selected Component without a supported Phase 2 assembly role fails
+  closed instead of becoming an unused Cargo-only dependency. A separate WASM profile builds with
+  `runtime-wasm` and proves an unsupported observer selection fails during resolution before Cargo
+  or provider side effects;
 - `minimal-pure` resolves exactly `driver-direct + model-replay + runtime-tokio`, snapshots only the
   required lightweight APIs and selected Components, excludes Session Components and persistence,
   query, network, heavy and Host providers from both path closure and Cargo.lock, regenerates
   identically, and passes locked offline generated tests plus the development build runner and CLI
   end-to-end request. Its build manifest is intentionally `deployable=false`.
 
-These tests close only the Phase 2 minimal sessionless runtime spine. They do not claim Phase 3 tool
-execution, Phase 5 durable Session behavior, or any additional production deployment support.
+Phase 2 is complete: all 12 acceptance identities have exact runnable evidence in
+`docs/invariant-tests.md`, and every applicable local quality, API-closure, claimed-target compile,
+dependency-isolation, generated-package and end-to-end gate passes. This intentionally does not
+claim Phase 3 tool execution, Phase 5 durable Session behavior, production browser execution, or
+production support beyond the targets declared by the selected Components.

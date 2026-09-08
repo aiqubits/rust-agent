@@ -676,6 +676,8 @@ impl ProductionBuildManifest {
                 != self.build_options.artifact_selector
             || self.build_enforcement_identity.context.panic_strategy
                 != self.build_options.panic_strategy
+            || (self.composition.requires_panic_unwind
+                && self.build_options.panic_strategy != BuildPanicStrategy::Unwind)
         {
             return invalid("composition, enforcement context, and build options disagree");
         }

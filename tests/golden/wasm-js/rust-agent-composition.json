@@ -1,7 +1,7 @@
 {
-  "schema": 1,
-  "algorithm": "sha256-rust-agent-composition-v1",
-  "composition-hash": "362787d6cf4be8d68fae6e9869cf9503b20f5c5624be7efc6190ddd9cfb43293",
+  "schema": 2,
+  "algorithm": "sha256-rust-agent-composition-v2",
+  "composition-hash": "554f4b036c6d32ef26191f24b17b718627628d2a3fae1e2975cdccee8c38e684",
   "build-kind": "wasm",
   "profile-name": "fixture-wasm-js",
   "normalized-profile": {
@@ -226,6 +226,15 @@
           "scope": "app"
         },
         {
+          "id": "cap:lifecycle-observer",
+          "api-package": "rust-agent-runtime-api",
+          "rust-api": "rust_agent_runtime_api::LifecycleObserver",
+          "binding-type": "rust_agent_runtime_api::LifecycleObserverBinding",
+          "binding-adapter": "rust_agent_runtime_api::LifecycleObserverBinding::from_provider",
+          "binding": "ordered-multi",
+          "scope": "app"
+        },
+        {
           "id": "cap:model",
           "api-package": "rust-agent-model",
           "rust-api": "rust_agent_model::LanguageModel",
@@ -251,7 +260,11 @@
           "targets": "cfg(true)",
           "target-support": [
             {
-              "predicate": "cfg(true)",
+              "predicate": "cfg(not(target_os = \"linux\"))",
+              "tier": "experimental"
+            },
+            {
+              "predicate": "cfg(target_os = \"linux\")",
               "tier": "production"
             }
           ],
@@ -610,6 +623,63 @@
           "cargo-features": []
         },
         {
+          "id": "lifecycle-observer-noop",
+          "package": "rust-agent-lifecycle-observer-noop",
+          "package-path": "crates/components/lifecycle-observer-noop",
+          "scope": "app",
+          "factory": "rust_agent_lifecycle_observer_noop::build",
+          "dependencies-type": "rust_agent_lifecycle_observer_noop::Dependencies",
+          "config-type": "rust_agent_lifecycle_observer_noop::Config",
+          "config-source": "none",
+          "config-key": null,
+          "resource-namespace-preparer": null,
+          "prepared-config-type": null,
+          "targets": "cfg(not(target_arch = \"wasm32\"))",
+          "target-support": [
+            {
+              "predicate": "cfg(all(not(target_arch = \"wasm32\"), not(target_os = \"linux\")))",
+              "tier": "experimental"
+            },
+            {
+              "predicate": "cfg(all(not(target_arch = \"wasm32\"), target_os = \"linux\"))",
+              "tier": "production"
+            }
+          ],
+          "lifecycle-effects": [],
+          "provides": [
+            {
+              "capability": "cap:lifecycle-observer",
+              "key": null,
+              "priority": 100,
+              "order": 0,
+              "layer": "provider",
+              "resource-namespace": {
+                "mode": "none"
+              },
+              "effects": []
+            }
+          ],
+          "requires": [],
+          "conflicts": [],
+          "security": [],
+          "runtime-primitives": [],
+          "build-requirements": {
+            "executables": [],
+            "read-inputs": [],
+            "environment": []
+          },
+          "app-coexistence": {
+            "mode": "concurrent-independent",
+            "evidence": {
+              "source": "coexistence-evidence.toml",
+              "algorithm": "sha256",
+              "digest": "56b67f9cdfb997c9b7bcb696854a733dabb26912f9731c4c04d3b753a6f6d378",
+              "reviewer-policy": "phase-2-runtime-review-v1"
+            }
+          },
+          "cargo-features": []
+        },
+        {
           "id": "model-host",
           "package": "rust-agent-model-host",
           "package-path": "crates/components/model-host",
@@ -625,7 +695,11 @@
           "targets": "cfg(true)",
           "target-support": [
             {
-              "predicate": "cfg(true)",
+              "predicate": "cfg(not(target_os = \"linux\"))",
+              "tier": "experimental"
+            },
+            {
+              "predicate": "cfg(target_os = \"linux\")",
               "tier": "production"
             }
           ],
@@ -685,7 +759,11 @@
           "targets": "cfg(true)",
           "target-support": [
             {
-              "predicate": "cfg(true)",
+              "predicate": "cfg(not(target_os = \"linux\"))",
+              "tier": "experimental"
+            },
+            {
+              "predicate": "cfg(target_os = \"linux\")",
               "tier": "production"
             }
           ],
@@ -762,11 +840,19 @@
           "targets": "cfg(not(target_arch = \"wasm32\"))",
           "target-support": [
             {
-              "predicate": "cfg(not(target_arch = \"wasm32\"))",
+              "predicate": "cfg(all(not(target_arch = \"wasm32\"), not(target_os = \"linux\")))",
+              "tier": "experimental"
+            },
+            {
+              "predicate": "cfg(all(not(target_arch = \"wasm32\"), target_os = \"linux\"))",
               "tier": "production"
             }
           ],
-          "primitives": [],
+          "primitives": [
+            "clock",
+            "sleeper",
+            "spawner"
+          ],
           "security": [],
           "app-coexistence": {
             "mode": "concurrent-independent",
@@ -776,6 +862,33 @@
               "digest": "f642016b020fb815f750ab5e5441f6c951aa3b4eb16ee8f2e66a75e74e9b1299",
               "reviewer-policy": "phase-2-runtime-review-v1"
             }
+          },
+          "build-requirements": {
+            "executables": [],
+            "read-inputs": [],
+            "environment": []
+          }
+        },
+        {
+          "id": "runtime-wasm",
+          "package": "rust-agent-runtime-wasm",
+          "package-path": "crates/runtime/rust-agent-runtime-wasm",
+          "constructor": "rust_agent_runtime_wasm::create_runtime_primitives",
+          "targets": "cfg(all(target_arch = \"wasm32\", target_os = \"unknown\"))",
+          "target-support": [
+            {
+              "predicate": "cfg(all(target_arch = \"wasm32\", target_os = \"unknown\"))",
+              "tier": "experimental"
+            }
+          ],
+          "primitives": [
+            "clock",
+            "sleeper",
+            "spawner"
+          ],
+          "security": [],
+          "app-coexistence": {
+            "mode": "requires-stop"
           },
           "build-requirements": {
             "executables": [],
@@ -845,7 +958,7 @@
         }
       ]
     },
-    "normalized-catalog-digest": "dd4893792c4de85de48cdafd571914f21ca7edad180e09844e3e7e2a8ba096ef",
+    "normalized-catalog-digest": "53d0434f969b61e5032cbf70cc5eea44a92e8542cdd9e2c0eb722c4be63aa6e3",
     "catalog-trust-input": {
       "schema": 1,
       "normalized-policy": {
@@ -947,6 +1060,33 @@
             ]
           },
           "bytes-hex": "736368656d61203d20310a6f776e6572203d2022666978747572652d6d6f64656c2d736861726564220a6d6f6465203d2022636f6e63757272656e742d7368617265642d686f73742d68616e646c65220a72756c652d736574203d202270686173652d31612d7368617265642d68616e646c652d7631220a636c61696d73203d205b226e6f2d72656f70656e222c202273616d652d686f73742d68616e646c652d6964656e74697479222c202274776f2d6170702d696e2d70726f63657373225d0a7465737473203d205b22746f706f6c6f67795f6d61747269783a3a7368617265645f686f73745f68616e646f66665f757365735f73616d655f74797065645f6964656e746974795f776974686f75745f72656f70656e225d0a"
+        },
+        {
+          "owner-kind": "component",
+          "owner": "lifecycle-observer-noop",
+          "package": "rust-agent-lifecycle-observer-noop",
+          "package-path": "crates/components/lifecycle-observer-noop",
+          "source": "coexistence-evidence.toml",
+          "algorithm": "sha256",
+          "digest": "56b67f9cdfb997c9b7bcb696854a733dabb26912f9731c4c04d3b753a6f6d378",
+          "reviewer-policy": "phase-2-runtime-review-v1",
+          "document": {
+            "schema": 1,
+            "owner": "lifecycle-observer-noop",
+            "mode": "concurrent-independent",
+            "rule-set": "phase-1a-independent-v1",
+            "claims": [
+              "boundary-config",
+              "different-config",
+              "identical-config",
+              "independent-real-resources",
+              "two-app-in-process"
+            ],
+            "tests": [
+              "rust_agent_lifecycle_observer_noop::tests::observer_is_stateless_and_requires_no_runtime_primitive"
+            ]
+          },
+          "bytes-hex": "736368656d61203d20310a6f776e6572203d20226c6966656379636c652d6f627365727665722d6e6f6f70220a6d6f6465203d2022636f6e63757272656e742d696e646570656e64656e74220a72756c652d736574203d202270686173652d31612d696e646570656e64656e742d7631220a636c61696d73203d205b22626f756e646172792d636f6e666967222c2022646966666572656e742d636f6e666967222c20226964656e746963616c2d636f6e666967222c2022696e646570656e64656e742d7265616c2d7265736f7572636573222c202274776f2d6170702d696e2d70726f63657373225d0a7465737473203d205b22727573745f6167656e745f6c6966656379636c655f6f627365727665725f6e6f6f703a3a74657374733a3a6f627365727665725f69735f73746174656c6573735f616e645f72657175697265735f6e6f5f72756e74696d655f7072696d6974697665225d0a"
         },
         {
           "owner-kind": "component",
@@ -1055,7 +1195,7 @@
           "bytes-hex": "736368656d61203d20310a6f776e6572203d202272756e74696d652d746f6b696f220a6d6f6465203d2022636f6e63757272656e742d696e646570656e64656e74220a72756c652d736574203d202270686173652d31612d696e646570656e64656e742d7631220a636c61696d73203d205b22626f756e646172792d636f6e666967222c2022646966666572656e742d636f6e666967222c20226964656e746963616c2d636f6e666967222c2022696e646570656e64656e742d7265616c2d7265736f7572636573222c202274776f2d6170702d696e2d70726f63657373225d0a7465737473203d205b22727573745f6167656e745f72756e74696d655f746f6b696f3a3a74657374733a3a65766572795f62756e646c655f6f776e735f616e5f696e646570656e64656e745f72756e74696d65225d0a"
         }
       ],
-      "identity-digest": "5c02e1740d48843ca7fbbe5825452181a505f8c607e177de4c675dfa50796210"
+      "identity-digest": "4c8a61b19dd9e9d4cba699f9619e58e56876783662f7df31fb346b2e5241f8a8"
     },
     "root-build-requirements": {
       "rust-agent-agent": {
@@ -1094,7 +1234,7 @@
         "environment": []
       }
     },
-    "identity-digest": "6fac3071784bf03bbaf8a8a4cd68fba385d7e5e1f31ce75130262d6264ba7bdf"
+    "identity-digest": "dec645e4170a176cb4f9ee5cb676d2cf2e119693287597910c6cf6657078db92"
   },
   "custom-target-spec": null,
   "selected-components": [
@@ -1157,6 +1297,7 @@
     }
   },
   "app-handoff": "concurrent",
+  "requires-panic-unwind": false,
   "deployable": false,
   "resolution": {
     "schema": 1,
@@ -1287,6 +1428,13 @@
       },
       {
         "component": "fixture-model-shared",
+        "conclusion": "excluded",
+        "reasons": [
+          "NotRequired"
+        ]
+      },
+      {
+        "component": "lifecycle-observer-noop",
         "conclusion": "excluded",
         "reasons": [
           "NotRequired"
@@ -1883,14 +2031,14 @@
       "id": "rust-agent-runtime-api",
       "package": "rust-agent-runtime-api",
       "logical-path": "crates/api/rust-agent-runtime-api",
-      "tree-digest": "0521504bc0beddb8665fe8a00b652d359185ce6967344ba0b4bc8b391c1606ea",
+      "tree-digest": "3549196ce8fd050dadad4d6b7595d411d66a77c06f8d3b8fcf56c40181d8a447",
       "tree-entries": [
         {
           "path": "Cargo.toml",
           "kind": {
             "kind": "regular-file",
-            "sha256": "e51d278f6bff808cf5bfc9dd14be2677dc7d5ae86484b61fd52543793f2848ae",
-            "bytes": 442
+            "sha256": "aec62b1b52bd113622693add562e36f723bce6c13591a697951901ff4f94f6e3",
+            "bytes": 756
           },
           "metadata": {
             "contract": "read-only-epoch-v1",
@@ -1931,8 +2079,8 @@
           "path": "src/lib.rs",
           "kind": {
             "kind": "regular-file",
-            "sha256": "68e039d8553c847f64b34eb4708406a86310591c4e26f3d6eef1dc67f04cd737",
-            "bytes": 58121
+            "sha256": "d1788dd606ea7c927952ee3fd45570369e66b3ea90864de275b82ab268edcdc1",
+            "bytes": 111376
           },
           "metadata": {
             "contract": "read-only-epoch-v1",
@@ -1973,8 +2121,8 @@
           "path": "tests/privacy.rs",
           "kind": {
             "kind": "regular-file",
-            "sha256": "ac055943b9a356626e241527e005ea3674bd74b5237f5405f9e3256476fe4db5",
-            "bytes": 143
+            "sha256": "5fcdd0e59cec9df9c994422cba4c989895613123f6f63f9c94aef785af8a9d49",
+            "bytes": 311
           },
           "metadata": {
             "contract": "read-only-epoch-v1",
@@ -1999,6 +2147,50 @@
           "metadata": {
             "contract": "read-only-epoch-v1",
             "mode": 365,
+            "uid": 0,
+            "gid": 0,
+            "atime-nanos": 0,
+            "mtime-nanos": 0,
+            "ctime-nanos": 0,
+            "birthtime-nanos": 0,
+            "link-count": 1,
+            "device": 0,
+            "inode": 0,
+            "generation": 0
+          }
+        },
+        {
+          "path": "tests/ui/forge_binding_assembly.rs",
+          "kind": {
+            "kind": "regular-file",
+            "sha256": "92a27c2aad47aed24014e1338fa68a257bc3a93521bf8cfc6b0041abdd97c634",
+            "bytes": 247
+          },
+          "metadata": {
+            "contract": "read-only-epoch-v1",
+            "mode": 292,
+            "uid": 0,
+            "gid": 0,
+            "atime-nanos": 0,
+            "mtime-nanos": 0,
+            "ctime-nanos": 0,
+            "birthtime-nanos": 0,
+            "link-count": 1,
+            "device": 0,
+            "inode": 0,
+            "generation": 0
+          }
+        },
+        {
+          "path": "tests/ui/forge_binding_assembly.stderr",
+          "kind": {
+            "kind": "regular-file",
+            "sha256": "6d5406373bbf73c19cd2d9f97f18b27958d50238333305fcab38322dd7e3d57f",
+            "bytes": 722
+          },
+          "metadata": {
+            "contract": "read-only-epoch-v1",
+            "mode": 292,
             "uid": 0,
             "gid": 0,
             "atime-nanos": 0,
@@ -2276,6 +2468,50 @@
           }
         },
         {
+          "path": "tests/ui/forge_volatile_session_reservation.rs",
+          "kind": {
+            "kind": "regular-file",
+            "sha256": "2aa4e1cef243542e6323eadb1ee902dc439a627c7d482b0527a1b7bf2acbf2b6",
+            "bytes": 733
+          },
+          "metadata": {
+            "contract": "read-only-epoch-v1",
+            "mode": 292,
+            "uid": 0,
+            "gid": 0,
+            "atime-nanos": 0,
+            "mtime-nanos": 0,
+            "ctime-nanos": 0,
+            "birthtime-nanos": 0,
+            "link-count": 1,
+            "device": 0,
+            "inode": 0,
+            "generation": 0
+          }
+        },
+        {
+          "path": "tests/ui/forge_volatile_session_reservation.stderr",
+          "kind": {
+            "kind": "regular-file",
+            "sha256": "486ed1b635ddc526f2b412d5638bf57c3010b21322cb89025457908bbd920fdf",
+            "bytes": 1192
+          },
+          "metadata": {
+            "contract": "read-only-epoch-v1",
+            "mode": 292,
+            "uid": 0,
+            "gid": 0,
+            "atime-nanos": 0,
+            "mtime-nanos": 0,
+            "ctime-nanos": 0,
+            "birthtime-nanos": 0,
+            "link-count": 1,
+            "device": 0,
+            "inode": 0,
+            "generation": 0
+          }
+        },
+        {
           "path": "tests/ui/seal_non_shared_host_field.rs",
           "kind": {
             "kind": "regular-file",
@@ -2345,13 +2581,13 @@
     },
     {
       "path": "generator-inputs.json",
-      "digest": "6adbad48b18a297e9c833c0e165b77bae7c2f03c682a562cc2d79f941dee790b",
-      "bytes": 33663
+      "digest": "7e49a7140a0e183191566d41f46385c0aaff3e83e0e80782ae675520eddc6655",
+      "bytes": 39201
     },
     {
       "path": "src/lib.rs",
-      "digest": "300ed9b1afe201ab45812b4446618585bc23e001a6e3d35ae6a055e2f58a2e4e",
-      "bytes": 3650
+      "digest": "6a308e206a37f3df677746f19eb34287ad2ef9238cdbfed13594bdf3c2cc198c",
+      "bytes": 3622
     },
     {
       "path": "src/wasm.rs",

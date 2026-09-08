@@ -26,7 +26,7 @@ const WASM_SIZE_BASELINES: [(&str, u64); 5] = [
     ("bundle/rust_agent.js", 19_330),
     ("bundle/rust_agent_bg.wasm", 387_494),
     ("bundle/rust_agent_bg.wasm.d.ts", 1_703),
-    ("intermediate/rust_agent_raw.wasm", 7_529_630),
+    ("intermediate/rust_agent_raw.wasm", 8_338_807),
 ];
 
 fn repository_root() -> PathBuf {
@@ -323,8 +323,14 @@ fn verify_wasm_size_budget(artifacts: &[rust_agent_build_executor::DevelopmentAr
         .filter(|artifact| artifact.kind != DevelopmentArtifactKind::RawWasmIntermediate)
         .map(|artifact| artifact.bytes)
         .sum();
-    assert!(raw <= RAW_WASM_ABSOLUTE_CEILING);
-    assert!(bundle <= BUNDLE_ABSOLUTE_CEILING);
+    assert!(
+        raw <= RAW_WASM_ABSOLUTE_CEILING,
+        "raw WASM grew beyond the absolute ceiling: {raw} > {RAW_WASM_ABSOLUTE_CEILING} bytes"
+    );
+    assert!(
+        bundle <= BUNDLE_ABSOLUTE_CEILING,
+        "WASM bundle grew beyond the absolute ceiling: {bundle} > {BUNDLE_ABSOLUTE_CEILING} bytes"
+    );
 }
 
 fn execute_bundle_with_node(node: &Path, artifact_dir: &Path) {

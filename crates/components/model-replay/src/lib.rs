@@ -62,9 +62,23 @@ impl LanguageModel for ReplayModel {
 pub fn build(
     _config: &Config,
     _dependencies: Dependencies,
-    _runtime: RuntimePrimitiveBindings,
+    runtime: RuntimePrimitiveBindings,
 ) -> Result<ComponentOutput<ReplayModel>, ComponentBuildError> {
+    validate_runtime_primitive_list(runtime.allowed())?;
+    drop(runtime);
     Ok(ComponentOutput::stateless(ReplayModel))
+}
+
+fn validate_runtime_primitive_list(
+    primitives: &[rust_agent_runtime_api::RuntimePrimitiveKind],
+) -> Result<(), ComponentBuildError> {
+    if primitives.is_empty() {
+        Ok(())
+    } else {
+        Err(ComponentBuildError::InvalidConfig(
+            "model-replay declares no runtime primitives".into(),
+        ))
+    }
 }
 
 #[cfg(test)]
@@ -81,6 +95,12 @@ mod tests {
         assert_eq!(
             first.service().provider_key(),
             second.service().provider_key()
+        );
+        assert!(
+            validate_runtime_primitive_list(
+                &[rust_agent_runtime_api::RuntimePrimitiveKind::Clock,]
+            )
+            .is_err()
         );
     }
 }

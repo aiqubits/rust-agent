@@ -9,7 +9,7 @@ mod wasm;
 pub use wasm::start;
 pub use rust_agent_fixture_runtime::create_runtime_primitives as create_runtime_primitives;
 
-pub const CATALOG_DIGEST: &str = "dd4893792c4de85de48cdafd571914f21ca7edad180e09844e3e7e2a8ba096ef";
+pub const CATALOG_DIGEST: &str = "53d0434f969b61e5032cbf70cc5eea44a92e8542cdd9e2c0eb722c4be63aa6e3";
 
 #[derive(Default)]
 pub struct RuntimeConfig {
@@ -61,7 +61,6 @@ pub fn build(runtime_config: RuntimeConfig, host_bindings: HostBindings, runtime
     if runtime.adapter().as_str() != "fixture-runtime" {
         return Err(BuildError::InvalidComposition("runtime adapter identity mismatch"));
     }
-    let _ = runtime_config;
     let _ = host_bindings;
     let shared_host_fields = vec![
     ];

@@ -13,6 +13,14 @@ executables = []
 read-inputs = []
 environment = []
 
+[[package.metadata.rust-agent.capability]]
+id = "cap:lifecycle-observer"
+api = "rust_agent_runtime_api::LifecycleObserver"
+binding-type = "rust_agent_runtime_api::LifecycleObserverBinding"
+binding-adapter = "rust_agent_runtime_api::LifecycleObserverBinding::from_provider"
+binding = "ordered-multi"
+scope = "app"
+
 [features]
 default = []
 

@@ -1,0 +1,40 @@
+[package]
+name = "rust-agent-lifecycle-observer-noop"
+description = "Stateless lifecycle observer Component for rust-agent"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[package.metadata.rust-agent]
+schema = 1
+id = "lifecycle-observer-noop"
+scope = "app"
+factory = "rust_agent_lifecycle_observer_noop::build"
+dependencies-type = "rust_agent_lifecycle_observer_noop::Dependencies"
+config-type = "rust_agent_lifecycle_observer_noop::Config"
+config-source = "none"
+targets = ["cfg(not(target_arch = \"wasm32\"))"]
+target-support = [
+    { predicate = 'cfg(all(not(target_arch = "wasm32"), target_os = "linux"))', tier = "production" },
+    { predicate = 'cfg(all(not(target_arch = "wasm32"), not(target_os = "linux")))', tier = "experimental" },
+]
+lifecycle-effects = []
+provides = [{ capability = "cap:lifecycle-observer", priority = 100, effects = [] }]
+requires = []
+conflicts = []
+security = []
+runtime-primitives = []
+build-requirements = { executables = [], read-inputs = [], environment = [] }
+app-coexistence = { mode = "concurrent-independent", evidence = { source = "coexistence-evidence.toml", algorithm = "sha256", digest = "56b67f9cdfb997c9b7bcb696854a733dabb26912f9731c4c04d3b753a6f6d378", reviewer-policy = "phase-2-runtime-review-v1" } }
+cargo-features = []
+
+[features]
+default = []
+
+[dependencies]
+rust-agent-runtime-api = { version = "0.1.0", path = "../../api/rust-agent-runtime-api", default-features = false }
+
+[lints]
+workspace = true

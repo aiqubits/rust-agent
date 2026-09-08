@@ -34,5 +34,8 @@ rust-agent-runtime-api = { version = "0.1.0", path = "../rust-agent-runtime-api"
 rust-agent-session = { version = "0.1.0", path = "../rust-agent-session", default-features = false }
 sha2 = "0.10.9"
 
+[dev-dependencies]
+rust-agent-runtime-tokio = { version = "0.1.0", path = "../../runtime/rust-agent-runtime-tokio", default-features = false }
+
 [lints]
 workspace = true

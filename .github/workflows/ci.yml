@@ -32,6 +32,10 @@ jobs:
         run: cargo install wasm-bindgen-cli --version 0.2.127 --locked
       - name: Verify pinned wasm-bindgen CLI version
         run: wasm-bindgen --version | grep -E '^wasm-bindgen 0\.2\.127$'
+      - name: Verify browser-local runtime cancellation
+        env:
+          CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER: wasm-bindgen-test-runner
+        run: cargo test -p rust-agent-runtime-wasm --target wasm32-unknown-unknown --all-features
       - name: Verify exact Phase 0/1A/1B/2 acceptance mappings
         run: cargo test -p rust-agent-cli --test architecture phase_zero_through_two_acceptance_mappings_are_exact_complete_and_runnable -- --exact
       - name: Build pinned-toolchain custom-target composition
@@ -46,6 +50,26 @@ jobs:
           cargo check -p rust-agent-agent --no-default-features --features development
           cargo check -p rust-agent-session --all-features
           cargo check -p rust-agent-agent --all-features
+      - name: Verify Phase 2 claimed target matrix
+        shell: bash
+        run: |
+          phase2_packages=(
+            -p rust-agent-core
+            -p rust-agent-runtime-api
+            -p rust-agent-session
+            -p rust-agent-model
+            -p rust-agent-commands
+            -p rust-agent-agent
+            -p rust-agent-model-replay
+            -p rust-agent-model-host
+            -p rust-agent-driver-direct
+            -p rust-agent-lifecycle-observer-noop
+            -p rust-agent-runtime-wasm
+          )
+          cargo check --target wasm32-unknown-unknown --all-features "${phase2_packages[@]}"
+          for target in aarch64-linux-android aarch64-apple-ios x86_64-apple-darwin x86_64-pc-windows-msvc; do
+            cargo check --target "$target" --all-features "${phase2_packages[@]}" -p rust-agent-runtime-tokio
+          done
       - run: cargo fmt --all --check
       - run: cargo check --workspace --all-targets
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
