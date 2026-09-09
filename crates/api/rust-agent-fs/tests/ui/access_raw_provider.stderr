@@ -1,0 +1,5 @@
+error[E0616]: field `provider` of struct `FileReadBinding` is private
+  --> tests/ui/access_raw_provider.rs:44:29
+   |
+44 |     let _provider = binding.provider;
+   |                             ^^^^^^^^ private field

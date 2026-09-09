@@ -1,0 +1,49 @@
+error[E0451]: fields `cancellation`, `deadline`, `byte_budget` and `entry_budget` of struct `FsCallContext` are private
+  --> tests/ui/forge_filesystem_state.rs:12:9
+   |
+11 |     let _context = FsCallContext {
+   |                    ------------- in this type
+12 |         cancellation: CancellationToken::new(),
+   |         ^^^^^^^^^^^^ private field
+13 |         deadline: None,
+   |         ^^^^^^^^ private field
+14 |         byte_budget: NonZeroUsize::MIN,
+   |         ^^^^^^^^^^^ private field
+15 |         entry_budget: NonZeroUsize::MIN,
+   |         ^^^^^^^^^^^^ private field
+
+error[E0451]: fields `start` and `length` of struct `ByteRange` are private
+  --> tests/ui/forge_filesystem_state.rs:18:9
+   |
+17 |     let _range = ByteRange {
+   |                  --------- in this type
+18 |         start: 0,
+   |         ^^^^^ private field
+19 |         length: NonZeroUsize::MIN,
+   |         ^^^^^^ private field
+
+error[E0451]: fields `provider_key`, `path` and `token` of struct `DirPageCursor` are private
+  --> tests/ui/forge_filesystem_state.rs:22:9
+   |
+21 |     let cursor = DirPageCursor {
+   |                  ------------- in this type
+22 |         provider_key: CanonicalId::new("local").unwrap(),
+   |         ^^^^^^^^^^^^ private field
+23 |         path,
+   |         ^^^^ private field
+24 |         token: Arc::from([1]),
+   |         ^^^^^ private field
+
+error[E0451]: fields `entries`, `next_cursor`, `complete` and `encoded_bytes` of struct `DirPage` are private
+  --> tests/ui/forge_filesystem_state.rs:27:9
+   |
+26 |     let _page = DirPage {
+   |                 ------- in this type
+27 |         entries: Arc::from([DirEntry::new("entry", FileKind::File, 1).unwrap()]),
+   |         ^^^^^^^ private field
+28 |         next_cursor: Some(cursor),
+   |         ^^^^^^^^^^^ private field
+29 |         complete: false,
+   |         ^^^^^^^^ private field
+30 |         encoded_bytes: 1,
+   |         ^^^^^^^^^^^^^ private field

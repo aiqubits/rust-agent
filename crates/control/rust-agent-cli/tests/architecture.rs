@@ -580,6 +580,121 @@ fn mandatory_api_crates_have_an_exact_effect_free_dependency_closure() {
 }
 
 #[test]
+fn phase_four_filesystem_api_is_bounded_and_dependency_isolated() {
+    let root = workspace_root();
+    let manifest: Value = toml::from_str(
+        &fs::read_to_string(root.join("crates/api/rust-agent-fs/Cargo.toml")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        manifest["dependencies"]
+            .as_table()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>(),
+        ["rust-agent-core", "rust-agent-runtime-api"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
+    );
+    let capabilities = manifest["package"]["metadata"]["rust-agent"]["capability"]
+        .as_array()
+        .unwrap();
+    assert_eq!(capabilities.len(), 2);
+    assert_eq!(capabilities[0]["id"].as_str(), Some("cap:fs-read"));
+    assert_eq!(capabilities[1]["id"].as_str(), Some("cap:fs-write"));
+    for capability in capabilities {
+        assert_eq!(capability["binding"].as_str(), Some("singleton"));
+        assert_eq!(capability["scope"].as_str(), Some("agent"));
+    }
+
+    let source = fs::read_to_string(root.join("crates/api/rust-agent-fs/src/lib.rs")).unwrap();
+    for required in [
+        "pub struct AgentPath",
+        "pub struct FsCallContext",
+        "pub struct ByteRange",
+        "pub struct DirPageRequest",
+        "pub struct DirPageCursor",
+        "pub trait FileRead",
+        "pub trait FileWrite",
+        "pub struct FileReadBinding",
+        "pub struct FileWriteBinding",
+        "MAX_AGENT_PATH_DEPTH",
+        "MAX_FS_CALL_BYTES",
+        "MAX_DIR_PAGE_ENTRIES",
+    ] {
+        assert!(
+            source.contains(required),
+            "missing filesystem contract `{required}`"
+        );
+    }
+    for forbidden in ["std::fs", "std::process", "tokio", "unsafe"] {
+        assert!(
+            !source.contains(forbidden),
+            "filesystem API contains effectful implementation marker `{forbidden}`"
+        );
+    }
+
+    let output = Command::new("cargo")
+        .args([
+            "tree",
+            "-p",
+            "rust-agent-fs",
+            "--edges",
+            "normal",
+            "--no-default-features",
+        ])
+        .current_dir(&root)
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let tree = String::from_utf8(output.stdout).unwrap();
+    for forbidden in [
+        "rust-agent-agent",
+        "rust-agent-tools",
+        "rust-agent-fs-local",
+        "rust-agent-subprocess",
+        "tokio",
+    ] {
+        assert!(
+            !tree.contains(forbidden),
+            "filesystem API dependency tree contains forbidden owner {forbidden}:\n{tree}"
+        );
+    }
+
+    let invariant_map = fs::read_to_string(root.join("docs/invariant-tests.md")).unwrap();
+    let mapped = markdown_section(&invariant_map, "## Phase 4", "## Accepted ADR amendments");
+    for required in [
+        "rust_agent_fs::tests::logical_paths_are_canonical_bounded_and_deterministic",
+        "rust_agent_fs::tests::contexts_ranges_cursors_and_pages_enforce_every_boundary",
+        "rust_agent_fs::tests::read_and_write_rejections_precede_provider_callbacks",
+        "rust_agent_fs::tests::provider_outputs_and_cursor_identity_are_revalidated",
+        "privacy::filesystem_paths_contexts_pages_and_raw_providers_remain_private",
+        "architecture::phase_four_filesystem_api_is_bounded_and_dependency_isolated",
+    ] {
+        assert!(
+            mapped.contains(required),
+            "unmapped Phase 4.1 evidence: {required}"
+        );
+    }
+
+    let ci = fs::read_to_string(root.join(".github/workflows/ci.yml")).unwrap();
+    for required in [
+        "Verify Phase 4 filesystem API dependency closure",
+        "cargo check -p rust-agent-fs --no-default-features",
+        "cargo check -p rust-agent-fs --all-features",
+        "Verify Phase 4 filesystem API target matrix",
+        "cargo check --target \"$target\" --all-features -p rust-agent-fs",
+    ] {
+        assert!(
+            ci.contains(required),
+            "missing Phase 4 API CI gate: {required}"
+        );
+    }
+}
+
+#[test]
 fn rust_toolchain_version_is_pinned_and_synchronized() {
     let root = workspace_root();
     assert_eq!(env!("CARGO_PKG_RUST_VERSION"), PINNED_RUST_VERSION);
@@ -762,8 +877,7 @@ fn phase_zero_through_three_acceptance_mappings_are_exact_complete_and_runnable(
         "### Phase 0 — 独立仓库与 Architecture Contract",
         "### Phase 3 — Tool Execution Plane",
     );
-    let mapped_phases =
-        markdown_section(&invariant_map, "## Phase 0", "## Accepted ADR amendments");
+    let mapped_phases = markdown_section(&invariant_map, "## Phase 0", "## Phase 4");
     for prefix in ["P0-AC-", "P1A-AC-", "P1B-AC-", "P2-AC-"] {
         let declared = acceptance_ids(architecture_phases, prefix);
         let mapped = acceptance_ids(mapped_phases, prefix);
@@ -1058,7 +1172,7 @@ fn phase_three_acceptance_mapping_is_complete_and_generated() {
     }
 
     let invariant_map = fs::read_to_string(root.join("docs/invariant-tests.md")).unwrap();
-    let mapped = markdown_section(&invariant_map, "## Phase 3", "## Accepted ADR amendments");
+    let mapped = markdown_section(&invariant_map, "## Phase 3", "## Phase 4");
     assert!(!mapped.contains("not yet complete"));
     assert!(!mapped.contains("incremental evidence"));
     for required in [

@@ -227,6 +227,16 @@ runnable test or CI gate, including generated composition graph evidence.
 | The complete Phase 3 contract retains minimal no-default/all-feature dependency closures and compiles on every pinned target; thin wrapper compile-pass plus generated graph presence/absence are explicit gates | `.github/workflows/ci.yml::quality::Verify Phase 3 API dependency closures`, `.github/workflows/ci.yml::quality::Verify Phase 3 target matrix`, `.github/workflows/ci.yml::quality::Verify Phase 3 generated Tool composition`, `.github/workflows/ci.yml::quality::Verify Phase 3 acceptance completion` |
 | The Phase 3 acceptance block is closed end to end: the thin wrapper compiles but cannot access guarded internals; consumers cannot forge/save permits, policies, risk rules, proofs or raw model execution; the sole raw handler dispatch remains in the guarded pipeline; sessionless committed proof executes; missing/wrong/cross-Agent proof paths fail before callbacks; and targeted cancellation covers idle, stale, queued, racing-send, first-cause and shutdown states | `privacy::wrapper_cannot_access_guarded_registry_or_builder_internals`, `privacy::tool_policy_registration_and_permit_boundaries_cannot_be_bypassed`, `architecture::guarded_tool_executor_wrapper_is_metadata_only_and_dependency_one_way`, `architecture::phase_three_tool_api_dependency_and_privacy_boundary_is_isolated`, `rust_agent_tools::execution::tests::sessionless_committed_proof_reaches_only_guarded_dispatch`, `rust_agent_tools::execution::tests::wrong_proof_and_cross_agent_scope_fail_before_callbacks`, `rust_agent_agent::tests::agent_context_without_generated_tool_edge_rejects_proof`, `rust_agent_agent::tests::targeted_cancel_is_exact_idempotent_and_preserves_first_cause`, `rust_agent_agent::tests::admission_retry_completion_deadline_and_shutdown_are_bounded` |
 
+## Phase 4
+
+Phase 4 is being delivered in independently gated slices. A row is added only when its named
+implementation and security evidence exists; the phase remains incomplete until the entire local
+execution provider block and its real Linux regressions are mapped.
+
+| Contract | Automated evidence |
+|---|---|
+| Slice 4.1 defines effect-free `cap:fs-read`/`cap:fs-write` contracts with canonical provider-neutral paths; bounded cancellation/deadline contexts, ranges, directory pages/cursors and writes; pre-callback cancellation/budget rejection; provider-key/cursor/output/progress revalidation; private bounded state fields and no concrete I/O/provider dependency | `rust_agent_fs::tests::logical_paths_are_canonical_bounded_and_deterministic`, `rust_agent_fs::tests::contexts_ranges_cursors_and_pages_enforce_every_boundary`, `rust_agent_fs::tests::read_and_write_rejections_precede_provider_callbacks`, `rust_agent_fs::tests::provider_outputs_and_cursor_identity_are_revalidated`, `privacy::filesystem_paths_contexts_pages_and_raw_providers_remain_private`, `architecture::phase_four_filesystem_api_is_bounded_and_dependency_isolated`, `.github/workflows/ci.yml::quality::Verify Phase 4 filesystem API dependency closure`, `.github/workflows/ci.yml::quality::Verify Phase 4 filesystem API target matrix` |
+
 ## Accepted ADR amendments
 
 | Contract | Automated evidence |

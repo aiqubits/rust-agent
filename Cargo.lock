@@ -1029,6 +1029,15 @@ name = "rust-agent-fixture-target-wasm"
 version = "0.1.0"
 
 [[package]]
+name = "rust-agent-fs"
+version = "0.1.0"
+dependencies = [
+ "rust-agent-core",
+ "rust-agent-runtime-api",
+ "trybuild",
+]
+
+[[package]]
 name = "rust-agent-lifecycle-observer-noop"
 version = "0.1.0"
 dependencies = [

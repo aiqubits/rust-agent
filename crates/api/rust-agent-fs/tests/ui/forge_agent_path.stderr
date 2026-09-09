@@ -1,0 +1,16 @@
+error[E0423]: cannot initialize a tuple struct which contains private fields
+ --> tests/ui/forge_agent_path.rs:6:17
+  |
+6 |     let _path = AgentPath(Arc::from("root"));
+  |                 ^^^^^^^^^
+  |
+note: constructor is not visible here due to private fields
+ --> src/lib.rs
+  |
+  | pub struct AgentPath(Arc<str>);
+  |                      ^^^^^^^^ private field
+help: you might have meant to use the `root` associated function
+  |
+6 -     let _path = AgentPath(Arc::from("root"));
+6 +     let _path = AgentPath::root();
+  |

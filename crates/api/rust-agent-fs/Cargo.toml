@@ -1,0 +1,43 @@
+[package]
+name = "rust-agent-fs"
+description = "Bounded provider-neutral filesystem capability contracts"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[package.metadata.rust-agent.build-requirements]
+schema = 1
+executables = []
+read-inputs = []
+environment = []
+
+[[package.metadata.rust-agent.capability]]
+id = "cap:fs-read"
+api = "rust_agent_fs::FileRead"
+binding-type = "rust_agent_fs::FileReadBinding"
+binding-adapter = "rust_agent_fs::FileReadBinding::from_provider"
+binding = "singleton"
+scope = "agent"
+
+[[package.metadata.rust-agent.capability]]
+id = "cap:fs-write"
+api = "rust_agent_fs::FileWrite"
+binding-type = "rust_agent_fs::FileWriteBinding"
+binding-adapter = "rust_agent_fs::FileWriteBinding::from_provider"
+binding = "singleton"
+scope = "agent"
+
+[features]
+default = []
+
+[dependencies]
+rust-agent-core = { version = "0.1.0", path = "../rust-agent-core", default-features = false }
+rust-agent-runtime-api = { version = "0.1.0", path = "../rust-agent-runtime-api", default-features = false }
+
+[dev-dependencies]
+trybuild.workspace = true
+
+[lints]
+workspace = true

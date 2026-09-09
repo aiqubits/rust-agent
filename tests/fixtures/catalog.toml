@@ -39,6 +39,24 @@ binding = "singleton"
 scope = "app"
 
 [[capabilities]]
+id = "cap:fs-read"
+api-package = "rust-agent-fs"
+rust-api = "rust_agent_fs::FileRead"
+binding-type = "rust_agent_fs::FileReadBinding"
+binding-adapter = "rust_agent_fs::FileReadBinding::from_provider"
+binding = "singleton"
+scope = "agent"
+
+[[capabilities]]
+id = "cap:fs-write"
+api-package = "rust-agent-fs"
+rust-api = "rust_agent_fs::FileWrite"
+binding-type = "rust_agent_fs::FileWriteBinding"
+binding-adapter = "rust_agent_fs::FileWriteBinding::from_provider"
+binding = "singleton"
+scope = "agent"
+
+[[capabilities]]
 id = "cap:tool-provider"
 api-package = "rust-agent-tools"
 rust-api = "rust_agent_tools::ToolContribution"

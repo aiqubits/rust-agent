@@ -76,6 +76,24 @@
         "scope": "app"
       },
       {
+        "id": "cap:fs-read",
+        "api-package": "rust-agent-fs",
+        "rust-api": "rust_agent_fs::FileRead",
+        "binding-type": "rust_agent_fs::FileReadBinding",
+        "binding-adapter": "rust_agent_fs::FileReadBinding::from_provider",
+        "binding": "singleton",
+        "scope": "agent"
+      },
+      {
+        "id": "cap:fs-write",
+        "api-package": "rust-agent-fs",
+        "rust-api": "rust_agent_fs::FileWrite",
+        "binding-type": "rust_agent_fs::FileWriteBinding",
+        "binding-adapter": "rust_agent_fs::FileWriteBinding::from_provider",
+        "binding": "singleton",
+        "scope": "agent"
+      },
+      {
         "id": "cap:lifecycle-observer",
         "api-package": "rust-agent-runtime-api",
         "rust-api": "rust_agent_runtime_api::LifecycleObserver",
@@ -1086,7 +1104,7 @@
       }
     ]
   },
-  "normalized-catalog-digest": "9305f17ddafdaf6793fad9287ff965df8114cc9755bb5342fe7f9987b3ac23b6",
+  "normalized-catalog-digest": "097983e80c027582d54296ff79a93f0c2b2521a67ff9af0e9342339caff756bc",
   "catalog-trust-input": {
     "schema": 1,
     "normalized-policy": {
@@ -1351,6 +1369,11 @@
       "read-inputs": [],
       "environment": []
     },
+    "rust-agent-fs": {
+      "executables": [],
+      "read-inputs": [],
+      "environment": []
+    },
     "rust-agent-model": {
       "executables": [],
       "read-inputs": [],
@@ -1392,5 +1415,5 @@
       "environment": []
     }
   },
-  "identity-digest": "2672f324bf63e91edb4f046369b7b138c2b46f963128e0744adf25dae16377ba"
+  "identity-digest": "f443030e9bd1af1e0c2541ba4e097a17d1b0a9b03ff75404489aa6806da8f286"
 }

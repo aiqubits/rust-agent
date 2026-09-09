@@ -1,7 +1,7 @@
 {
   "schema": 2,
   "algorithm": "sha256-rust-agent-composition-v2",
-  "composition-hash": "2ffe7d7ddc422b45d96631d5cc38492c444a6b08c58309dbacb229be29401edd",
+  "composition-hash": "d6bddecb0a278927957fe14ddb810d2451db214981ede928c2f39d070c850bb3",
   "build-kind": "library",
   "profile-name": "fixture-minimal",
   "normalized-profile": {
@@ -252,6 +252,24 @@
           "binding-adapter": "rust_agent_fixture_api::ModelBinding::from_provider",
           "binding": "singleton",
           "scope": "app"
+        },
+        {
+          "id": "cap:fs-read",
+          "api-package": "rust-agent-fs",
+          "rust-api": "rust_agent_fs::FileRead",
+          "binding-type": "rust_agent_fs::FileReadBinding",
+          "binding-adapter": "rust_agent_fs::FileReadBinding::from_provider",
+          "binding": "singleton",
+          "scope": "agent"
+        },
+        {
+          "id": "cap:fs-write",
+          "api-package": "rust-agent-fs",
+          "rust-api": "rust_agent_fs::FileWrite",
+          "binding-type": "rust_agent_fs::FileWriteBinding",
+          "binding-adapter": "rust_agent_fs::FileWriteBinding::from_provider",
+          "binding": "singleton",
+          "scope": "agent"
         },
         {
           "id": "cap:lifecycle-observer",
@@ -1264,7 +1282,7 @@
         }
       ]
     },
-    "normalized-catalog-digest": "9305f17ddafdaf6793fad9287ff965df8114cc9755bb5342fe7f9987b3ac23b6",
+    "normalized-catalog-digest": "097983e80c027582d54296ff79a93f0c2b2521a67ff9af0e9342339caff756bc",
     "catalog-trust-input": {
       "schema": 1,
       "normalized-policy": {
@@ -1529,6 +1547,11 @@
         "read-inputs": [],
         "environment": []
       },
+      "rust-agent-fs": {
+        "executables": [],
+        "read-inputs": [],
+        "environment": []
+      },
       "rust-agent-model": {
         "executables": [],
         "read-inputs": [],
@@ -1570,7 +1593,7 @@
         "environment": []
       }
     },
-    "identity-digest": "2672f324bf63e91edb4f046369b7b138c2b46f963128e0744adf25dae16377ba"
+    "identity-digest": "f443030e9bd1af1e0c2541ba4e097a17d1b0a9b03ff75404489aa6806da8f286"
   },
   "custom-target-spec": null,
   "selected-components": [
@@ -2926,12 +2949,12 @@
     },
     {
       "path": "generator-inputs.json",
-      "digest": "a064b231a0cf29940ed2a5da94ce5d415d40fa6b5cd662a02fe5044f743a691f",
-      "bytes": 50127
+      "digest": "e8681b169f9e89aee42b87a71b409f6992dcab55b9011c6e9599f2c249b018ba",
+      "bytes": 50883
     },
     {
       "path": "src/lib.rs",
-      "digest": "5317ac417b4aea381677fd01bfd190b160e6c77c09c0a9c89b02f46b1a01e2aa",
+      "digest": "acbb9d6fc307390ce1763df8f2df26712b57764e9213e9471e1e0de99a17ea21",
       "bytes": 3591
     },
     {

@@ -2,6 +2,7 @@
 members = [
     "crates/api/rust-agent-core",
     "crates/api/rust-agent-runtime-api",
+    "crates/api/rust-agent-fs",
     "crates/api/rust-agent-session",
     "crates/api/rust-agent-model",
     "crates/api/rust-agent-tools",
@@ -40,6 +41,7 @@ members = [
 default-members = [
     "crates/api/rust-agent-core",
     "crates/api/rust-agent-runtime-api",
+    "crates/api/rust-agent-fs",
     "crates/api/rust-agent-session",
     "crates/api/rust-agent-model",
     "crates/api/rust-agent-tools",
