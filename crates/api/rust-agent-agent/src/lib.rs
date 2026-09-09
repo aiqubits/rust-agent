@@ -4336,6 +4336,10 @@ mod tests {
         let allocated = run(app.allocate_agent_operation(sealed)).unwrap();
         let agent = run(app.create_agent(allocated.into_create_request())).unwrap();
         let request_id = agent.allocate_turn_request().unwrap();
+        assert_eq!(
+            agent.cancel(request_id, CancelCause::User),
+            Ok(CancelOutcome::NotActive)
+        );
         let foreign = AgentRequestId::from_agent(
             AgentId::from_nonzero_u128(999).unwrap(),
             request_id.lifecycle(),
@@ -4408,6 +4412,10 @@ mod tests {
             Ok(CancelOutcome::AlreadyTerminal)
         );
         run(agent.shutdown()).unwrap();
+        assert_eq!(
+            agent.cancel(request_id, CancelCause::User),
+            Err(AgentCancelError::Closed)
+        );
         run(app.shutdown()).unwrap();
     }
 

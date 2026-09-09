@@ -718,6 +718,25 @@ fn mandatory_api_packages(
                 "crates/api/rust-agent-agent",
             ),
         ]);
+        if resolution.selected_components.iter().any(|component| {
+            catalog.components[component]
+                .provides
+                .iter()
+                .any(|provide| provide.capability == "cap:tool-executor")
+        }) {
+            packages.extend([
+                (
+                    "rust-agent-policy",
+                    "rust-agent-policy",
+                    "crates/api/rust-agent-policy",
+                ),
+                (
+                    "rust-agent-tools",
+                    "rust-agent-tools",
+                    "crates/api/rust-agent-tools",
+                ),
+            ]);
+        }
     } else {
         packages.push((
             "fixture-api",
@@ -4116,15 +4135,143 @@ fn generate_phase2_lib_rs(
         })?;
     if driver.scope != crate::metadata::ScopeKind::Agent
         || driver.config_source != ConfigSource::None
-        || driver.requires.len() != 1
-        || driver.requires[0].capability != "cap:model"
-        || driver.requires[0].field != "model"
     {
         return Err(ComposeError::UnsupportedPhase1A(format!(
-            "Agent driver `{}` does not implement the supported Phase 2 model-only scope contract",
+            "Agent driver `{}` does not implement the supported generated Agent-scope contract",
             driver.id
         )));
     }
+    let model_requirements = driver
+        .requires
+        .iter()
+        .filter(|requirement| requirement.capability == "cap:model")
+        .collect::<Vec<_>>();
+    if model_requirements.len() != 1
+        || model_requirements[0].field != "model"
+        || model_requirements[0].mode != crate::metadata::RequirementMode::Required
+    {
+        return Err(ComposeError::UnsupportedPhase1A(format!(
+            "Agent driver `{}` does not have the exact required model binding",
+            driver.id
+        )));
+    }
+    let tool_requirements = driver
+        .requires
+        .iter()
+        .filter(|requirement| requirement.capability == "cap:tool-executor")
+        .collect::<Vec<_>>();
+    let tool_components = if tool_requirements.is_empty() {
+        if driver.requires.len() != 1 {
+            return Err(ComposeError::UnsupportedPhase1A(format!(
+                "Agent driver `{}` has unsupported generated dependencies",
+                driver.id
+            )));
+        }
+        None
+    } else {
+        if tool_requirements.len() != 1
+            || tool_requirements[0].field != "tools"
+            || tool_requirements[0].mode != crate::metadata::RequirementMode::Required
+            || driver.requires.len() != 2
+        {
+            return Err(ComposeError::UnsupportedPhase1A(format!(
+                "Agent driver `{}` does not have the exact required ToolExecutor binding",
+                driver.id
+            )));
+        }
+        let tool_bindings = resolution
+            .bindings
+            .iter()
+            .filter(|binding| {
+                binding.capability == "cap:tool-executor"
+                    && binding.consumer == driver.id
+                    && binding.field == "tools"
+            })
+            .collect::<Vec<_>>();
+        if tool_bindings.len() != 1 {
+            return Err(ComposeError::UnsupportedPhase1A(format!(
+                "Agent driver `{}` does not resolve exactly one ToolExecutor provider",
+                driver.id
+            )));
+        }
+        let executor = &catalog.components[&tool_bindings[0].provider];
+        if executor.id != "tool-executor-guarded"
+            || executor.scope != crate::metadata::ScopeKind::Agent
+            || executor.config_source != ConfigSource::None
+            || executor.runtime_primitives
+                != BTreeSet::from(["clock".to_owned(), "sleeper".to_owned()])
+        {
+            return Err(ComposeError::UnsupportedPhase1A(format!(
+                "ToolExecutor `{}` does not implement the guarded generated Agent-scope contract",
+                executor.id
+            )));
+        }
+        let permission_bindings = resolution
+            .bindings
+            .iter()
+            .filter(|binding| {
+                binding.capability == "cap:permission-policy"
+                    && binding.consumer == executor.id
+                    && binding.field == "permission"
+            })
+            .collect::<Vec<_>>();
+        if permission_bindings.len() != 1 {
+            return Err(ComposeError::UnsupportedPhase1A(
+                "guarded ToolExecutor does not resolve exactly one permission provider".into(),
+            ));
+        }
+        let permission = &catalog.components[&permission_bindings[0].provider];
+        if permission.id != "permission-default"
+            || permission.scope != crate::metadata::ScopeKind::Agent
+            || permission.config_source != ConfigSource::None
+            || !permission.requires.is_empty()
+            || !permission.runtime_primitives.is_empty()
+        {
+            return Err(ComposeError::UnsupportedPhase1A(format!(
+                "permission provider `{}` does not implement the default generated Agent-scope contract",
+                permission.id
+            )));
+        }
+        let supported_executor_requirements = executor.requires.iter().all(|requirement| {
+            matches!(
+                (
+                    requirement.capability.as_str(),
+                    requirement.field.as_str(),
+                    requirement.mode
+                ),
+                (
+                    "cap:permission-policy",
+                    "permission",
+                    crate::metadata::RequirementMode::Required
+                ) | (
+                    "cap:approval",
+                    "approval",
+                    crate::metadata::RequirementMode::UsesIfPresent
+                ) | (
+                    "cap:tool-provider",
+                    "providers",
+                    crate::metadata::RequirementMode::UsesIfPresent
+                ) | (
+                    "cap:tool-execution-middleware",
+                    "middleware",
+                    crate::metadata::RequirementMode::UsesIfPresent
+                )
+            )
+        });
+        let unsupported_executor_bindings = resolution.bindings.iter().any(|binding| {
+            binding.consumer == executor.id && binding.capability != "cap:permission-policy"
+        });
+        if executor.requires.len() != 4
+            || !supported_executor_requirements
+            || unsupported_executor_bindings
+        {
+            return Err(ComposeError::UnsupportedPhase1A(
+                "generated guarded ToolExecutor currently requires empty optional provider sets"
+                    .into(),
+            ));
+        }
+        Some((executor, permission))
+    };
     let model_components = resolution
         .construction_order
         .iter()
@@ -4197,6 +4344,16 @@ fn generate_phase2_lib_rs(
                 "Phase 2 component `{}` participates in more than one generated role",
                 component.id
             )));
+        }
+    }
+    if let Some((executor, permission)) = tool_components {
+        for component in [executor, permission] {
+            if !assembled_components.insert(component.id.as_str()) {
+                return Err(ComposeError::UnsupportedPhase1A(format!(
+                    "generated Agent component `{}` participates in more than one assembly role",
+                    component.id
+                )));
+            }
         }
     }
     let selected_components = resolution
@@ -4372,7 +4529,12 @@ fn generate_phase2_lib_rs(
     output.push_str("        })\n    }\n}\n\n");
 
     let driver_runtime_binding = phase2_runtime_binding_expression(&driver.runtime_primitives)?;
-    let driver_primitives = phase2_runtime_primitive_list(&driver.runtime_primitives)?;
+    let mut agent_scope_runtime_primitives = driver.runtime_primitives.clone();
+    if let Some((executor, permission)) = tool_components {
+        agent_scope_runtime_primitives.extend(executor.runtime_primitives.iter().cloned());
+        agent_scope_runtime_primitives.extend(permission.runtime_primitives.iter().cloned());
+    }
+    let agent_scope_primitives = phase2_runtime_primitive_list(&agent_scope_runtime_primitives)?;
     let expected_model_provider_keys = expected_model_provider_identities
         .iter()
         .map(|(_, key)| {
@@ -4401,9 +4563,31 @@ fn generate_phase2_lib_rs(
             .join(", ")
     );
     output.push_str(&format!(
-        "#[derive(Debug)]\nstruct GeneratedAgentScopeFactory {{\n    runtime: RuntimePrimitives,\n}}\n\nimpl rust_agent_agent::AgentScopeFactory for GeneratedAgentScopeFactory {{\n    fn driver_component_identity(&self) -> &'static str {{\n        {:?}\n    }}\n\n    fn build_driver(\n        &self,\n        model: rust_agent_model::ModelRegistryBinding,\n        runtime: RuntimePrimitives,\n    ) -> Result<rust_agent_agent::AgentDriverBinding, rust_agent_runtime_api::ComponentBuildError> {{\n        if !self.runtime.same_bundle_identity(&runtime) {{\n            return Err(rust_agent_runtime_api::ComponentBuildError::Runtime(\n                rust_agent_runtime_api::RuntimePrimitiveError::AdapterMismatch {{\n                    expected: self.runtime.adapter().as_str().to_owned(),\n                    actual: runtime.adapter().as_str().to_owned(),\n                }},\n            ));\n        }}\n        let output = {}(\n            &Default::default(),\n            {} {{ model }},\n            {driver_runtime_binding},\n        )?;\n        rust_agent_agent::AgentDriverBinding::from_generated_component(\n            self.driver_component_identity(),\n            output.into_service(),\n        )\n    }}\n}}\n\n",
-        driver.id, driver.factory, driver.dependencies_type
+        "#[derive(Debug)]\nstruct GeneratedAgentScopeFactory {{\n    runtime: RuntimePrimitives,\n}}\n\nimpl rust_agent_agent::AgentScopeFactory for GeneratedAgentScopeFactory {{\n    fn driver_component_identity(&self) -> &'static str {{\n        {:?}\n    }}\n\n",
+        driver.id
     ));
+    if let Some((executor, permission)) = tool_components {
+        let executor_runtime_binding =
+            phase2_runtime_binding_expression(&executor.runtime_primitives)?;
+        let permission_runtime_binding =
+            phase2_runtime_binding_expression(&permission.runtime_primitives)?;
+        output.push_str(&format!(
+            "    fn tool_consumer_edge(&self) -> Option<(&'static str, &'static str)> {{\n        Some(({:?}, {:?}))\n    }}\n\n    fn build_driver(\n        &self,\n        _model: rust_agent_model::ModelRegistryBinding,\n        _runtime: RuntimePrimitives,\n    ) -> Result<rust_agent_agent::AgentDriverBinding, rust_agent_runtime_api::ComponentBuildError> {{\n        Err(rust_agent_runtime_api::ComponentBuildError::MissingDependency(\"tools\"))\n    }}\n\n    fn build_driver_with_tools(\n        &self,\n        model: rust_agent_model::ModelRegistryBinding,\n        binding: Option<rust_agent_runtime_api::GeneratedToolConsumerBinding>,\n        runtime: RuntimePrimitives,\n    ) -> Result<rust_agent_agent::AgentDriverBinding, rust_agent_runtime_api::ComponentBuildError> {{\n        if !self.runtime.same_bundle_identity(&runtime) {{\n            return Err(rust_agent_runtime_api::ComponentBuildError::Runtime(\n                rust_agent_runtime_api::RuntimePrimitiveError::AdapterMismatch {{\n                    expected: self.runtime.adapter().as_str().to_owned(),\n                    actual: runtime.adapter().as_str().to_owned(),\n                }},\n            ));\n        }}\n        let permission_output = {}(\n            &Default::default(),\n            {} {{}},\n            {permission_runtime_binding},\n        )?;\n        let executor_dependencies = {}::from_generated_agent(\n            Vec::new(),\n            rust_agent_policy::PermissionPolicyBinding::from_provider(permission_output.into_service()),\n            None,\n            Vec::new(),\n            self.driver_component_identity(),\n            binding.ok_or(rust_agent_runtime_api::ComponentBuildError::MissingDependency(\"tools\"))?,\n        )?;\n        let executor_output = {}(\n            &Default::default(),\n            executor_dependencies,\n            {executor_runtime_binding},\n        )?;\n        let driver_output = {}(\n            &Default::default(),\n            {} {{\n                model,\n                tools: rust_agent_tools::ToolExecutorBinding::from_provider(executor_output.into_service()),\n            }},\n            {driver_runtime_binding},\n        )?;\n        rust_agent_agent::AgentDriverBinding::from_generated_component(\n            self.driver_component_identity(),\n            driver_output.into_service(),\n        )\n    }}\n}}\n\n",
+            driver.id,
+            executor.id,
+            permission.factory,
+            permission.dependencies_type,
+            executor.dependencies_type,
+            executor.factory,
+            driver.factory,
+            driver.dependencies_type,
+        ));
+    } else {
+        output.push_str(&format!(
+            "    fn build_driver(\n        &self,\n        model: rust_agent_model::ModelRegistryBinding,\n        runtime: RuntimePrimitives,\n    ) -> Result<rust_agent_agent::AgentDriverBinding, rust_agent_runtime_api::ComponentBuildError> {{\n        if !self.runtime.same_bundle_identity(&runtime) {{\n            return Err(rust_agent_runtime_api::ComponentBuildError::Runtime(\n                rust_agent_runtime_api::RuntimePrimitiveError::AdapterMismatch {{\n                    expected: self.runtime.adapter().as_str().to_owned(),\n                    actual: runtime.adapter().as_str().to_owned(),\n                }},\n            ));\n        }}\n        let output = {}(\n            &Default::default(),\n            {} {{ model }},\n            {driver_runtime_binding},\n        )?;\n        rust_agent_agent::AgentDriverBinding::from_generated_component(\n            self.driver_component_identity(),\n            output.into_service(),\n        )\n    }}\n}}\n\n",
+            driver.factory, driver.dependencies_type
+        ));
+    }
 
     output.push_str("pub fn build(runtime_config: RuntimeConfig, host_bindings: HostBindings, runtime: RuntimePrimitives) -> Result<AppHandle, AppBuildError> {\n");
     output.push_str(&format!(
@@ -4417,9 +4601,18 @@ fn generate_phase2_lib_rs(
     output.push_str("    let infrastructure_config = runtime_config.runtime;\n");
     output.push_str("    let model_routing = runtime_config.model_routing.map(|routing| match routing {\n        ModelRouting::Default(provider) => rust_agent_model::ModelRoutingMode::Default { provider: rust_agent_model::ProviderKey::new(provider.key()).expect(\"generated provider key is canonical\") },\n        ModelRouting::ExplicitPerRequest => rust_agent_model::ModelRoutingMode::ExplicitPerRequest,\n    });\n");
     output.push_str(&format!(
-        "    let model_routing = rust_agent_model::ModelRegistry::validate_generated_routing(\n        vec![{expected_model_provider_keys}],\n        model_routing,\n    )?;\n    let binding_plan = rust_agent_runtime_api::GeneratedModelBindingPlan::checked(\n        {:?},\n        {expected_model_provider_identity_expression},\n        {lifecycle_observer_identities},\n        {driver_primitives},\n    )?;\n    let runtime_owner = runtime.claim_generated_composition_owner(\n        composition,\n        catalog,\n        binding_plan,\n    )?;\n",
+        "    let model_routing = rust_agent_model::ModelRegistry::validate_generated_routing(\n        vec![{expected_model_provider_keys}],\n        model_routing,\n    )?;\n    let binding_plan = rust_agent_runtime_api::GeneratedModelBindingPlan::checked(\n        {:?},\n        {expected_model_provider_identity_expression},\n        {lifecycle_observer_identities},\n        {agent_scope_primitives},\n    )?;\n",
         driver.id
     ));
+    if let Some((executor, _)) = tool_components {
+        output.push_str(&format!(
+            "    let binding_plan = binding_plan.with_tool_consumer_edge({:?}, {:?})?;\n",
+            driver.id, executor.id
+        ));
+    }
+    output.push_str(
+        "    let runtime_owner = runtime.claim_generated_composition_owner(\n        composition,\n        catalog,\n        binding_plan,\n    )?;\n",
+    );
     let mut shared_host_fields = model_components
         .iter()
         .filter_map(|component| {
@@ -6349,6 +6542,139 @@ helper = { path = "../link" }
             Err(ComposeError::UnsupportedPhase1A(message))
                 if message.contains("does not support selected component(s): fixture-fs-read")
         ));
+    }
+
+    #[test]
+    fn phase_three_tool_composition_is_generated_built_and_graph_exact() {
+        let temp = TempDir::new().unwrap();
+        let mut tool_options = options(&temp, "tests/fixtures/profiles/phase3-tools.toml");
+        tool_options.output_root = temp.path().join("tool-first");
+        tool_options.registry_cache_path = Some(registry_cache());
+        let mut repeated_options = tool_options.clone();
+        repeated_options.output_root = temp.path().join("tool-second");
+        let generated = compose(&tool_options).unwrap();
+        let repeated = compose(&repeated_options).unwrap();
+        assert_eq!(generated.composition_hash, repeated.composition_hash);
+        assert_eq!(generated.manifest, repeated.manifest);
+        for path in ["Cargo.toml", "Cargo.lock", "src/lib.rs"] {
+            assert_eq!(
+                fs::read(generated.path.join(path)).unwrap(),
+                fs::read(repeated.path.join(path)).unwrap(),
+                "generated Tool composition changed {path} across identical inputs"
+            );
+        }
+
+        let mut malformed_catalog = generated.manifest.generator_inputs.catalog().unwrap();
+        malformed_catalog
+            .components
+            .get_mut("tool-executor-guarded")
+            .unwrap()
+            .runtime_primitives
+            .insert("spawner".to_owned());
+        assert!(matches!(
+            generate_phase2_lib_rs(
+                &malformed_catalog,
+                &generated.manifest.resolution,
+                generated.manifest.normalized_profile.build_kind,
+                &generated.manifest.generator_inputs.normalized_catalog_digest,
+            ),
+            Err(ComposeError::UnsupportedPhase1A(message))
+                if message.contains("does not implement the guarded generated Agent-scope contract")
+        ));
+
+        let mut minimal_options = options(&temp, "tests/fixtures/profiles/minimal-pure.toml");
+        minimal_options.output_root = temp.path().join("minimal");
+        minimal_options.registry_cache_path = Some(registry_cache());
+        let minimal = compose(&minimal_options).unwrap();
+
+        for component in [
+            "driver-tools",
+            "model-replay",
+            "permission-default",
+            "tool-executor-guarded",
+        ] {
+            assert!(
+                generated
+                    .manifest
+                    .selected_components
+                    .contains(&component.to_owned()),
+                "generated Tool composition omitted {component}"
+            );
+        }
+        assert_eq!(
+            generated
+                .manifest
+                .resolution
+                .bindings
+                .iter()
+                .filter(|binding| binding.capability == "cap:tool-executor")
+                .map(|binding| {
+                    (
+                        binding.consumer.as_str(),
+                        binding.provider.as_str(),
+                        binding.field.as_str(),
+                    )
+                })
+                .collect::<Vec<_>>(),
+            [("driver-tools", "tool-executor-guarded", "tools")]
+        );
+
+        let source = fs::read_to_string(generated.path.join("src/lib.rs")).unwrap();
+        for required in [
+            "Some((\"driver-tools\", \"tool-executor-guarded\"))",
+            "rust_agent_tool_executor_guarded::Dependencies::from_generated_agent",
+            "binding_plan.with_tool_consumer_edge(\"driver-tools\", \"tool-executor-guarded\")",
+            "rust_agent_tools::ToolExecutorBinding::from_provider",
+        ] {
+            assert!(
+                source.contains(required),
+                "missing generated Tool wiring: {required}"
+            );
+        }
+        let permission = source.find("rust_agent_permission_default::build").unwrap();
+        let executor = source
+            .find("rust_agent_tool_executor_guarded::build")
+            .unwrap();
+        let driver = source.find("rust_agent_driver_tools::build").unwrap();
+        assert!(permission < executor && executor < driver);
+
+        let generated_tree = cargo_tree(&generated.path);
+        let generated_metadata = cargo_metadata_packages(&generated.path);
+        let minimal_tree = cargo_tree(&minimal.path);
+        let minimal_metadata = cargo_metadata_packages(&minimal.path);
+        let generated_lock = fs::read_to_string(generated.path.join("Cargo.lock")).unwrap();
+        let minimal_lock = fs::read_to_string(minimal.path.join("Cargo.lock")).unwrap();
+        for package in [
+            "rust-agent-driver-tools",
+            "rust-agent-policy",
+            "rust-agent-tools",
+            "rust-agent-permission-default",
+            "rust-agent-tool-executor-guarded",
+        ] {
+            assert!(generated_tree.contains(package));
+            assert!(generated_metadata.contains(package));
+            assert!(generated_lock.contains(&format!("name = {package:?}")));
+            assert!(!minimal_tree.contains(package));
+            assert!(!minimal_metadata.contains(package));
+            assert!(!minimal_lock.contains(&format!("name = {package:?}")));
+        }
+
+        let output = Command::new(tool("cargo"))
+            .args(["test", "--manifest-path"])
+            .arg(generated.path.join("Cargo.toml"))
+            .args(["--locked", "--offline"])
+            .env(
+                "CARGO_TARGET_DIR",
+                temp.path().join("generated-tool-target"),
+            )
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "generated Tool composition failed to build and run:\n{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     #[test]

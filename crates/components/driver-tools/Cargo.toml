@@ -41,11 +41,11 @@ rust-agent-core = { version = "0.1.0", path = "../../api/rust-agent-core", defau
 rust-agent-model = { version = "0.1.0", path = "../../api/rust-agent-model", default-features = false }
 rust-agent-runtime-api = { version = "0.1.0", path = "../../api/rust-agent-runtime-api", default-features = false }
 rust-agent-tools = { version = "0.1.0", path = "../../api/rust-agent-tools", default-features = false }
-serde_json.workspace = true
+serde_json = "1.0.143"
 sha2 = "0.10.9"
 
 [dev-dependencies]
-futures-core.workspace = true
+futures-core = "0.3.34"
 rust-agent-policy = { version = "0.1.0", path = "../../api/rust-agent-policy", default-features = false }
 
 [lints]

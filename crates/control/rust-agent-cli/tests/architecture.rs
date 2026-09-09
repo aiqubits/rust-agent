@@ -648,9 +648,9 @@ fn rust_toolchain_version_is_pinned_and_synchronized() {
     assert!(ci.contains(
         "cargo test -p rust-agent-runtime-wasm --target wasm32-unknown-unknown --all-features"
     ));
-    assert!(ci.contains("Verify exact Phase 0/1A/1B/2 acceptance mappings"));
+    assert!(ci.contains("Verify exact Phase 0/1A/1B/2 identities and Phase 3 evidence"));
     assert!(ci.contains(
-        "phase_zero_through_two_acceptance_mappings_are_exact_complete_and_runnable -- --exact"
+        "phase_zero_through_three_acceptance_mappings_are_exact_complete_and_runnable -- --exact"
     ));
     assert!(ci.contains("Build pinned-toolchain custom-target composition"));
     assert!(ci.contains("pinned_toolchain_custom_target_compose_lock_build_end_to_end -- --exact"));
@@ -753,7 +753,7 @@ fn phase_one_a_generated_graph_uses_only_minimal_api_and_fixtures() {
 }
 
 #[test]
-fn phase_zero_through_two_acceptance_mappings_are_exact_complete_and_runnable() {
+fn phase_zero_through_three_acceptance_mappings_are_exact_complete_and_runnable() {
     let root = workspace_root();
     let architecture = fs::read_to_string(root.join("ARCHITECTURE.md")).unwrap();
     let invariant_map = fs::read_to_string(root.join("docs/invariant-tests.md")).unwrap();
@@ -1030,8 +1030,101 @@ fn phase_zero_through_two_acceptance_mappings_are_exact_complete_and_runnable() 
     ));
     assert!(
         mapped_rows > 50,
-        "Phase 0 through Phase 2 mapping tables are unexpectedly empty"
+        "Phase 0 through Phase 3 mapping tables are unexpectedly empty"
     );
+}
+
+#[test]
+fn phase_three_acceptance_mapping_is_complete_and_generated() {
+    let root = workspace_root();
+    let architecture = fs::read_to_string(root.join("ARCHITECTURE.md")).unwrap();
+    let contract = markdown_section(
+        &architecture,
+        "### Phase 3 — Tool Execution Plane",
+        "### Phase 4 — Local Execution Providers",
+    );
+    for required in [
+        "薄 wrapper compile-pass",
+        "wrapper 尝试访问 handler/private registry 的 compile-fail",
+        "普通 consumer 构造/保存 permit 的 compile-fail",
+        "Sessionless positive fixture",
+        "missing/wrong/cross-Agent verifier",
+        "Targeted cancel 的 idle/stale/queued/racing-send/first-cause/shutdown matrix",
+    ] {
+        assert!(
+            contract.contains(required),
+            "Phase 3 acceptance contract lost `{required}`"
+        );
+    }
+
+    let invariant_map = fs::read_to_string(root.join("docs/invariant-tests.md")).unwrap();
+    let mapped = markdown_section(&invariant_map, "## Phase 3", "## Accepted ADR amendments");
+    assert!(!mapped.contains("not yet complete"));
+    assert!(!mapped.contains("incremental evidence"));
+    for required in [
+        "generator::tests::phase_three_tool_composition_is_generated_built_and_graph_exact",
+        "privacy::wrapper_cannot_access_guarded_registry_or_builder_internals",
+        "privacy::tool_policy_registration_and_permit_boundaries_cannot_be_bypassed",
+        "architecture::guarded_tool_executor_wrapper_is_metadata_only_and_dependency_one_way",
+        "architecture::phase_three_tool_api_dependency_and_privacy_boundary_is_isolated",
+        "rust_agent_tools::policy::tests::valid_policy_preserves_canonical_rule_and_predicate_order",
+        "rust_agent_tools::policy::tests::predicate_count_is_rejected_before_the_candidate_is_retained",
+        "rust_agent_tools::policy::tests::rule_count_is_rejected_before_the_candidate_is_retained",
+        "rust_agent_tools::execution::tests::sessionless_committed_proof_reaches_only_guarded_dispatch",
+        "rust_agent_tools::execution::tests::wrong_proof_and_cross_agent_scope_fail_before_callbacks",
+        "rust_agent_agent::tests::agent_context_without_generated_tool_edge_rejects_proof",
+        "rust_agent_agent::tests::targeted_cancel_is_exact_idempotent_and_preserves_first_cause",
+        "rust_agent_agent::tests::admission_retry_completion_deadline_and_shutdown_are_bounded",
+        ".github/workflows/ci.yml::quality::Verify Phase 3 API dependency closures",
+        ".github/workflows/ci.yml::quality::Verify Phase 3 target matrix",
+    ] {
+        assert!(
+            mapped.contains(required),
+            "unmapped Phase 3 gate: {required}"
+        );
+    }
+
+    let status = fs::read_to_string(root.join("docs/phase-status.md")).unwrap();
+    assert!(status.contains("| 3 — tool execution plane | Complete |"));
+    assert!(!status.contains("Phase 3 still requires generated tool composition"));
+
+    let profile =
+        fs::read_to_string(root.join("tests/fixtures/profiles/phase3-tools.toml")).unwrap();
+    for required in [
+        "driver-tools = \"enabled\"",
+        "permission-default = \"enabled\"",
+        "tool-executor-guarded = \"enabled\"",
+        "agent-driver = \"driver-tools\"",
+    ] {
+        assert!(profile.contains(required));
+    }
+
+    for fixture in [
+        "crates/components/tool-executor-guarded/tests/ui/access_guarded_internals.rs",
+        "crates/api/rust-agent-tools/tests/ui/forge_execution_permit.rs",
+        "crates/api/rust-agent-tools/tests/ui/save_execution_permit.rs",
+        "crates/api/rust-agent-tools/tests/ui/forge_tool_policy.rs",
+        "crates/api/rust-agent-tools/tests/ui/forge_tool_risk_rule.rs",
+        "crates/api/rust-agent-tools/tests/ui/default_and_deserialize_policy.rs",
+        "crates/api/rust-agent-tools/tests/ui/forge_prepared_tool_call.rs",
+        "crates/api/rust-agent-tools/tests/ui/model_session_has_no_raw_execute.rs",
+        "crates/api/rust-agent-runtime-api/tests/ui/issue_tool_journal_authority.rs",
+    ] {
+        assert!(
+            root.join(fixture).is_file(),
+            "missing Phase 3 fixture: {fixture}"
+        );
+    }
+
+    let ci = fs::read_to_string(root.join(".github/workflows/ci.yml")).unwrap();
+    for required in [
+        "Verify Phase 3 acceptance completion",
+        "phase_three_acceptance_mapping_is_complete_and_generated -- --exact",
+        "Verify Phase 3 generated Tool composition",
+        "phase_three_tool_composition_is_generated_built_and_graph_exact -- --exact",
+    ] {
+        assert!(ci.contains(required), "missing Phase 3 CI gate: {required}");
+    }
 }
 
 #[test]

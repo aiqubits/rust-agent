@@ -36,8 +36,12 @@ jobs:
         env:
           CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER: wasm-bindgen-test-runner
         run: cargo test -p rust-agent-runtime-wasm --target wasm32-unknown-unknown --all-features
-      - name: Verify exact Phase 0/1A/1B/2 acceptance mappings
-        run: cargo test -p rust-agent-cli --test architecture phase_zero_through_two_acceptance_mappings_are_exact_complete_and_runnable -- --exact
+      - name: Verify exact Phase 0/1A/1B/2 identities and Phase 3 evidence
+        run: cargo test -p rust-agent-cli --test architecture phase_zero_through_three_acceptance_mappings_are_exact_complete_and_runnable -- --exact
+      - name: Verify Phase 3 acceptance completion
+        run: cargo test -p rust-agent-cli --test architecture phase_three_acceptance_mapping_is_complete_and_generated -- --exact
+      - name: Verify Phase 3 generated Tool composition
+        run: cargo test -p rust-agent-composition generator::tests::phase_three_tool_composition_is_generated_built_and_graph_exact -- --exact
       - name: Build pinned-toolchain custom-target composition
         run: cargo test -p rust-agent-cli --test e2e pinned_toolchain_custom_target_compose_lock_build_end_to_end -- --exact
       - name: Verify Phase 2 API dependency closures
@@ -70,7 +74,7 @@ jobs:
           for target in aarch64-linux-android aarch64-apple-ios x86_64-apple-darwin x86_64-pc-windows-msvc; do
             cargo check --target "$target" --all-features "${phase2_packages[@]}" -p rust-agent-runtime-tokio
           done
-      - name: Verify current Phase 3 API dependency closures
+      - name: Verify Phase 3 API dependency closures
         run: |
           cargo check -p rust-agent-commands --no-default-features
           cargo check -p rust-agent-tools --no-default-features
@@ -90,7 +94,7 @@ jobs:
           cargo check -p rust-agent-telemetry --all-features
           cargo check -p rust-agent-tool-executor-guarded --all-features
           cargo check -p rust-agent-driver-tools --all-features
-      - name: Verify current Phase 3 claimed target matrix
+      - name: Verify Phase 3 target matrix
         shell: bash
         run: |
           phase3_packages=(

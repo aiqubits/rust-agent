@@ -1,0 +1,27 @@
+schema = 1
+name = "phase3-tools"
+build-kind = "library"
+target = "x86_64-unknown-linux-gnu"
+environment = "server"
+support-tier = "production"
+runtime-adapter = "runtime-tokio"
+resolver-decision-budget = 100
+denied-effects = ["code-execution", "host-bridge", "network-outbound", "persistent-storage", "process-exec", "read-local", "remote-execution", "secret-access", "write-local"]
+
+[components]
+driver-direct = "disabled"
+driver-tools = "enabled"
+model-replay = "enabled"
+model-host = "disabled"
+permission-default = "enabled"
+tool-executor-guarded = "enabled"
+lifecycle-observer-noop = "disabled"
+fixture-driver = "disabled"
+fixture-model = "disabled"
+fixture-model-fallback = "disabled"
+fixture-model-shared = "disabled"
+fixture-fs-read = "disabled"
+fixture-build-proof = "disabled"
+
+[bindings]
+agent-driver = "driver-tools"
