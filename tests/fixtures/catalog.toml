@@ -57,6 +57,15 @@ binding = "singleton"
 scope = "agent"
 
 [[capabilities]]
+id = "cap:resource-namespace-bootstrap"
+api-package = "rust-agent-resource-namespace"
+rust-api = "rust_agent_resource_namespace::ResourceNamespaceBootstrap"
+binding-type = "rust_agent_resource_namespace::ResourceNamespaceBootstrapBinding"
+binding-adapter = "rust_agent_resource_namespace::ResourceNamespaceBootstrapBinding::from_provider"
+binding = "registry"
+scope = "app"
+
+[[capabilities]]
 id = "cap:tool-provider"
 api-package = "rust-agent-tools"
 rust-api = "rust_agent_tools::ToolContribution"
@@ -222,6 +231,27 @@ security = []
 runtime-primitives = []
 build-requirements = { executables = [], read-inputs = [], environment = [] }
 app-coexistence = { mode = "concurrent-independent", evidence = { source = "coexistence-evidence.toml", algorithm = "sha256", digest = "eedb97ca433e7570bac7591411e7a057032ff535eab6782b9c98da2ddf0ae90f", reviewer-policy = "phase-2-runtime-review-v1" } }
+cargo-features = []
+
+[[components]]
+id = "resource-namespace-bootstrap-local"
+package = "rust-agent-resource-namespace-bootstrap-local"
+package-path = "crates/components/resource-namespace-bootstrap-local"
+scope = "app"
+factory = "rust_agent_resource_namespace_bootstrap_local::build"
+dependencies-type = "rust_agent_resource_namespace_bootstrap_local::Dependencies"
+config-type = "rust_agent_resource_namespace_bootstrap_local::Config"
+config-source = "none"
+targets = 'cfg(target_os = "linux")'
+support = "production"
+lifecycle-effects = []
+provides = [{ capability = "cap:resource-namespace-bootstrap", key = "resource-namespace-bootstrap-local", priority = 100, effects = ["read-local"] }]
+requires = []
+conflicts = []
+security = ["read-local"]
+runtime-primitives = []
+build-requirements = { executables = [], read-inputs = [], environment = [] }
+app-coexistence = { mode = "concurrent-independent", evidence = { source = "coexistence-evidence.toml", algorithm = "sha256", digest = "6b89bf0b898deaa511d9d6ff493c8031bd9e1c9eb8a4ad9f09683e79c6d69a86", reviewer-policy = "phase-2-runtime-review-v1" } }
 cargo-features = []
 
 [[components]]

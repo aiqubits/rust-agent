@@ -1,0 +1,45 @@
+[package]
+name = "rust-agent-resource-namespace-bootstrap-local"
+description = "Linux descriptor-relative local resource namespace bootstrap Component"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[package.metadata.rust-agent]
+schema = 1
+id = "resource-namespace-bootstrap-local"
+scope = "app"
+factory = "rust_agent_resource_namespace_bootstrap_local::build"
+dependencies-type = "rust_agent_resource_namespace_bootstrap_local::Dependencies"
+config-type = "rust_agent_resource_namespace_bootstrap_local::Config"
+config-source = "none"
+targets = ['cfg(target_os = "linux")']
+support = "production"
+lifecycle-effects = []
+provides = [{ capability = "cap:resource-namespace-bootstrap", key = "resource-namespace-bootstrap-local", priority = 100, effects = ["read-local"] }]
+requires = []
+conflicts = []
+security = ["read-local"]
+runtime-primitives = []
+build-requirements = { executables = [], read-inputs = [], environment = [] }
+app-coexistence = { mode = "concurrent-independent", evidence = { source = "coexistence-evidence.toml", algorithm = "sha256", digest = "6b89bf0b898deaa511d9d6ff493c8031bd9e1c9eb8a4ad9f09683e79c6d69a86", reviewer-policy = "phase-2-runtime-review-v1" } }
+cargo-features = []
+
+[features]
+default = []
+
+[dependencies]
+rust-agent-core = { version = "0.1.0", path = "../../api/rust-agent-core", default-features = false }
+rust-agent-resource-namespace = { version = "0.1.0", path = "../../api/rust-agent-resource-namespace", default-features = false }
+rust-agent-runtime-api = { version = "0.1.0", path = "../../api/rust-agent-runtime-api", default-features = false }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+rustix = { workspace = true, features = ["fs"] }
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

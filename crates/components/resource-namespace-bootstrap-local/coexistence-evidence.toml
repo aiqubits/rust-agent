@@ -1,0 +1,6 @@
+schema = 1
+owner = "resource-namespace-bootstrap-local"
+mode = "concurrent-independent"
+rule-set = "phase-1a-independent-v1"
+claims = ["boundary-config", "different-config", "identical-config", "independent-real-resources", "two-app-in-process"]
+tests = ["rust_agent_resource_namespace_bootstrap_local::tests::independent_instances_open_independent_descriptor_anchors"]

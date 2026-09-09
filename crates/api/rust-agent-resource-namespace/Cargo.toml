@@ -1,0 +1,36 @@
+[package]
+name = "rust-agent-resource-namespace"
+description = "Effect-accounted resource namespace bootstrap contracts"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[package.metadata.rust-agent.build-requirements]
+schema = 1
+executables = []
+read-inputs = []
+environment = []
+
+[[package.metadata.rust-agent.capability]]
+id = "cap:resource-namespace-bootstrap"
+api = "rust_agent_resource_namespace::ResourceNamespaceBootstrap"
+binding-type = "rust_agent_resource_namespace::ResourceNamespaceBootstrapBinding"
+binding-adapter = "rust_agent_resource_namespace::ResourceNamespaceBootstrapBinding::from_provider"
+binding = "registry"
+scope = "app"
+
+[features]
+default = []
+
+[dependencies]
+rust-agent-core = { version = "0.1.0", path = "../rust-agent-core", default-features = false }
+rust-agent-runtime-api = { version = "0.1.0", path = "../rust-agent-runtime-api", default-features = false }
+sha2.workspace = true
+
+[dev-dependencies]
+trybuild.workspace = true
+
+[lints]
+workspace = true

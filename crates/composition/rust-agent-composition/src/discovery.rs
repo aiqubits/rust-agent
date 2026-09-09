@@ -961,10 +961,11 @@ mod tests {
             serde_json::to_value(&expected).unwrap()
         );
         NormalizedCatalog::normalize(discovered.document).unwrap();
-        assert_eq!(discovered.root_build_requirements.len(), 14);
+        assert_eq!(discovered.root_build_requirements.len(), 15);
         for package in [
             "rust-agent-core",
             "rust-agent-runtime-api",
+            "rust-agent-resource-namespace",
             "rust-agent-fs",
             "rust-agent-session",
             "rust-agent-model",

@@ -1,0 +1,61 @@
+error[E0451]: fields `component`, `provide_capability`, `provide_key`, `bootstrap_component`, `bootstrap_key` and `bootstrap_effects` of struct `ResourceNamespaceRoute` are private
+  --> tests/ui/forge_namespace_state.rs:13:9
+   |
+12 |     let route = ResourceNamespaceRoute {
+   |                 ---------------------- in this type
+13 |         component: CanonicalId::new("component").unwrap(),
+   |         ^^^^^^^^^ private field
+14 |         provide_capability: CapabilityId::new("cap:fs-read").unwrap(),
+   |         ^^^^^^^^^^^^^^^^^^ private field
+15 |         provide_key: None,
+   |         ^^^^^^^^^^^ private field
+16 |         bootstrap_component: CanonicalId::new("bootstrap-component").unwrap(),
+   |         ^^^^^^^^^^^^^^^^^^^ private field
+17 |         bootstrap_key: CanonicalId::new("bootstrap").unwrap(),
+   |         ^^^^^^^^^^^^^ private field
+18 |         bootstrap_effects: SecurityEffects::READ_LOCAL,
+   |         ^^^^^^^^^^^^^^^^^ private field
+
+error[E0451]: fields `route` and `retained` of struct `BootstrapAuthorityProjection` are private
+  --> tests/ui/forge_namespace_state.rs:21:9
+   |
+20 |     let _projection = BootstrapAuthorityProjection {
+   |                       ---------------------------- in this type
+21 |         route: route.clone(),
+   |         ^^^^^ private field
+22 |         retained: true,
+   |         ^^^^^^^^ private field
+
+error[E0451]: fields `route`, `locator`, `cancellation` and `deadline` of struct `ResourceNamespaceBootstrapRequest` are private
+  --> tests/ui/forge_namespace_state.rs:25:9
+   |
+24 |     let _request = ResourceNamespaceBootstrapRequest {
+   |                    --------------------------------- in this type
+25 |         route: route.clone(),
+   |         ^^^^^ private field
+26 |         locator: LocalResourceLocator::root(),
+   |         ^^^^^^^ private field
+27 |         cancellation: CancellationToken::new(),
+   |         ^^^^^^^^^^^^ private field
+28 |         deadline: None,
+   |         ^^^^^^^^ private field
+
+error[E0451]: fields `route`, `kind` and `commitment` of struct `ResourceNamespaceDescriptor` are private
+  --> tests/ui/forge_namespace_state.rs:31:9
+   |
+30 |     let _descriptor = ResourceNamespaceDescriptor {
+   |                       --------------------------- in this type
+31 |         route,
+   |         ^^^^^ private field
+32 |         kind: ResourceNamespaceKind::LocalDirectory,
+   |         ^^^^ private field
+33 |         commitment: Digest::from_bytes([0; 32]),
+   |         ^^^^^^^^^^ private field
+
+error[E0451]: field `descriptor` of struct `LocalDirectoryAnchor` is private
+  --> tests/ui/forge_namespace_state.rs:36:9
+   |
+35 |     let _anchor = LocalDirectoryAnchor {
+   |                   -------------------- in this type
+36 |         descriptor: Arc::new(std::fs::File::open(".").unwrap().into()),
+   |         ^^^^^^^^^^ private field

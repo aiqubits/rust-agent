@@ -139,6 +139,15 @@
         "scope": "agent"
       },
       {
+        "id": "cap:resource-namespace-bootstrap",
+        "api-package": "rust-agent-resource-namespace",
+        "rust-api": "rust_agent_resource_namespace::ResourceNamespaceBootstrap",
+        "binding-type": "rust_agent_resource_namespace::ResourceNamespaceBootstrapBinding",
+        "binding-adapter": "rust_agent_resource_namespace::ResourceNamespaceBootstrapBinding::from_provider",
+        "binding": "registry",
+        "scope": "app"
+      },
+      {
         "id": "cap:spill-store",
         "api-package": "rust-agent-spill",
         "rust-api": "rust_agent_spill::SpillStore",
@@ -871,6 +880,63 @@
         "cargo-features": []
       },
       {
+        "id": "resource-namespace-bootstrap-local",
+        "package": "rust-agent-resource-namespace-bootstrap-local",
+        "package-path": "crates/components/resource-namespace-bootstrap-local",
+        "scope": "app",
+        "factory": "rust_agent_resource_namespace_bootstrap_local::build",
+        "dependencies-type": "rust_agent_resource_namespace_bootstrap_local::Dependencies",
+        "config-type": "rust_agent_resource_namespace_bootstrap_local::Config",
+        "config-source": "none",
+        "config-key": null,
+        "resource-namespace-preparer": null,
+        "prepared-config-type": null,
+        "targets": "cfg(target_os = \"linux\")",
+        "target-support": [
+          {
+            "predicate": "cfg(target_os = \"linux\")",
+            "tier": "production"
+          }
+        ],
+        "lifecycle-effects": [],
+        "provides": [
+          {
+            "capability": "cap:resource-namespace-bootstrap",
+            "key": "resource-namespace-bootstrap-local",
+            "priority": 100,
+            "order": 0,
+            "layer": "provider",
+            "resource-namespace": {
+              "mode": "none"
+            },
+            "effects": [
+              "read-local"
+            ]
+          }
+        ],
+        "requires": [],
+        "conflicts": [],
+        "security": [
+          "read-local"
+        ],
+        "runtime-primitives": [],
+        "build-requirements": {
+          "executables": [],
+          "read-inputs": [],
+          "environment": []
+        },
+        "app-coexistence": {
+          "mode": "concurrent-independent",
+          "evidence": {
+            "source": "coexistence-evidence.toml",
+            "algorithm": "sha256",
+            "digest": "6b89bf0b898deaa511d9d6ff493c8031bd9e1c9eb8a4ad9f09683e79c6d69a86",
+            "reviewer-policy": "phase-2-runtime-review-v1"
+          }
+        },
+        "cargo-features": []
+      },
+      {
         "id": "tool-executor-guarded",
         "package": "rust-agent-tool-executor-guarded",
         "package-path": "crates/components/tool-executor-guarded",
@@ -1104,7 +1170,7 @@
       }
     ]
   },
-  "normalized-catalog-digest": "097983e80c027582d54296ff79a93f0c2b2521a67ff9af0e9342339caff756bc",
+  "normalized-catalog-digest": "4dd8418d08d6b98cd41e7775430899d817930af8b76d3ab205e53e00aed67326",
   "catalog-trust-input": {
     "schema": 1,
     "normalized-policy": {
@@ -1287,6 +1353,33 @@
         "bytes-hex": "736368656d61203d20310a6f776e6572203d20226d6f64656c2d7265706c6179220a6d6f6465203d2022636f6e63757272656e742d696e646570656e64656e74220a72756c652d736574203d202270686173652d31612d696e646570656e64656e742d7631220a636c61696d73203d205b22626f756e646172792d636f6e666967222c2022646966666572656e742d636f6e666967222c20226964656e746963616c2d636f6e666967222c2022696e646570656e64656e742d7265616c2d7265736f7572636573222c202274776f2d6170702d696e2d70726f63657373225d0a7465737473203d205b22727573745f6167656e745f6d6f64656c5f7265706c61793a3a74657374733a3a696e7374616e6365735f6172655f696e646570656e64656e745f666f725f6964656e746963616c5f616e645f626f756e646172795f636f6e737472756374696f6e225d0a"
       },
       {
+        "owner-kind": "component",
+        "owner": "resource-namespace-bootstrap-local",
+        "package": "rust-agent-resource-namespace-bootstrap-local",
+        "package-path": "crates/components/resource-namespace-bootstrap-local",
+        "source": "coexistence-evidence.toml",
+        "algorithm": "sha256",
+        "digest": "6b89bf0b898deaa511d9d6ff493c8031bd9e1c9eb8a4ad9f09683e79c6d69a86",
+        "reviewer-policy": "phase-2-runtime-review-v1",
+        "document": {
+          "schema": 1,
+          "owner": "resource-namespace-bootstrap-local",
+          "mode": "concurrent-independent",
+          "rule-set": "phase-1a-independent-v1",
+          "claims": [
+            "boundary-config",
+            "different-config",
+            "identical-config",
+            "independent-real-resources",
+            "two-app-in-process"
+          ],
+          "tests": [
+            "rust_agent_resource_namespace_bootstrap_local::tests::independent_instances_open_independent_descriptor_anchors"
+          ]
+        },
+        "bytes-hex": "736368656d61203d20310a6f776e6572203d20227265736f757263652d6e616d6573706163652d626f6f7473747261702d6c6f63616c220a6d6f6465203d2022636f6e63757272656e742d696e646570656e64656e74220a72756c652d736574203d202270686173652d31612d696e646570656e64656e742d7631220a636c61696d73203d205b22626f756e646172792d636f6e666967222c2022646966666572656e742d636f6e666967222c20226964656e746963616c2d636f6e666967222c2022696e646570656e64656e742d7265616c2d7265736f7572636573222c202274776f2d6170702d696e2d70726f63657373225d0a7465737473203d205b22727573745f6167656e745f7265736f757263655f6e616d6573706163655f626f6f7473747261705f6c6f63616c3a3a74657374733a3a696e646570656e64656e745f696e7374616e6365735f6f70656e5f696e646570656e64656e745f64657363726970746f725f616e63686f7273225d0a"
+      },
+      {
         "owner-kind": "runtime-adapter",
         "owner": "fixture-runtime",
         "package": "rust-agent-fixture-runtime",
@@ -1341,7 +1434,7 @@
         "bytes-hex": "736368656d61203d20310a6f776e6572203d202272756e74696d652d746f6b696f220a6d6f6465203d2022636f6e63757272656e742d696e646570656e64656e74220a72756c652d736574203d202270686173652d31612d696e646570656e64656e742d7631220a636c61696d73203d205b22626f756e646172792d636f6e666967222c2022646966666572656e742d636f6e666967222c20226964656e746963616c2d636f6e666967222c2022696e646570656e64656e742d7265616c2d7265736f7572636573222c202274776f2d6170702d696e2d70726f63657373225d0a7465737473203d205b22727573745f6167656e745f72756e74696d655f746f6b696f3a3a74657374733a3a65766572795f62756e646c655f6f776e735f616e5f696e646570656e64656e745f72756e74696d65225d0a"
       }
     ],
-    "identity-digest": "4c8a61b19dd9e9d4cba699f9619e58e56876783662f7df31fb346b2e5241f8a8"
+    "identity-digest": "56d3d03e2618e2f3e450d6da171f0b680adab4368b88483d67efe1486841fc4a"
   },
   "root-build-requirements": {
     "rust-agent-agent": {
@@ -1389,6 +1482,11 @@
       "read-inputs": [],
       "environment": []
     },
+    "rust-agent-resource-namespace": {
+      "executables": [],
+      "read-inputs": [],
+      "environment": []
+    },
     "rust-agent-runtime-api": {
       "executables": [],
       "read-inputs": [],
@@ -1415,5 +1513,5 @@
       "environment": []
     }
   },
-  "identity-digest": "f443030e9bd1af1e0c2541ba4e097a17d1b0a9b03ff75404489aa6806da8f286"
+  "identity-digest": "da694d76b650fca8eef17b5a05a6f3a9df050b62902de6fd94ff1d178690631b"
 }

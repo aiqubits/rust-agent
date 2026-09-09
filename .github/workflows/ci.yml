@@ -122,6 +122,20 @@ jobs:
           for target in wasm32-unknown-unknown aarch64-linux-android aarch64-apple-ios x86_64-apple-darwin x86_64-pc-windows-msvc; do
             cargo check --target "$target" --all-features -p rust-agent-fs
           done
+      - name: Verify Phase 4 resource namespace dependency closures
+        run: |
+          cargo check -p rust-agent-resource-namespace --no-default-features
+          cargo check -p rust-agent-resource-namespace --all-features
+          cargo check -p rust-agent-resource-namespace-bootstrap-local --no-default-features
+          cargo check -p rust-agent-resource-namespace-bootstrap-local --all-features
+      - name: Verify Phase 4 resource namespace API target matrix
+        shell: bash
+        run: |
+          for target in wasm32-unknown-unknown aarch64-linux-android aarch64-apple-ios x86_64-apple-darwin x86_64-pc-windows-msvc; do
+            cargo check --target "$target" --all-features -p rust-agent-resource-namespace
+          done
+      - name: Verify Phase 4 real Linux local namespace bootstrap
+        run: cargo test -p rust-agent-resource-namespace-bootstrap-local --all-targets --all-features
       - run: cargo fmt --all --check
       - run: cargo check --workspace --all-targets
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings

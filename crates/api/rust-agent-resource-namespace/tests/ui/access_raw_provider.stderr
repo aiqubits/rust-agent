@@ -1,0 +1,5 @@
+error[E0616]: field `provider` of struct `ResourceNamespaceBootstrapBinding` is private
+  --> tests/ui/access_raw_provider.rs:34:29
+   |
+34 |     let _provider = binding.provider;
+   |                             ^^^^^^^^ private field

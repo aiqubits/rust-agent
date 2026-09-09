@@ -1102,6 +1102,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "rust-agent-resource-namespace"
+version = "0.1.0"
+dependencies = [
+ "rust-agent-core",
+ "rust-agent-runtime-api",
+ "sha2",
+ "trybuild",
+]
+
+[[package]]
+name = "rust-agent-resource-namespace-bootstrap-local"
+version = "0.1.0"
+dependencies = [
+ "rust-agent-core",
+ "rust-agent-resource-namespace",
+ "rust-agent-runtime-api",
+ "rustix",
+ "tempfile",
+]
+
+[[package]]
 name = "rust-agent-runtime-api"
 version = "0.1.0"
 dependencies = [

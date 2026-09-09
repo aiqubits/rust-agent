@@ -695,6 +695,205 @@ fn phase_four_filesystem_api_is_bounded_and_dependency_isolated() {
 }
 
 #[test]
+fn phase_four_resource_namespace_bootstrap_is_projected_anchored_and_linux_exact() {
+    let root = workspace_root();
+    let api_manifest: Value = toml::from_str(
+        &fs::read_to_string(root.join("crates/api/rust-agent-resource-namespace/Cargo.toml"))
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        api_manifest["dependencies"]
+            .as_table()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>(),
+        ["rust-agent-core", "rust-agent-runtime-api", "sha2"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
+    );
+    let capability = &api_manifest["package"]["metadata"]["rust-agent"]["capability"]
+        .as_array()
+        .unwrap()[0];
+    assert_eq!(
+        capability["id"].as_str(),
+        Some("cap:resource-namespace-bootstrap")
+    );
+    assert_eq!(capability["binding"].as_str(), Some("registry"));
+    assert_eq!(capability["scope"].as_str(), Some("app"));
+
+    let component_manifest: Value = toml::from_str(
+        &fs::read_to_string(
+            root.join("crates/components/resource-namespace-bootstrap-local/Cargo.toml"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let metadata = &component_manifest["package"]["metadata"]["rust-agent"];
+    assert_eq!(
+        metadata["id"].as_str(),
+        Some("resource-namespace-bootstrap-local")
+    );
+    assert_eq!(metadata["scope"].as_str(), Some("app"));
+    assert_eq!(metadata["config-source"].as_str(), Some("none"));
+    assert_eq!(metadata["targets"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        metadata["targets"][0].as_str(),
+        Some("cfg(target_os = \"linux\")")
+    );
+    assert_eq!(metadata["support"].as_str(), Some("production"));
+    assert!(metadata["lifecycle-effects"].as_array().unwrap().is_empty());
+    assert!(metadata["requires"].as_array().unwrap().is_empty());
+    assert!(
+        metadata["runtime-primitives"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        metadata["security"].as_array().unwrap(),
+        &[Value::String("read-local".into())]
+    );
+    let provide = &metadata["provides"].as_array().unwrap()[0];
+    assert_eq!(
+        provide["capability"].as_str(),
+        Some("cap:resource-namespace-bootstrap")
+    );
+    assert_eq!(
+        provide["key"].as_str(),
+        Some("resource-namespace-bootstrap-local")
+    );
+    assert_eq!(
+        provide["effects"].as_array().unwrap(),
+        &[Value::String("read-local".into())]
+    );
+    assert!(
+        component_manifest["dependencies"]
+            .as_table()
+            .unwrap()
+            .keys()
+            .all(|dependency| matches!(
+                dependency.as_str(),
+                "rust-agent-core" | "rust-agent-resource-namespace" | "rust-agent-runtime-api"
+            ))
+    );
+    assert!(
+        component_manifest["target"]["cfg(target_os = \"linux\")"]["dependencies"]["rustix"]
+            .is_table()
+    );
+
+    let api_source =
+        fs::read_to_string(root.join("crates/api/rust-agent-resource-namespace/src/lib.rs"))
+            .unwrap();
+    let production_api = api_source.split("#[cfg(test)]").next().unwrap();
+    for required in [
+        "pub struct BootstrapAuthorityProjection",
+        "pub struct ResourceNamespacePreparationContext",
+        "pub struct PreparedComponentConfig",
+        "pub struct ResourceNamespaceDescriptor",
+        "RESOURCE_NAMESPACE_DIGEST_DOMAIN",
+        "canonical CBOR array(2)",
+    ] {
+        assert!(
+            production_api.contains(required),
+            "missing resource namespace protocol marker `{required}`"
+        );
+    }
+    for forbidden in [
+        "std::fs",
+        "std::process",
+        "openat",
+        "canonicalize",
+        "unsafe",
+    ] {
+        assert!(
+            !production_api.contains(forbidden),
+            "resource namespace API contains implementation effect `{forbidden}`"
+        );
+    }
+
+    let component_source = fs::read_to_string(
+        root.join("crates/components/resource-namespace-bootstrap-local/src/lib.rs"),
+    )
+    .unwrap();
+    for required in [
+        "openat2(",
+        "ResolveFlags::BENEATH",
+        "ResolveFlags::NO_SYMLINKS",
+        "ResolveFlags::NO_MAGICLINKS",
+        "LocalDirectoryAnchor::from_owned_descriptor",
+        "fstat(&descriptor)",
+    ] {
+        assert!(
+            component_source.contains(required),
+            "local bootstrap is missing `{required}`"
+        );
+    }
+    for forbidden in ["canonicalize(", "std::process", "unsafe"] {
+        assert!(
+            !component_source.contains(forbidden),
+            "local bootstrap contains forbidden bypass `{forbidden}`"
+        );
+    }
+
+    let output = Command::new("cargo")
+        .args([
+            "tree",
+            "-p",
+            "rust-agent-resource-namespace",
+            "--edges",
+            "normal",
+            "--no-default-features",
+        ])
+        .current_dir(&root)
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let tree = String::from_utf8(output.stdout).unwrap();
+    for forbidden in [
+        "rust-agent-resource-namespace-bootstrap-local",
+        "rust-agent-fs",
+        "rustix",
+        "tokio",
+    ] {
+        assert!(
+            !tree.contains(forbidden),
+            "namespace API graph contains concrete/effectful dependency `{forbidden}`:\n{tree}"
+        );
+    }
+
+    let invariant_map = fs::read_to_string(root.join("docs/invariant-tests.md")).unwrap();
+    let mapped = markdown_section(&invariant_map, "## Phase 4", "## Accepted ADR amendments");
+    for required in [
+        "rust_agent_resource_namespace::tests::projection_precedes_provider_calls_and_rejects_binding_drift",
+        "rust_agent_resource_namespace::tests::context_computes_commitment_and_revalidates_provider_output",
+        "rust_agent_resource_namespace_bootstrap_local::tests::descriptor_anchor_survives_root_replacement_without_reopen",
+        "rust_agent_resource_namespace_bootstrap_local::tests::symlink_escape_and_cancelled_calls_fail_closed",
+        "rust_agent_resource_namespace_bootstrap_local::tests::independent_instances_open_independent_descriptor_anchors",
+        "architecture::phase_four_resource_namespace_bootstrap_is_projected_anchored_and_linux_exact",
+    ] {
+        assert!(
+            mapped.contains(required),
+            "unmapped Phase 4.2 evidence: {required}"
+        );
+    }
+
+    let ci = fs::read_to_string(root.join(".github/workflows/ci.yml")).unwrap();
+    for required in [
+        "Verify Phase 4 resource namespace dependency closures",
+        "Verify Phase 4 resource namespace API target matrix",
+        "Verify Phase 4 real Linux local namespace bootstrap",
+    ] {
+        assert!(
+            ci.contains(required),
+            "missing Phase 4.2 CI gate `{required}`"
+        );
+    }
+}
+
+#[test]
 fn rust_toolchain_version_is_pinned_and_synchronized() {
     let root = workspace_root();
     assert_eq!(env!("CARGO_PKG_RUST_VERSION"), PINNED_RUST_VERSION);

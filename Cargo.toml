@@ -2,6 +2,7 @@
 members = [
     "crates/api/rust-agent-core",
     "crates/api/rust-agent-runtime-api",
+    "crates/api/rust-agent-resource-namespace",
     "crates/api/rust-agent-fs",
     "crates/api/rust-agent-session",
     "crates/api/rust-agent-model",
@@ -20,6 +21,7 @@ members = [
     "crates/components/permission-default",
     "crates/components/tool-executor-guarded",
     "crates/components/lifecycle-observer-noop",
+    "crates/components/resource-namespace-bootstrap-local",
     "crates/runtime/rust-agent-runtime-tokio",
     "crates/runtime/rust-agent-runtime-wasm",
     "crates/composition/rust-agent-composition",
@@ -41,6 +43,7 @@ members = [
 default-members = [
     "crates/api/rust-agent-core",
     "crates/api/rust-agent-runtime-api",
+    "crates/api/rust-agent-resource-namespace",
     "crates/api/rust-agent-fs",
     "crates/api/rust-agent-session",
     "crates/api/rust-agent-model",
@@ -59,6 +62,7 @@ default-members = [
     "crates/components/permission-default",
     "crates/components/tool-executor-guarded",
     "crates/components/lifecycle-observer-noop",
+    "crates/components/resource-namespace-bootstrap-local",
     "crates/runtime/rust-agent-runtime-tokio",
     "crates/runtime/rust-agent-runtime-wasm",
     "crates/composition/rust-agent-composition",

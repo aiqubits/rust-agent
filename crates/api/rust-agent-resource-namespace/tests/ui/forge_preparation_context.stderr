@@ -1,0 +1,13 @@
+error[E0451]: fields `route`, `binding`, `cancellation` and `deadline` of struct `ResourceNamespacePreparationContext` are private
+  --> tests/ui/forge_preparation_context.rs:12:9
+   |
+11 |     ResourceNamespacePreparationContext {
+   |     ----------------------------------- in this type
+12 |         route,
+   |         ^^^^^ private field
+13 |         binding,
+   |         ^^^^^^^ private field
+14 |         cancellation: CancellationToken::new(),
+   |         ^^^^^^^^^^^^ private field
+15 |         deadline: None,
+   |         ^^^^^^^^ private field

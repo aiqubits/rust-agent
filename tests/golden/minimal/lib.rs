@@ -7,7 +7,7 @@ pub use rust_agent_fixture_api::FixtureApp;
 pub use rust_agent_runtime_api::{AppHandoffError, AppHandoffMode, BuildError, RuntimePrimitives};
 pub use rust_agent_fixture_runtime::create_runtime_primitives as create_runtime_primitives;
 
-pub const CATALOG_DIGEST: &str = "097983e80c027582d54296ff79a93f0c2b2521a67ff9af0e9342339caff756bc";
+pub const CATALOG_DIGEST: &str = "4dd8418d08d6b98cd41e7775430899d817930af8b76d3ab205e53e00aed67326";
 
 #[derive(Default)]
 pub struct RuntimeConfig {
