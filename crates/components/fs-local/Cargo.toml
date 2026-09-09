@@ -1,0 +1,54 @@
+[package]
+name = "rust-agent-fs-local"
+description = "Descriptor-relative read-write Linux filesystem Component"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[package.metadata.rust-agent]
+schema = 1
+id = "fs-local"
+scope = "agent"
+factory = "rust_agent_fs_local::build"
+dependencies-type = "rust_agent_fs_local::Dependencies"
+config-type = "rust_agent_fs_local::Config"
+config-key = "fs-local"
+config-source = "file"
+resource-namespace-preparer = "rust_agent_fs_local::prepare_resource_namespaces"
+prepared-config-type = "rust_agent_fs_local::PreparedConfig"
+targets = ['cfg(target_os = "linux")']
+support = "production"
+lifecycle-effects = []
+provides = [
+  { capability = "cap:fs-read", priority = 110, resource-namespace = { mode = "required", bootstrap = "resource-namespace-bootstrap-local" }, effects = ["read-local"] },
+  { capability = "cap:fs-write", priority = 100, effects = ["read-local", "write-local"] },
+]
+requires = []
+conflicts = []
+security = ["read-local", "write-local"]
+runtime-primitives = ["clock"]
+build-requirements = { executables = [], read-inputs = [], environment = [] }
+cargo-features = []
+
+[features]
+default = []
+
+[dependencies]
+rust-agent-core = { version = "0.1.0", path = "../../api/rust-agent-core", default-features = false }
+rust-agent-fs = { version = "0.1.0", path = "../../api/rust-agent-fs", default-features = false }
+rust-agent-resource-namespace = { version = "0.1.0", path = "../../api/rust-agent-resource-namespace", default-features = false }
+rust-agent-runtime-api = { version = "0.1.0", path = "../../api/rust-agent-runtime-api", default-features = false }
+serde.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+rustix = { workspace = true, features = ["fs"] }
+
+[dev-dependencies]
+rust-agent-resource-namespace-bootstrap-local = { version = "0.1.0", path = "../resource-namespace-bootstrap-local", default-features = false }
+tempfile.workspace = true
+trybuild.workspace = true
+
+[lints]
+workspace = true

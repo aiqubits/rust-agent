@@ -255,6 +255,81 @@ app-coexistence = { mode = "concurrent-independent", evidence = { source = "coex
 cargo-features = []
 
 [[components]]
+id = "fs-read-local"
+package = "rust-agent-fs-read-local"
+package-path = "crates/components/fs-read-local"
+scope = "agent"
+factory = "rust_agent_fs_read_local::build"
+dependencies-type = "rust_agent_fs_read_local::Dependencies"
+config-type = "rust_agent_fs_read_local::Config"
+config-source = "file"
+config-key = "fs-read-local"
+resource-namespace-preparer = "rust_agent_fs_read_local::prepare_resource_namespaces"
+prepared-config-type = "rust_agent_fs_read_local::PreparedConfig"
+targets = 'cfg(target_os = "linux")'
+support = "production"
+lifecycle-effects = []
+provides = [{ capability = "cap:fs-read", priority = 100, resource-namespace = { mode = "required", bootstrap = "resource-namespace-bootstrap-local" }, effects = ["read-local"] }]
+requires = []
+conflicts = []
+security = ["read-local"]
+runtime-primitives = ["clock"]
+build-requirements = { executables = [], read-inputs = [], environment = [] }
+cargo-features = []
+
+[[components]]
+id = "fs-local"
+package = "rust-agent-fs-local"
+package-path = "crates/components/fs-local"
+scope = "agent"
+factory = "rust_agent_fs_local::build"
+dependencies-type = "rust_agent_fs_local::Dependencies"
+config-type = "rust_agent_fs_local::Config"
+config-source = "file"
+config-key = "fs-local"
+resource-namespace-preparer = "rust_agent_fs_local::prepare_resource_namespaces"
+prepared-config-type = "rust_agent_fs_local::PreparedConfig"
+targets = 'cfg(target_os = "linux")'
+support = "production"
+lifecycle-effects = []
+provides = [
+  { capability = "cap:fs-read", priority = 110, resource-namespace = { mode = "required", bootstrap = "resource-namespace-bootstrap-local" }, effects = ["read-local"] },
+  { capability = "cap:fs-write", priority = 100, effects = ["read-local", "write-local"] },
+]
+requires = []
+conflicts = []
+security = ["read-local", "write-local"]
+runtime-primitives = ["clock"]
+build-requirements = { executables = [], read-inputs = [], environment = [] }
+cargo-features = []
+
+[[components]]
+id = "tool-fs"
+package = "rust-agent-tool-fs"
+package-path = "crates/components/tool-fs"
+scope = "agent"
+factory = "rust_agent_tool_fs::build"
+dependencies-type = "rust_agent_tool_fs::Dependencies"
+config-type = "rust_agent_tool_fs::Config"
+config-source = "none"
+targets = "cfg(true)"
+target-support = [
+    { predicate = 'cfg(target_os = "linux")', tier = "production" },
+    { predicate = 'cfg(not(target_os = "linux"))', tier = "experimental" },
+]
+lifecycle-effects = []
+provides = [{ capability = "cap:tool-provider", order = 100, effects = [] }]
+requires = [
+    { capability = "cap:fs-read", mode = "required", field = "fs_read" },
+    { capability = "cap:fs-write", mode = "uses-if-present", field = "fs_write" },
+]
+conflicts = []
+security = []
+runtime-primitives = []
+build-requirements = { executables = [], read-inputs = [], environment = [] }
+cargo-features = []
+
+[[components]]
 id = "model-host"
 package = "rust-agent-model-host"
 package-path = "crates/components/model-host"

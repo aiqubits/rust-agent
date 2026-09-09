@@ -894,6 +894,234 @@ fn phase_four_resource_namespace_bootstrap_is_projected_anchored_and_linux_exact
 }
 
 #[test]
+fn phase_four_local_filesystems_and_tool_adapter_are_capability_exact() {
+    let root = workspace_root();
+    let read_manifest: Value = toml::from_str(
+        &fs::read_to_string(root.join("crates/components/fs-read-local/Cargo.toml")).unwrap(),
+    )
+    .unwrap();
+    let write_manifest: Value = toml::from_str(
+        &fs::read_to_string(root.join("crates/components/fs-local/Cargo.toml")).unwrap(),
+    )
+    .unwrap();
+    let tool_manifest: Value = toml::from_str(
+        &fs::read_to_string(root.join("crates/components/tool-fs/Cargo.toml")).unwrap(),
+    )
+    .unwrap();
+    let read_metadata = &read_manifest["package"]["metadata"]["rust-agent"];
+    let write_metadata = &write_manifest["package"]["metadata"]["rust-agent"];
+    let tool_metadata = &tool_manifest["package"]["metadata"]["rust-agent"];
+
+    for (metadata, id) in [
+        (read_metadata, "fs-read-local"),
+        (write_metadata, "fs-local"),
+    ] {
+        assert_eq!(metadata["id"].as_str(), Some(id));
+        assert_eq!(metadata["scope"].as_str(), Some("agent"));
+        assert_eq!(metadata["config-source"].as_str(), Some("file"));
+        assert_eq!(metadata["config-key"].as_str(), Some(id));
+        assert_eq!(
+            metadata["targets"][0].as_str(),
+            Some("cfg(target_os = \"linux\")")
+        );
+        assert_eq!(metadata["support"].as_str(), Some("production"));
+        assert!(metadata["lifecycle-effects"].as_array().unwrap().is_empty());
+        assert_eq!(
+            metadata["runtime-primitives"].as_array().unwrap(),
+            &[Value::String("clock".into())]
+        );
+        assert!(metadata["resource-namespace-preparer"].as_str().is_some());
+        assert!(metadata["prepared-config-type"].as_str().is_some());
+        let namespace = &metadata["provides"][0]["resource-namespace"];
+        assert_eq!(namespace["mode"].as_str(), Some("required"));
+        assert_eq!(
+            namespace["bootstrap"].as_str(),
+            Some("resource-namespace-bootstrap-local")
+        );
+    }
+    assert_eq!(read_metadata["provides"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        read_metadata["provides"][0]["capability"].as_str(),
+        Some("cap:fs-read")
+    );
+    assert_eq!(write_metadata["provides"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        write_metadata["provides"][1]["capability"].as_str(),
+        Some("cap:fs-write")
+    );
+    assert_eq!(
+        write_metadata["provides"][1]["effects"].as_array().unwrap(),
+        &[
+            Value::String("read-local".into()),
+            Value::String("write-local".into()),
+        ]
+    );
+
+    assert_eq!(tool_metadata["id"].as_str(), Some("tool-fs"));
+    assert_eq!(tool_metadata["scope"].as_str(), Some("agent"));
+    assert!(tool_metadata["security"].as_array().unwrap().is_empty());
+    assert!(
+        tool_metadata["provides"][0]["effects"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    let requirements = tool_metadata["requires"].as_array().unwrap();
+    assert_eq!(requirements.len(), 2);
+    assert_eq!(requirements[0]["capability"].as_str(), Some("cap:fs-read"));
+    assert_eq!(requirements[0]["mode"].as_str(), Some("required"));
+    assert_eq!(requirements[1]["capability"].as_str(), Some("cap:fs-write"));
+    assert_eq!(requirements[1]["mode"].as_str(), Some("uses-if-present"));
+
+    let read_dependencies = read_manifest["dependencies"]
+        .as_table()
+        .unwrap()
+        .keys()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let write_dependencies = write_manifest["dependencies"]
+        .as_table()
+        .unwrap()
+        .keys()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    assert!(!read_dependencies.contains("rust-agent-fs-local"));
+    assert!(!write_dependencies.contains("rust-agent-fs-read-local"));
+    let tool_dependencies = tool_manifest["dependencies"]
+        .as_table()
+        .unwrap()
+        .keys()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    for forbidden in [
+        "rust-agent-fs-local",
+        "rust-agent-fs-read-local",
+        "rust-agent-resource-namespace",
+        "rustix",
+        "tokio",
+    ] {
+        assert!(
+            !tool_dependencies.contains(forbidden),
+            "tool-fs directly depends on concrete/effectful package `{forbidden}`"
+        );
+    }
+
+    for relative in [
+        "crates/components/fs-read-local/src/lib.rs",
+        "crates/components/fs-local/src/lib.rs",
+    ] {
+        let source = fs::read_to_string(root.join(relative)).unwrap();
+        let production = source.split("#[cfg(all(test").next().unwrap();
+        for required in [
+            "prepare_resource_namespaces(",
+            "LocalDirectoryAnchor",
+            "openat2(",
+            "ResolveFlags::BENEATH",
+            "ResolveFlags::NO_SYMLINKS",
+            "ResolveFlags::NO_MAGICLINKS",
+            "OFlags::NOFOLLOW",
+            "st_nlink",
+        ] {
+            assert!(
+                production.contains(required),
+                "{relative} is missing `{required}`"
+            );
+        }
+        for forbidden in ["canonicalize(", "std::fs", "unsafe"] {
+            assert!(
+                !production.contains(forbidden),
+                "{relative} contains pathname/unsafe bypass `{forbidden}`"
+            );
+        }
+    }
+    let write_source =
+        fs::read_to_string(root.join("crates/components/fs-local/src/lib.rs")).unwrap();
+    for required in ["mkdirat(", "ftruncate(", "fsync(", "WriteMode::CreateNew"] {
+        assert!(
+            write_source.contains(required),
+            "fs-local is missing `{required}`"
+        );
+    }
+    let tool_source =
+        fs::read_to_string(root.join("crates/components/tool-fs/src/lib.rs")).unwrap();
+    let tool_production = tool_source.split("#[cfg(test)]").next().unwrap();
+    for required in [
+        "self.read.effects()",
+        "self.write.effects()",
+        "if let Some(write)",
+        "SEARCH_MAX_VISITED_ENTRIES",
+        "SEARCH_MAX_TOTAL_READ_BYTES",
+        "GitignoreBuilder::new",
+        "FileReadBinding",
+        "FileWriteBinding",
+    ] {
+        assert!(
+            tool_production.contains(required),
+            "tool-fs is missing `{required}`"
+        );
+    }
+    for forbidden in ["std::fs", "std::process", "rustix", "fs_local"] {
+        assert!(
+            !tool_production.contains(forbidden),
+            "tool-fs contains provider bypass `{forbidden}`"
+        );
+    }
+
+    let tree = Command::new("cargo")
+        .args([
+            "tree",
+            "-p",
+            "rust-agent-tool-fs",
+            "--edges",
+            "normal",
+            "--no-default-features",
+        ])
+        .current_dir(&root)
+        .output()
+        .unwrap();
+    assert!(tree.status.success());
+    let tree = String::from_utf8(tree.stdout).unwrap();
+    for forbidden in [
+        "rust-agent-fs-local",
+        "rust-agent-fs-read-local",
+        "rust-agent-resource-namespace-bootstrap-local",
+        "rustix",
+    ] {
+        assert!(
+            !tree.contains(forbidden),
+            "tool-fs resolved concrete filesystem dependency `{forbidden}`:\n{tree}"
+        );
+    }
+
+    let invariant_map = fs::read_to_string(root.join("docs/invariant-tests.md")).unwrap();
+    let mapped = markdown_section(&invariant_map, "## Phase 4", "## Accepted ADR amendments");
+    for required in [
+        "rust_agent_fs_read_local::tests::symlink_hardlink_and_namespace_mutation_fail_closed",
+        "rust_agent_fs_local::tests::symlink_and_hardlink_write_redirects_are_rejected_before_mutation",
+        "rust_agent_tool_fs::tests::glob_and_grep_are_provider_only_sorted_bounded_and_gitignore_aware",
+        "resolver::tests::optional_tool_provider_is_order_independent_and_inherits_exact_fs_effects",
+        "architecture::phase_four_local_filesystems_and_tool_adapter_are_capability_exact",
+    ] {
+        assert!(
+            mapped.contains(required),
+            "unmapped Phase 4.3 evidence: {required}"
+        );
+    }
+    let ci = fs::read_to_string(root.join(".github/workflows/ci.yml")).unwrap();
+    for required in [
+        "Verify Phase 4 filesystem provider dependency closures",
+        "Verify Phase 4 tool-fs target matrix",
+        "Verify Phase 4 real Linux filesystem providers",
+        "Verify Phase 4 filesystem resolver projection",
+    ] {
+        assert!(
+            ci.contains(required),
+            "missing Phase 4.3 CI gate `{required}`"
+        );
+    }
+}
+
+#[test]
 fn rust_toolchain_version_is_pinned_and_synchronized() {
     let root = workspace_root();
     assert_eq!(env!("CARGO_PKG_RUST_VERSION"), PINNED_RUST_VERSION);

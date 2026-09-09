@@ -10,7 +10,7 @@ use crate::{
     catalog::NormalizedCatalog,
     diagnostics::{Diagnostic, MAX_DIAGNOSTIC_REASONS},
     metadata::{
-        AppCoexistence, BuildRequirements, ComponentSpec, HostBoundaryKind,
+        AppCoexistence, BindingKind, BuildRequirements, ComponentSpec, HostBoundaryKind,
         MAX_BUILD_REQUIREMENT_ENTRIES_PER_KIND, MAX_CATALOG_DOCUMENT_BYTES, MAX_CATALOG_OWNERS,
         RequirementMode, ScopeKind, SupportTier, TargetSupport,
     },
@@ -1534,14 +1534,17 @@ impl Resolver<'_> {
 
         for requirement in &component.requires {
             if requirement.mode == RequirementMode::UsesIfPresent {
-                if let Some(provider) = self.find_selected_provider(
+                let providers = self.optional_providers(
                     &state,
                     &requirement.capability,
                     requirement.key.as_deref(),
-                ) {
-                    state
+                )?;
+                for provider in providers {
+                    let mut branch = self.include_component(state, &provider)?;
+                    branch
                         .bindings
-                        .push(self.binding(component, requirement, provider));
+                        .push(self.binding(&branch, component, requirement, &provider));
+                    state = branch;
                 }
                 continue;
             }
@@ -1582,9 +1585,8 @@ impl Resolver<'_> {
                     ));
                 match self.include_component(branch, &provider) {
                     Ok(mut branch) => {
-                        branch
-                            .bindings
-                            .push(self.binding(component, requirement, &provider));
+                        let binding = self.binding(&branch, component, requirement, &provider);
+                        branch.bindings.push(binding);
                         resolved = Some(branch);
                         break;
                     }
@@ -1751,26 +1753,42 @@ impl Resolver<'_> {
         Ok(candidates.into_iter().map(|value| value.3).collect())
     }
 
-    fn find_selected_provider<'a>(
+    fn optional_providers(
         &self,
-        state: &'a State,
+        state: &State,
         capability: &str,
         key: Option<&str>,
-    ) -> Option<&'a str> {
-        state.selected.iter().find_map(|id| {
-            self.catalog.components[id]
-                .provides
-                .iter()
-                .any(|provide| {
-                    provide.capability == capability
-                        && (key.is_none() || provide.key.as_deref() == key)
-                })
-                .then_some(id.as_str())
-        })
+    ) -> Result<Vec<String>, BranchFailure> {
+        let binding = self
+            .catalog
+            .capabilities
+            .get(capability)
+            .ok_or_else(|| BranchFailure::Constraint(format!("unknown capability `{capability}`")))?
+            .binding;
+        let suffix = capability.strip_prefix("cap:").unwrap_or(capability);
+        let explicitly_bound = self.profile.bindings.get(suffix).map(String::as_str);
+        let mut providers = self
+            .candidates(capability, key)?
+            .into_iter()
+            .filter(|provider| {
+                state.selected.contains(provider)
+                    || self.profile.components.get(provider) == Some(&ComponentChoice::Enabled)
+                    || explicitly_bound == Some(provider.as_str())
+            })
+            .collect::<Vec<_>>();
+        if matches!(
+            binding,
+            BindingKind::Singleton | BindingKind::DecoratorChain
+        ) && providers.len() > 1
+        {
+            providers.truncate(1);
+        }
+        Ok(providers)
     }
 
     fn binding(
         &self,
+        state: &State,
         consumer: &ComponentSpec,
         requirement: &crate::metadata::CapabilityRequirement,
         provider: &str,
@@ -1786,6 +1804,20 @@ impl Resolver<'_> {
             .expect("candidate provider has the requested provide");
         let mut effects = self.catalog.components[provider].lifecycle_effects.clone();
         effects.extend(provide.effects.iter().cloned());
+        for dependency in state
+            .bindings
+            .iter()
+            .filter(|binding| binding.consumer == provider)
+        {
+            effects.extend(dependency.effects.iter().cloned());
+        }
+        for namespace in state
+            .resource_namespace_bindings
+            .iter()
+            .filter(|binding| binding.consumer == provider)
+        {
+            effects.extend(namespace.effects.iter().cloned());
+        }
         ResolvedBinding {
             capability: requirement.capability.clone(),
             key: provide.key.clone(),
@@ -2193,6 +2225,83 @@ mod tests {
         assert_eq!(
             resolve(&catalog, &profile, &target()).unwrap(),
             resolve(&catalog, &profile, &target()).unwrap()
+        );
+    }
+
+    #[test]
+    fn optional_tool_provider_is_order_independent_and_inherits_exact_fs_effects() {
+        let catalog = fixture_catalog();
+        let mut readonly = profile();
+        readonly.components.clear();
+        readonly.denied_effects.clear();
+        readonly
+            .components
+            .insert("tool-executor-guarded".into(), ComponentChoice::Enabled);
+        readonly
+            .components
+            .insert("tool-fs".into(), ComponentChoice::Enabled);
+        readonly
+            .bindings
+            .insert("fs-read".into(), "fs-read-local".into());
+        let resolved = resolve(&catalog, &readonly, &target()).unwrap();
+        let tool_index = resolved
+            .construction_order
+            .iter()
+            .position(|component| component == "tool-fs")
+            .unwrap();
+        let executor_index = resolved
+            .construction_order
+            .iter()
+            .position(|component| component == "tool-executor-guarded")
+            .unwrap();
+        assert!(tool_index < executor_index);
+        assert_eq!(
+            resolved
+                .bindings
+                .iter()
+                .find(|binding| {
+                    binding.consumer == "tool-executor-guarded" && binding.field == "providers"
+                })
+                .unwrap()
+                .effects,
+            BTreeSet::from(["read-local".to_owned()])
+        );
+        assert!(
+            !resolved
+                .bindings
+                .iter()
+                .any(|binding| binding.consumer == "tool-fs" && binding.field == "fs_write")
+        );
+        assert_eq!(
+            resolved
+                .resource_namespace_bindings
+                .iter()
+                .filter(|binding| binding.consumer == "fs-read-local")
+                .count(),
+            1
+        );
+
+        let mut writable = readonly;
+        writable
+            .bindings
+            .insert("fs-read".into(), "fs-local".into());
+        let resolved = resolve(&catalog, &writable, &target()).unwrap();
+        assert!(
+            resolved
+                .bindings
+                .iter()
+                .any(|binding| binding.consumer == "tool-fs" && binding.field == "fs_write")
+        );
+        assert_eq!(
+            resolved
+                .bindings
+                .iter()
+                .find(|binding| {
+                    binding.consumer == "tool-executor-guarded" && binding.field == "providers"
+                })
+                .unwrap()
+                .effects,
+            BTreeSet::from(["read-local".to_owned(), "write-local".to_owned()])
         );
     }
 

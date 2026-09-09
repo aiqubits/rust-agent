@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use rust_agent_core::CanonicalId;
+use rust_agent_core::{CanonicalId, SecurityEffects};
 use rust_agent_fs::{
     AgentPath, ByteRange, DirPage, DirPageRequest, FileBytes, FileMetadata, FileRead,
     FileReadBinding, FsCallContext, FsError, FsFuture,
@@ -11,6 +11,10 @@ struct Reader;
 impl FileRead for Reader {
     fn provider_key(&self) -> CanonicalId {
         CanonicalId::new("reader").unwrap()
+    }
+
+    fn effects(&self) -> SecurityEffects {
+        SecurityEffects::READ_LOCAL
     }
 
     fn metadata<'a>(

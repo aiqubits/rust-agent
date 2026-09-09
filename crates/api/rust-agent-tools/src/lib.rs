@@ -429,6 +429,11 @@ impl ToolRegistration {
             handler: tool,
         })
     }
+
+    /// The validated, handler-free description captured at registration time.
+    pub const fn definition(&self) -> &ToolDefinition {
+        &self.definition
+    }
 }
 
 impl fmt::Debug for ToolRegistration {

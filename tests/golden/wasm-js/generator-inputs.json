@@ -652,6 +652,125 @@
         "cargo-features": []
       },
       {
+        "id": "fs-local",
+        "package": "rust-agent-fs-local",
+        "package-path": "crates/components/fs-local",
+        "scope": "agent",
+        "factory": "rust_agent_fs_local::build",
+        "dependencies-type": "rust_agent_fs_local::Dependencies",
+        "config-type": "rust_agent_fs_local::Config",
+        "config-source": "file",
+        "config-key": "fs-local",
+        "resource-namespace-preparer": "rust_agent_fs_local::prepare_resource_namespaces",
+        "prepared-config-type": "rust_agent_fs_local::PreparedConfig",
+        "targets": "cfg(target_os = \"linux\")",
+        "target-support": [
+          {
+            "predicate": "cfg(target_os = \"linux\")",
+            "tier": "production"
+          }
+        ],
+        "lifecycle-effects": [],
+        "provides": [
+          {
+            "capability": "cap:fs-read",
+            "key": null,
+            "priority": 110,
+            "order": 0,
+            "layer": "provider",
+            "resource-namespace": {
+              "mode": "required",
+              "bootstrap": "resource-namespace-bootstrap-local"
+            },
+            "effects": [
+              "read-local"
+            ]
+          },
+          {
+            "capability": "cap:fs-write",
+            "key": null,
+            "priority": 100,
+            "order": 0,
+            "layer": "provider",
+            "resource-namespace": {
+              "mode": "none"
+            },
+            "effects": [
+              "read-local",
+              "write-local"
+            ]
+          }
+        ],
+        "requires": [],
+        "conflicts": [],
+        "security": [
+          "read-local",
+          "write-local"
+        ],
+        "runtime-primitives": [
+          "clock"
+        ],
+        "build-requirements": {
+          "executables": [],
+          "read-inputs": [],
+          "environment": []
+        },
+        "app-coexistence": null,
+        "cargo-features": []
+      },
+      {
+        "id": "fs-read-local",
+        "package": "rust-agent-fs-read-local",
+        "package-path": "crates/components/fs-read-local",
+        "scope": "agent",
+        "factory": "rust_agent_fs_read_local::build",
+        "dependencies-type": "rust_agent_fs_read_local::Dependencies",
+        "config-type": "rust_agent_fs_read_local::Config",
+        "config-source": "file",
+        "config-key": "fs-read-local",
+        "resource-namespace-preparer": "rust_agent_fs_read_local::prepare_resource_namespaces",
+        "prepared-config-type": "rust_agent_fs_read_local::PreparedConfig",
+        "targets": "cfg(target_os = \"linux\")",
+        "target-support": [
+          {
+            "predicate": "cfg(target_os = \"linux\")",
+            "tier": "production"
+          }
+        ],
+        "lifecycle-effects": [],
+        "provides": [
+          {
+            "capability": "cap:fs-read",
+            "key": null,
+            "priority": 100,
+            "order": 0,
+            "layer": "provider",
+            "resource-namespace": {
+              "mode": "required",
+              "bootstrap": "resource-namespace-bootstrap-local"
+            },
+            "effects": [
+              "read-local"
+            ]
+          }
+        ],
+        "requires": [],
+        "conflicts": [],
+        "security": [
+          "read-local"
+        ],
+        "runtime-primitives": [
+          "clock"
+        ],
+        "build-requirements": {
+          "executables": [],
+          "read-inputs": [],
+          "environment": []
+        },
+        "app-coexistence": null,
+        "cargo-features": []
+      },
+      {
         "id": "lifecycle-observer-noop",
         "package": "rust-agent-lifecycle-observer-noop",
         "package-path": "crates/components/lifecycle-observer-noop",
@@ -1012,6 +1131,68 @@
         },
         "app-coexistence": null,
         "cargo-features": []
+      },
+      {
+        "id": "tool-fs",
+        "package": "rust-agent-tool-fs",
+        "package-path": "crates/components/tool-fs",
+        "scope": "agent",
+        "factory": "rust_agent_tool_fs::build",
+        "dependencies-type": "rust_agent_tool_fs::Dependencies",
+        "config-type": "rust_agent_tool_fs::Config",
+        "config-source": "none",
+        "config-key": null,
+        "resource-namespace-preparer": null,
+        "prepared-config-type": null,
+        "targets": "cfg(true)",
+        "target-support": [
+          {
+            "predicate": "cfg(not(target_os = \"linux\"))",
+            "tier": "experimental"
+          },
+          {
+            "predicate": "cfg(target_os = \"linux\")",
+            "tier": "production"
+          }
+        ],
+        "lifecycle-effects": [],
+        "provides": [
+          {
+            "capability": "cap:tool-provider",
+            "key": null,
+            "priority": 0,
+            "order": 100,
+            "layer": "provider",
+            "resource-namespace": {
+              "mode": "none"
+            },
+            "effects": []
+          }
+        ],
+        "requires": [
+          {
+            "capability": "cap:fs-read",
+            "mode": "required",
+            "field": "fs_read",
+            "key": null
+          },
+          {
+            "capability": "cap:fs-write",
+            "mode": "uses-if-present",
+            "field": "fs_write",
+            "key": null
+          }
+        ],
+        "conflicts": [],
+        "security": [],
+        "runtime-primitives": [],
+        "build-requirements": {
+          "executables": [],
+          "read-inputs": [],
+          "environment": []
+        },
+        "app-coexistence": null,
+        "cargo-features": []
       }
     ],
     "runtime-adapters": [
@@ -1170,7 +1351,7 @@
       }
     ]
   },
-  "normalized-catalog-digest": "4dd8418d08d6b98cd41e7775430899d817930af8b76d3ab205e53e00aed67326",
+  "normalized-catalog-digest": "c5f3722d2e89bce36dcc5ae2d9ca2cb4edc76281f01198d0095f49c06743e70a",
   "catalog-trust-input": {
     "schema": 1,
     "normalized-policy": {
@@ -1513,5 +1694,5 @@
       "environment": []
     }
   },
-  "identity-digest": "da694d76b650fca8eef17b5a05a6f3a9df050b62902de6fd94ff1d178690631b"
+  "identity-digest": "e23cbc199d0eb619685b2fe1755eccc1e3a37f07e9e3bae7772185b581d0914e"
 }

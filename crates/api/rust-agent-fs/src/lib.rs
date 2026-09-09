@@ -6,7 +6,7 @@
 
 use std::{fmt, future::Future, num::NonZeroUsize, pin::Pin, sync::Arc};
 
-use rust_agent_core::{CanonicalId, MaybeSendSync};
+use rust_agent_core::{CanonicalId, MaybeSendSync, SecurityEffects};
 use rust_agent_runtime_api::{CancellationToken, RuntimeInstant};
 
 pub const MAX_AGENT_PATH_BYTES: usize = 4 * 1024;
@@ -558,6 +558,9 @@ impl std::error::Error for FsError {}
 pub trait FileRead: MaybeSendSync {
     fn provider_key(&self) -> CanonicalId;
 
+    /// Effects reachable through this exact read binding.
+    fn effects(&self) -> SecurityEffects;
+
     fn metadata<'a>(
         &'a self,
         context: FsCallContext,
@@ -581,7 +584,9 @@ pub trait FileRead: MaybeSendSync {
 /// Consumer-facing read binding that keeps the raw provider private and rechecks output bounds.
 #[derive(Clone)]
 pub struct FileReadBinding {
+    component_identity: Option<CanonicalId>,
     provider_key: CanonicalId,
+    effects: SecurityEffects,
     provider: Arc<dyn FileRead>,
 }
 
@@ -591,14 +596,43 @@ impl FileReadBinding {
         T: FileRead + 'static,
     {
         let provider_key = provider.provider_key();
+        let effects = provider.effects();
         Self {
+            component_identity: None,
             provider_key,
+            effects,
             provider,
         }
     }
 
+    #[doc(hidden)]
+    pub fn from_generated_component<T>(
+        component_identity: impl Into<String>,
+        effective_effects: SecurityEffects,
+        provider: Arc<T>,
+    ) -> Result<Self, FsError>
+    where
+        T: FileRead + 'static,
+    {
+        let component_identity =
+            CanonicalId::new(component_identity.into()).map_err(|_| FsError::InvalidProviderKey)?;
+        if !provider.effects().is_subset_of(effective_effects) {
+            return Err(FsError::ProviderContractViolation);
+        }
+        Ok(Self {
+            component_identity: Some(component_identity),
+            provider_key: provider.provider_key(),
+            effects: effective_effects,
+            provider,
+        })
+    }
+
     pub fn provider_key(&self) -> &str {
         self.provider_key.as_str()
+    }
+
+    pub const fn effects(&self) -> SecurityEffects {
+        self.effects
     }
 
     pub fn metadata<'a>(
@@ -683,13 +717,18 @@ impl fmt::Debug for FileReadBinding {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("FileReadBinding")
+            .field("component_identity", &self.component_identity)
             .field("provider_key", &self.provider_key)
+            .field("effects", &self.effects)
             .finish_non_exhaustive()
     }
 }
 
 pub trait FileWrite: MaybeSendSync {
     fn provider_key(&self) -> CanonicalId;
+
+    /// Effects reachable through this exact write binding.
+    fn effects(&self) -> SecurityEffects;
 
     fn write<'a>(
         &'a self,
@@ -703,7 +742,9 @@ pub trait FileWrite: MaybeSendSync {
 /// Consumer-facing write binding that validates cancellation and byte bounds before dispatch.
 #[derive(Clone)]
 pub struct FileWriteBinding {
+    component_identity: Option<CanonicalId>,
     provider_key: CanonicalId,
+    effects: SecurityEffects,
     provider: Arc<dyn FileWrite>,
 }
 
@@ -713,14 +754,43 @@ impl FileWriteBinding {
         T: FileWrite + 'static,
     {
         let provider_key = provider.provider_key();
+        let effects = provider.effects();
         Self {
+            component_identity: None,
             provider_key,
+            effects,
             provider,
         }
     }
 
+    #[doc(hidden)]
+    pub fn from_generated_component<T>(
+        component_identity: impl Into<String>,
+        effective_effects: SecurityEffects,
+        provider: Arc<T>,
+    ) -> Result<Self, FsError>
+    where
+        T: FileWrite + 'static,
+    {
+        let component_identity =
+            CanonicalId::new(component_identity.into()).map_err(|_| FsError::InvalidProviderKey)?;
+        if !provider.effects().is_subset_of(effective_effects) {
+            return Err(FsError::ProviderContractViolation);
+        }
+        Ok(Self {
+            component_identity: Some(component_identity),
+            provider_key: provider.provider_key(),
+            effects: effective_effects,
+            provider,
+        })
+    }
+
     pub fn provider_key(&self) -> &str {
         self.provider_key.as_str()
+    }
+
+    pub const fn effects(&self) -> SecurityEffects {
+        self.effects
     }
 
     pub fn write<'a>(
@@ -744,7 +814,9 @@ impl fmt::Debug for FileWriteBinding {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("FileWriteBinding")
+            .field("component_identity", &self.component_identity)
             .field("provider_key", &self.provider_key)
+            .field("effects", &self.effects)
             .finish_non_exhaustive()
     }
 }
@@ -916,6 +988,10 @@ mod tests {
             CanonicalId::new("local").unwrap()
         }
 
+        fn effects(&self) -> SecurityEffects {
+            SecurityEffects::READ_LOCAL
+        }
+
         fn metadata<'a>(
             &'a self,
             _context: FsCallContext,
@@ -968,6 +1044,10 @@ mod tests {
     impl FileWrite for RecordingProvider {
         fn provider_key(&self) -> CanonicalId {
             CanonicalId::new("local").unwrap()
+        }
+
+        fn effects(&self) -> SecurityEffects {
+            SecurityEffects::READ_LOCAL | SecurityEffects::WRITE_LOCAL
         }
 
         fn write<'a>(
@@ -1142,6 +1222,39 @@ mod tests {
         assert_eq!(
             ready(reads.list_page(context(128, 1), request)),
             Err(FsError::ProviderContractViolation)
+        );
+    }
+
+    #[test]
+    fn generated_bindings_seal_effects_and_reject_provider_effect_escalation() {
+        let provider = Arc::new(RecordingProvider::valid());
+        assert!(matches!(
+            FileReadBinding::from_generated_component(
+                "fixture-fs",
+                SecurityEffects::empty(),
+                Arc::clone(&provider),
+            ),
+            Err(FsError::ProviderContractViolation)
+        ));
+        let reads = FileReadBinding::from_generated_component(
+            "fixture-fs",
+            SecurityEffects::READ_LOCAL | SecurityEffects::WRITE_LOCAL,
+            Arc::clone(&provider),
+        )
+        .unwrap();
+        assert_eq!(
+            reads.effects(),
+            SecurityEffects::READ_LOCAL | SecurityEffects::WRITE_LOCAL
+        );
+        let writes = FileWriteBinding::from_generated_component(
+            "fixture-fs",
+            SecurityEffects::READ_LOCAL | SecurityEffects::WRITE_LOCAL,
+            provider,
+        )
+        .unwrap();
+        assert_eq!(
+            writes.effects(),
+            SecurityEffects::READ_LOCAL | SecurityEffects::WRITE_LOCAL
         );
     }
 }

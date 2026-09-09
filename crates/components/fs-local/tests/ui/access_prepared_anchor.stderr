@@ -1,0 +1,5 @@
+error[E0616]: field `anchor` of struct `PreparedConfig` is private
+ --> tests/ui/access_prepared_anchor.rs:4:27
+  |
+4 |     let _anchor = &config.anchor;
+  |                           ^^^^^^ private field

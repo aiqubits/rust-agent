@@ -1,7 +1,7 @@
 {
   "schema": 2,
   "algorithm": "sha256-rust-agent-composition-v2",
-  "composition-hash": "47ecdc2aa3466411c0326dfce5e814ebd2416437134ed1f0d39fa097d7097116",
+  "composition-hash": "f44b9b0e521e88b38355acc9e775cbfba1993831f89c6ea245c91d43cbe68f86",
   "build-kind": "library",
   "profile-name": "fixture-minimal",
   "normalized-profile": {
@@ -830,6 +830,125 @@
           "cargo-features": []
         },
         {
+          "id": "fs-local",
+          "package": "rust-agent-fs-local",
+          "package-path": "crates/components/fs-local",
+          "scope": "agent",
+          "factory": "rust_agent_fs_local::build",
+          "dependencies-type": "rust_agent_fs_local::Dependencies",
+          "config-type": "rust_agent_fs_local::Config",
+          "config-source": "file",
+          "config-key": "fs-local",
+          "resource-namespace-preparer": "rust_agent_fs_local::prepare_resource_namespaces",
+          "prepared-config-type": "rust_agent_fs_local::PreparedConfig",
+          "targets": "cfg(target_os = \"linux\")",
+          "target-support": [
+            {
+              "predicate": "cfg(target_os = \"linux\")",
+              "tier": "production"
+            }
+          ],
+          "lifecycle-effects": [],
+          "provides": [
+            {
+              "capability": "cap:fs-read",
+              "key": null,
+              "priority": 110,
+              "order": 0,
+              "layer": "provider",
+              "resource-namespace": {
+                "mode": "required",
+                "bootstrap": "resource-namespace-bootstrap-local"
+              },
+              "effects": [
+                "read-local"
+              ]
+            },
+            {
+              "capability": "cap:fs-write",
+              "key": null,
+              "priority": 100,
+              "order": 0,
+              "layer": "provider",
+              "resource-namespace": {
+                "mode": "none"
+              },
+              "effects": [
+                "read-local",
+                "write-local"
+              ]
+            }
+          ],
+          "requires": [],
+          "conflicts": [],
+          "security": [
+            "read-local",
+            "write-local"
+          ],
+          "runtime-primitives": [
+            "clock"
+          ],
+          "build-requirements": {
+            "executables": [],
+            "read-inputs": [],
+            "environment": []
+          },
+          "app-coexistence": null,
+          "cargo-features": []
+        },
+        {
+          "id": "fs-read-local",
+          "package": "rust-agent-fs-read-local",
+          "package-path": "crates/components/fs-read-local",
+          "scope": "agent",
+          "factory": "rust_agent_fs_read_local::build",
+          "dependencies-type": "rust_agent_fs_read_local::Dependencies",
+          "config-type": "rust_agent_fs_read_local::Config",
+          "config-source": "file",
+          "config-key": "fs-read-local",
+          "resource-namespace-preparer": "rust_agent_fs_read_local::prepare_resource_namespaces",
+          "prepared-config-type": "rust_agent_fs_read_local::PreparedConfig",
+          "targets": "cfg(target_os = \"linux\")",
+          "target-support": [
+            {
+              "predicate": "cfg(target_os = \"linux\")",
+              "tier": "production"
+            }
+          ],
+          "lifecycle-effects": [],
+          "provides": [
+            {
+              "capability": "cap:fs-read",
+              "key": null,
+              "priority": 100,
+              "order": 0,
+              "layer": "provider",
+              "resource-namespace": {
+                "mode": "required",
+                "bootstrap": "resource-namespace-bootstrap-local"
+              },
+              "effects": [
+                "read-local"
+              ]
+            }
+          ],
+          "requires": [],
+          "conflicts": [],
+          "security": [
+            "read-local"
+          ],
+          "runtime-primitives": [
+            "clock"
+          ],
+          "build-requirements": {
+            "executables": [],
+            "read-inputs": [],
+            "environment": []
+          },
+          "app-coexistence": null,
+          "cargo-features": []
+        },
+        {
           "id": "lifecycle-observer-noop",
           "package": "rust-agent-lifecycle-observer-noop",
           "package-path": "crates/components/lifecycle-observer-noop",
@@ -1190,6 +1309,68 @@
           },
           "app-coexistence": null,
           "cargo-features": []
+        },
+        {
+          "id": "tool-fs",
+          "package": "rust-agent-tool-fs",
+          "package-path": "crates/components/tool-fs",
+          "scope": "agent",
+          "factory": "rust_agent_tool_fs::build",
+          "dependencies-type": "rust_agent_tool_fs::Dependencies",
+          "config-type": "rust_agent_tool_fs::Config",
+          "config-source": "none",
+          "config-key": null,
+          "resource-namespace-preparer": null,
+          "prepared-config-type": null,
+          "targets": "cfg(true)",
+          "target-support": [
+            {
+              "predicate": "cfg(not(target_os = \"linux\"))",
+              "tier": "experimental"
+            },
+            {
+              "predicate": "cfg(target_os = \"linux\")",
+              "tier": "production"
+            }
+          ],
+          "lifecycle-effects": [],
+          "provides": [
+            {
+              "capability": "cap:tool-provider",
+              "key": null,
+              "priority": 0,
+              "order": 100,
+              "layer": "provider",
+              "resource-namespace": {
+                "mode": "none"
+              },
+              "effects": []
+            }
+          ],
+          "requires": [
+            {
+              "capability": "cap:fs-read",
+              "mode": "required",
+              "field": "fs_read",
+              "key": null
+            },
+            {
+              "capability": "cap:fs-write",
+              "mode": "uses-if-present",
+              "field": "fs_write",
+              "key": null
+            }
+          ],
+          "conflicts": [],
+          "security": [],
+          "runtime-primitives": [],
+          "build-requirements": {
+            "executables": [],
+            "read-inputs": [],
+            "environment": []
+          },
+          "app-coexistence": null,
+          "cargo-features": []
         }
       ],
       "runtime-adapters": [
@@ -1348,7 +1529,7 @@
         }
       ]
     },
-    "normalized-catalog-digest": "4dd8418d08d6b98cd41e7775430899d817930af8b76d3ab205e53e00aed67326",
+    "normalized-catalog-digest": "c5f3722d2e89bce36dcc5ae2d9ca2cb4edc76281f01198d0095f49c06743e70a",
     "catalog-trust-input": {
       "schema": 1,
       "normalized-policy": {
@@ -1691,7 +1872,7 @@
         "environment": []
       }
     },
-    "identity-digest": "da694d76b650fca8eef17b5a05a6f3a9df050b62902de6fd94ff1d178690631b"
+    "identity-digest": "e23cbc199d0eb619685b2fe1755eccc1e3a37f07e9e3bae7772185b581d0914e"
   },
   "custom-target-spec": null,
   "selected-components": [
@@ -1870,6 +2051,20 @@
         ]
       },
       {
+        "component": "fs-local",
+        "conclusion": "excluded",
+        "reasons": [
+          "NotRequired"
+        ]
+      },
+      {
+        "component": "fs-read-local",
+        "conclusion": "excluded",
+        "reasons": [
+          "NotRequired"
+        ]
+      },
+      {
         "component": "lifecycle-observer-noop",
         "conclusion": "excluded",
         "reasons": [
@@ -1906,6 +2101,13 @@
       },
       {
         "component": "tool-executor-guarded",
+        "conclusion": "excluded",
+        "reasons": [
+          "NotRequired"
+        ]
+      },
+      {
+        "component": "tool-fs",
         "conclusion": "excluded",
         "reasons": [
           "NotRequired"
@@ -3054,12 +3256,12 @@
     },
     {
       "path": "generator-inputs.json",
-      "digest": "a28d97b75e03ae51da4054dd412d90b2b3db6b7d88e327cae1a14c95a9d8742c",
-      "bytes": 55197
+      "digest": "930d1f8e4bdbd457dcfa390ee7d178d08cf4144092a963e456f284482a585df0",
+      "bytes": 60526
     },
     {
       "path": "src/lib.rs",
-      "digest": "b05786812d18b0bca80f730b48fce537cb60941da32dbd2532690fc98e3f4961",
+      "digest": "880377c85c668317fe4d1d7d02fbeccd0e78090c6d526d7f74b2ed8a7b1d9bf3",
       "bytes": 3591
     },
     {

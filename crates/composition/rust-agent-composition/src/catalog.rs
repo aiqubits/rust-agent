@@ -442,6 +442,7 @@ fn validate_component(
         }
         match capability.binding {
             BindingKind::DecoratorChain => {}
+            BindingKind::OrderedMulti if provide.layer == ProvideLayer::Provider => {}
             _ if provide.layer == ProvideLayer::Decorator || provide.order != 0 => {
                 return Err(CatalogError::InvalidBinding(
                     spec.id.clone(),
@@ -1006,6 +1007,28 @@ provides = [{ capability = "cap:model", priority = 1, effects = [] }]
         let document = CatalogDocument::from_toml(BASE).unwrap();
         let catalog = NormalizedCatalog::normalize(document).unwrap();
         assert!(catalog.components.contains_key("model"));
+    }
+
+    #[test]
+    fn ordered_multi_providers_accept_order_while_singletons_reject_it() {
+        let ordered = BASE
+            .replace("binding = \"singleton\"", "binding = \"ordered-multi\"")
+            .replace(
+                "provides = [{ capability = \"cap:model\", priority = 1, effects = [] }]",
+                "provides = [{ capability = \"cap:model\", priority = 1, order = 7, effects = [] }]",
+            );
+        let catalog =
+            NormalizedCatalog::normalize(CatalogDocument::from_toml(&ordered).unwrap()).unwrap();
+        assert_eq!(catalog.components["model"].provides[0].order, 7);
+
+        let singleton = BASE.replace(
+            "provides = [{ capability = \"cap:model\", priority = 1, effects = [] }]",
+            "provides = [{ capability = \"cap:model\", priority = 1, order = 7, effects = [] }]",
+        );
+        assert!(matches!(
+            NormalizedCatalog::normalize(CatalogDocument::from_toml(&singleton).unwrap()),
+            Err(CatalogError::InvalidBinding(_, _))
+        ));
     }
 
     #[test]

@@ -1,0 +1,51 @@
+[package]
+name = "rust-agent-tool-fs"
+description = "Provider-neutral bounded filesystem Tool Component"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[package.metadata.rust-agent]
+schema = 1
+id = "tool-fs"
+scope = "agent"
+factory = "rust_agent_tool_fs::build"
+dependencies-type = "rust_agent_tool_fs::Dependencies"
+config-type = "rust_agent_tool_fs::Config"
+config-source = "none"
+targets = ["cfg(true)"]
+target-support = [
+  { predicate = 'cfg(target_os = "linux")', tier = "production" },
+  { predicate = 'cfg(not(target_os = "linux"))', tier = "experimental" },
+]
+lifecycle-effects = []
+provides = [{ capability = "cap:tool-provider", order = 100, effects = [] }]
+requires = [
+  { capability = "cap:fs-read", mode = "required", field = "fs_read" },
+  { capability = "cap:fs-write", mode = "uses-if-present", field = "fs_write" },
+]
+conflicts = []
+security = []
+runtime-primitives = []
+build-requirements = { executables = [], read-inputs = [], environment = [] }
+cargo-features = []
+
+[features]
+default = []
+
+[dependencies]
+globset.workspace = true
+hex.workspace = true
+ignore.workspace = true
+regex.workspace = true
+rust-agent-core = { version = "0.1.0", path = "../../api/rust-agent-core", default-features = false }
+rust-agent-fs = { version = "0.1.0", path = "../../api/rust-agent-fs", default-features = false }
+rust-agent-runtime-api = { version = "0.1.0", path = "../../api/rust-agent-runtime-api", default-features = false }
+rust-agent-tools = { version = "0.1.0", path = "../../api/rust-agent-tools", default-features = false }
+serde.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true
