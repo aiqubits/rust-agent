@@ -137,6 +137,13 @@ jobs:
           done
       - name: Verify Phase 4 process API contracts
         run: cargo test -p rust-agent-policy -p rust-agent-process --all-targets --all-features
+      - name: Verify Phase 4 Linux sandbox planner closure
+        run: |
+          cargo check -p rust-agent-sandbox-linux --no-default-features
+          cargo check -p rust-agent-sandbox-linux --all-features
+          cargo tree -p rust-agent-sandbox-linux --edges normal --no-default-features
+      - name: Verify Phase 4 Linux sandbox planner contracts
+        run: cargo test -p rust-agent-sandbox-linux --all-targets --all-features
       - name: Verify Phase 4 resource namespace dependency closures
         run: |
           cargo check -p rust-agent-resource-namespace --no-default-features

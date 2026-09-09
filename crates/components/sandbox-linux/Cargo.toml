@@ -1,0 +1,42 @@
+[package]
+name = "rust-agent-sandbox-linux"
+description = "Fail-closed Linux process confinement policy Component"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[package.metadata.rust-agent]
+schema = 1
+id = "sandbox-linux"
+scope = "agent"
+factory = "rust_agent_sandbox_linux::build"
+dependencies-type = "rust_agent_sandbox_linux::Dependencies"
+config-type = "rust_agent_sandbox_linux::Config"
+config-source = "none"
+targets = ['cfg(target_os = "linux")']
+support = "production"
+lifecycle-effects = []
+provides = [{ capability = "cap:sandbox", priority = 100, effects = [] }]
+requires = [{ capability = "cap:confinement-issuer", mode = "required", field = "confinement_issuer" }]
+conflicts = []
+security = []
+runtime-primitives = []
+build-requirements = { executables = [], read-inputs = [], environment = [] }
+cargo-features = []
+
+[features]
+default = []
+
+[dependencies]
+rust-agent-core = { version = "0.1.0", path = "../../api/rust-agent-core", default-features = false }
+rust-agent-policy = { version = "0.1.0", path = "../../api/rust-agent-policy", default-features = false }
+rust-agent-process = { version = "0.1.0", path = "../../api/rust-agent-process", default-features = false }
+rust-agent-runtime-api = { version = "0.1.0", path = "../../api/rust-agent-runtime-api", default-features = false }
+
+[dev-dependencies]
+rust-agent-fs = { version = "0.1.0", path = "../../api/rust-agent-fs", default-features = false }
+
+[lints]
+workspace = true

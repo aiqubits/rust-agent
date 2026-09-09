@@ -1313,6 +1313,126 @@ fn phase_four_process_confinement_api_is_closed_bounded_and_dependency_isolated(
 }
 
 #[test]
+fn phase_four_linux_sandbox_planner_is_issuer_only_and_effect_free() {
+    let root = workspace_root();
+    let path = root.join("crates/components/sandbox-linux");
+    let manifest_text = fs::read_to_string(path.join("Cargo.toml")).unwrap();
+    let manifest: Value = toml::from_str(&manifest_text).unwrap();
+    let metadata = &manifest["package"]["metadata"]["rust-agent"];
+    assert_eq!(metadata["id"].as_str(), Some("sandbox-linux"));
+    assert_eq!(metadata["scope"].as_str(), Some("agent"));
+    assert_eq!(metadata["targets"].as_array().unwrap().len(), 1);
+    assert_eq!(metadata["support"].as_str(), Some("production"));
+    assert!(metadata["lifecycle-effects"].as_array().unwrap().is_empty());
+    assert!(metadata["security"].as_array().unwrap().is_empty());
+    assert!(
+        metadata["runtime-primitives"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    let provides = metadata["provides"].as_array().unwrap();
+    assert_eq!(provides.len(), 1);
+    assert_eq!(provides[0]["capability"].as_str(), Some("cap:sandbox"));
+    assert!(provides[0]["effects"].as_array().unwrap().is_empty());
+    let requires = metadata["requires"].as_array().unwrap();
+    assert_eq!(requires.len(), 1);
+    assert_eq!(
+        requires[0]["capability"].as_str(),
+        Some("cap:confinement-issuer")
+    );
+    assert_eq!(requires[0]["mode"].as_str(), Some("required"));
+    assert_eq!(requires[0]["field"].as_str(), Some("confinement_issuer"));
+
+    let source = fs::read_to_string(path.join("src/lib.rs")).unwrap();
+    for required in [
+        "pub confinement_issuer: ConfinementIssuerBinding",
+        ".project(&requested_policy)",
+        "BackendPlan::linux",
+        ".seal(process, projection, plan)",
+        "SecurityEffects::empty()",
+        "sandbox-linux declares no runtime primitives",
+    ] {
+        assert!(
+            source.contains(required),
+            "sandbox-linux is missing `{required}`"
+        );
+    }
+    for forbidden in [
+        "ConfinementVerifier",
+        "EnforcementReport",
+        "ProcessHandle",
+        "std::process",
+        "std::fs",
+        "unsafe",
+    ] {
+        assert!(
+            !source
+                .split("#[cfg(all(test")
+                .next()
+                .unwrap()
+                .contains(forbidden),
+            "sandbox-linux production source contains forbidden boundary `{forbidden}`"
+        );
+    }
+
+    let tree = Command::new("cargo")
+        .args([
+            "tree",
+            "-p",
+            "rust-agent-sandbox-linux",
+            "--edges",
+            "normal",
+            "--no-default-features",
+        ])
+        .current_dir(&root)
+        .output()
+        .unwrap();
+    assert!(tree.status.success());
+    let tree = String::from_utf8(tree.stdout).unwrap();
+    for forbidden in [
+        "AINS",
+        "rust-agent-agent",
+        "rust-agent-subprocess-local",
+        "rust-agent-fs-local",
+        "rust-agent-runtime-tokio",
+        "tokio",
+        "libc",
+        "nix",
+        "rustix",
+    ] {
+        assert!(
+            !tree.contains(forbidden),
+            "sandbox-linux resolved forbidden dependency `{forbidden}`:\n{tree}"
+        );
+    }
+
+    let invariant_map = fs::read_to_string(root.join("docs/invariant-tests.md")).unwrap();
+    let mapped = markdown_section(&invariant_map, "## Phase 4", "## Accepted ADR amendments");
+    for required in [
+        "rust_agent_sandbox_linux::tests::requested_policy_is_monotonically_projected_and_pair_sealed",
+        "rust_agent_sandbox_linux::tests::authority_and_runtime_projection_fail_closed_without_a_spec_escape",
+        "rust_agent_sandbox_linux::tests::provider_is_effect_free_and_backend_plan_is_deterministic",
+        "architecture::phase_four_linux_sandbox_planner_is_issuer_only_and_effect_free",
+    ] {
+        assert!(
+            mapped.contains(required),
+            "unmapped Phase 4.5 evidence: {required}"
+        );
+    }
+    let ci = fs::read_to_string(root.join(".github/workflows/ci.yml")).unwrap();
+    for required in [
+        "Verify Phase 4 Linux sandbox planner closure",
+        "Verify Phase 4 Linux sandbox planner contracts",
+    ] {
+        assert!(
+            ci.contains(required),
+            "missing Phase 4.5 CI gate `{required}`"
+        );
+    }
+}
+
+#[test]
 fn rust_toolchain_version_is_pinned_and_synchronized() {
     let root = workspace_root();
     assert_eq!(env!("CARGO_PKG_RUST_VERSION"), PINNED_RUST_VERSION);

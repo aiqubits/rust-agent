@@ -384,6 +384,26 @@ build-requirements = { executables = [], read-inputs = [], environment = [] }
 cargo-features = []
 
 [[components]]
+id = "sandbox-linux"
+package = "rust-agent-sandbox-linux"
+package-path = "crates/components/sandbox-linux"
+scope = "agent"
+factory = "rust_agent_sandbox_linux::build"
+dependencies-type = "rust_agent_sandbox_linux::Dependencies"
+config-type = "rust_agent_sandbox_linux::Config"
+config-source = "none"
+targets = 'cfg(target_os = "linux")'
+support = "production"
+lifecycle-effects = []
+provides = [{ capability = "cap:sandbox", priority = 100, effects = [] }]
+requires = [{ capability = "cap:confinement-issuer", mode = "required", field = "confinement_issuer" }]
+conflicts = []
+security = []
+runtime-primitives = []
+build-requirements = { executables = [], read-inputs = [], environment = [] }
+cargo-features = []
+
+[[components]]
 id = "model-host"
 package = "rust-agent-model-host"
 package-path = "crates/components/model-host"

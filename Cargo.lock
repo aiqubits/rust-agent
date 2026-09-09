@@ -1289,6 +1289,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "rust-agent-sandbox-linux"
+version = "0.1.0"
+dependencies = [
+ "rust-agent-core",
+ "rust-agent-fs",
+ "rust-agent-policy",
+ "rust-agent-process",
+ "rust-agent-runtime-api",
+]
+
+[[package]]
 name = "rust-agent-session"
 version = "0.1.0"
 dependencies = [

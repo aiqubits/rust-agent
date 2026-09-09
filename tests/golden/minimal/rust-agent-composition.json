@@ -1,7 +1,7 @@
 {
   "schema": 2,
   "algorithm": "sha256-rust-agent-composition-v2",
-  "composition-hash": "fe4c2d9a902a996dcc98c0ef9c6844cf7df423e3b8a4f43f99a28226ebeddf9d",
+  "composition-hash": "e7de0420738cd219cccce4ca77abc3b9f2120887036ffe25f127083f4b371432",
   "build-kind": "library",
   "profile-name": "fixture-minimal",
   "normalized-profile": {
@@ -1288,6 +1288,58 @@
           "cargo-features": []
         },
         {
+          "id": "sandbox-linux",
+          "package": "rust-agent-sandbox-linux",
+          "package-path": "crates/components/sandbox-linux",
+          "scope": "agent",
+          "factory": "rust_agent_sandbox_linux::build",
+          "dependencies-type": "rust_agent_sandbox_linux::Dependencies",
+          "config-type": "rust_agent_sandbox_linux::Config",
+          "config-source": "none",
+          "config-key": null,
+          "resource-namespace-preparer": null,
+          "prepared-config-type": null,
+          "targets": "cfg(target_os = \"linux\")",
+          "target-support": [
+            {
+              "predicate": "cfg(target_os = \"linux\")",
+              "tier": "production"
+            }
+          ],
+          "lifecycle-effects": [],
+          "provides": [
+            {
+              "capability": "cap:sandbox",
+              "key": null,
+              "priority": 100,
+              "order": 0,
+              "layer": "provider",
+              "resource-namespace": {
+                "mode": "none"
+              },
+              "effects": []
+            }
+          ],
+          "requires": [
+            {
+              "capability": "cap:confinement-issuer",
+              "mode": "required",
+              "field": "confinement_issuer",
+              "key": null
+            }
+          ],
+          "conflicts": [],
+          "security": [],
+          "runtime-primitives": [],
+          "build-requirements": {
+            "executables": [],
+            "read-inputs": [],
+            "environment": []
+          },
+          "app-coexistence": null,
+          "cargo-features": []
+        },
+        {
           "id": "tool-executor-guarded",
           "package": "rust-agent-tool-executor-guarded",
           "package-path": "crates/components/tool-executor-guarded",
@@ -1583,7 +1635,7 @@
         }
       ]
     },
-    "normalized-catalog-digest": "2aec8275b77bd0b5776ba06ee91afac6b2d9adaea98cda4f910c79e428c4bb07",
+    "normalized-catalog-digest": "378f6d93e5a2b707ce0e2c8b1b494a5981a5d963a0351430750048506ea4461d",
     "catalog-trust-input": {
       "schema": 1,
       "normalized-policy": {
@@ -1931,7 +1983,7 @@
         "environment": []
       }
     },
-    "identity-digest": "36be5b50fef8a6d29da64a815d371929fe1956955d9832f447bd95eaf552878c"
+    "identity-digest": "170ad9a9a490af01886de969bc7494cb0f2554f01718c2e4e82fa91fd3c611c9"
   },
   "custom-target-spec": null,
   "selected-components": [
@@ -2153,6 +2205,13 @@
       },
       {
         "component": "resource-namespace-bootstrap-local",
+        "conclusion": "excluded",
+        "reasons": [
+          "NotRequired"
+        ]
+      },
+      {
+        "component": "sandbox-linux",
         "conclusion": "excluded",
         "reasons": [
           "NotRequired"
@@ -3315,12 +3374,12 @@
     },
     {
       "path": "generator-inputs.json",
-      "digest": "5c45ee9e9a0e674be5f0b7f2749c34bb720282f280c4af0caf6829d83344f5a5",
-      "bytes": 62808
+      "digest": "48e06649571c6f3a6558d87d546c2a4e34c59899fc5e14b25e0bca252015b8c9",
+      "bytes": 64346
     },
     {
       "path": "src/lib.rs",
-      "digest": "216c6c7504c3df8a1c49a8c0a7fc121aa93f5ed06b90c5b701cf9e10a64e44aa",
+      "digest": "c26dba23e77c89c9b0b05e9856c73280734bfb95b0f9587b6d492bb9ec30c2c4",
       "bytes": 3591
     },
     {

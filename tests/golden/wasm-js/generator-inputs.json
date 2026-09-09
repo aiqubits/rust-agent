@@ -1110,6 +1110,58 @@
         "cargo-features": []
       },
       {
+        "id": "sandbox-linux",
+        "package": "rust-agent-sandbox-linux",
+        "package-path": "crates/components/sandbox-linux",
+        "scope": "agent",
+        "factory": "rust_agent_sandbox_linux::build",
+        "dependencies-type": "rust_agent_sandbox_linux::Dependencies",
+        "config-type": "rust_agent_sandbox_linux::Config",
+        "config-source": "none",
+        "config-key": null,
+        "resource-namespace-preparer": null,
+        "prepared-config-type": null,
+        "targets": "cfg(target_os = \"linux\")",
+        "target-support": [
+          {
+            "predicate": "cfg(target_os = \"linux\")",
+            "tier": "production"
+          }
+        ],
+        "lifecycle-effects": [],
+        "provides": [
+          {
+            "capability": "cap:sandbox",
+            "key": null,
+            "priority": 100,
+            "order": 0,
+            "layer": "provider",
+            "resource-namespace": {
+              "mode": "none"
+            },
+            "effects": []
+          }
+        ],
+        "requires": [
+          {
+            "capability": "cap:confinement-issuer",
+            "mode": "required",
+            "field": "confinement_issuer",
+            "key": null
+          }
+        ],
+        "conflicts": [],
+        "security": [],
+        "runtime-primitives": [],
+        "build-requirements": {
+          "executables": [],
+          "read-inputs": [],
+          "environment": []
+        },
+        "app-coexistence": null,
+        "cargo-features": []
+      },
+      {
         "id": "tool-executor-guarded",
         "package": "rust-agent-tool-executor-guarded",
         "package-path": "crates/components/tool-executor-guarded",
@@ -1405,7 +1457,7 @@
       }
     ]
   },
-  "normalized-catalog-digest": "2aec8275b77bd0b5776ba06ee91afac6b2d9adaea98cda4f910c79e428c4bb07",
+  "normalized-catalog-digest": "378f6d93e5a2b707ce0e2c8b1b494a5981a5d963a0351430750048506ea4461d",
   "catalog-trust-input": {
     "schema": 1,
     "normalized-policy": {
@@ -1753,5 +1805,5 @@
       "environment": []
     }
   },
-  "identity-digest": "36be5b50fef8a6d29da64a815d371929fe1956955d9832f447bd95eaf552878c"
+  "identity-digest": "170ad9a9a490af01886de969bc7494cb0f2554f01718c2e4e82fa91fd3c611c9"
 }
