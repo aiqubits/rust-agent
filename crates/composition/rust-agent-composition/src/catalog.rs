@@ -388,6 +388,7 @@ fn validate_component(
             }
             _ => {}
         }
+        validate_generated_infrastructure_requirement(spec, requirement, capability)?;
     }
 
     if spec.provides.is_empty() {
@@ -397,6 +398,18 @@ fn validate_component(
         ));
     }
     for provide in &spec.provides {
+        if matches!(
+            provide.capability.as_str(),
+            "cap:confinement-issuer" | "cap:confinement-verifier"
+        ) {
+            return Err(CatalogError::InvalidBinding(
+                spec.id.clone(),
+                format!(
+                    "generated-only capability `{}` cannot be provided by a Component",
+                    provide.capability
+                ),
+            ));
+        }
         let capability = capabilities.get(&provide.capability).ok_or_else(|| {
             CatalogError::UnknownCapability(spec.id.clone(), provide.capability.clone())
         })?;
@@ -464,6 +477,37 @@ fn validate_component(
                 format!("negative Cargo feature `{feature}` is forbidden"),
             ));
         }
+    }
+    Ok(())
+}
+
+fn validate_generated_infrastructure_requirement(
+    consumer: &ComponentSpec,
+    requirement: &crate::metadata::CapabilityRequirement,
+    capability: &CapabilitySpec,
+) -> Result<(), CatalogError> {
+    let required_provide = match requirement.capability.as_str() {
+        "cap:confinement-issuer" => "cap:sandbox",
+        "cap:confinement-verifier" => "cap:subprocess",
+        _ => return Ok(()),
+    };
+    if capability.binding != BindingKind::Singleton
+        || capability.scope != ScopeKind::Agent
+        || requirement.mode != crate::metadata::RequirementMode::Required
+        || requirement.key.is_some()
+        || consumer.scope != ScopeKind::Agent
+        || !consumer
+            .provides
+            .iter()
+            .any(|provide| provide.capability == required_provide)
+    {
+        return Err(CatalogError::InvalidBinding(
+            consumer.id.clone(),
+            format!(
+                "generated-only requirement `{}` is restricted to the exact Agent-scoped `{required_provide}` provider",
+                requirement.capability
+            ),
+        ));
     }
     Ok(())
 }
@@ -1284,6 +1328,73 @@ provides = [{ capability = "cap:model", priority = 1, effects = [] }]
     fn unknown_fields_fail_closed() {
         let input = BASE.replace("schema = 1", "schema = 1\nframework = \"tauri\"");
         assert!(CatalogDocument::from_toml(&input).is_err());
+    }
+
+    #[test]
+    fn generated_confinement_capabilities_have_exact_consumers_and_no_component_provider() {
+        let fixture = include_str!("../../../../tests/fixtures/catalog.toml");
+
+        let mut optional = CatalogDocument::from_toml(fixture).unwrap();
+        let sandbox = optional
+            .components
+            .iter_mut()
+            .find(|component| component.id == "sandbox-linux")
+            .unwrap();
+        sandbox
+            .requires
+            .iter_mut()
+            .find(|requirement| requirement.capability == "cap:confinement-issuer")
+            .unwrap()
+            .mode = crate::metadata::RequirementMode::UsesIfPresent;
+        assert!(matches!(
+            NormalizedCatalog::normalize(optional),
+            Err(CatalogError::InvalidBinding(component, _)) if component == "sandbox-linux"
+        ));
+
+        let mut wrong_consumer = CatalogDocument::from_toml(fixture).unwrap();
+        let requirement = wrong_consumer
+            .components
+            .iter()
+            .find(|component| component.id == "sandbox-linux")
+            .unwrap()
+            .requires
+            .iter()
+            .find(|requirement| requirement.capability == "cap:confinement-issuer")
+            .unwrap()
+            .clone();
+        wrong_consumer
+            .components
+            .iter_mut()
+            .find(|component| component.id == "tool-shell")
+            .unwrap()
+            .requires
+            .push(requirement);
+        assert!(matches!(
+            NormalizedCatalog::normalize(wrong_consumer),
+            Err(CatalogError::InvalidBinding(component, _)) if component == "tool-shell"
+        ));
+
+        let mut forged_provider = CatalogDocument::from_toml(fixture).unwrap();
+        let provide = forged_provider
+            .components
+            .iter()
+            .find(|component| component.id == "sandbox-linux")
+            .unwrap()
+            .provides[0]
+            .clone();
+        let mut provide = provide;
+        provide.capability = "cap:confinement-issuer".into();
+        forged_provider
+            .components
+            .iter_mut()
+            .find(|component| component.id == "sandbox-linux")
+            .unwrap()
+            .provides
+            .push(provide);
+        assert!(matches!(
+            NormalizedCatalog::normalize(forged_provider),
+            Err(CatalogError::InvalidBinding(component, _)) if component == "sandbox-linux"
+        ));
     }
 
     #[test]

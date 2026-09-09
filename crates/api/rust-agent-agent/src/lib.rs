@@ -41,12 +41,13 @@ use rust_agent_model::{
 use rust_agent_runtime_api::{
     AgentEventFeedError, AgentLifecycleNonce, AgentPublicStatus, AppHandoffError, AppHandoffSeal,
     BindingAssemblyOwner, CancellationToken, CommandAdmissionError, CommandAdmissionGate,
-    ComponentBuildError, GeneratedToolConsumerBinding, LifecycleObserver, LifecycleObserverBinding,
-    ModelCallScopeIdentity, ModelRequestJournalIssuer, PublicationCandidate, PublicationDirectory,
-    PublicationDirectoryError, PublicationDirectoryWriteHandle, PublicationVeto,
-    PublishedSessionMode, RuntimePrimitives, ToolCallJournalIssuer, ToolCallJournalProjection,
-    ToolCallJournalProof, ToolCallScopeIdentity, VolatileLifecycleOperation,
-    VolatileLifecycleOperationIssuer, new_publication_directory,
+    ComponentBuildError, ComponentLifecycle, GeneratedToolConsumerBinding, LifecycleObserver,
+    LifecycleObserverBinding, ModelCallScopeIdentity, ModelRequestJournalIssuer,
+    PublicationCandidate, PublicationDirectory, PublicationDirectoryError,
+    PublicationDirectoryWriteHandle, PublicationVeto, PublishedSessionMode, RuntimePrimitives,
+    ShutdownError, ToolCallJournalIssuer, ToolCallJournalProjection, ToolCallJournalProof,
+    ToolCallScopeIdentity, VolatileLifecycleOperation, VolatileLifecycleOperationIssuer,
+    new_publication_directory,
 };
 use rust_agent_session::{SessionPersistenceError, SessionQueryHandle};
 use sha2::{Digest as _, Sha256};
@@ -704,6 +705,142 @@ pub trait AgentScopeFactory: MaybeSendSync {
         }
         self.build_driver(model, runtime)
     }
+
+    #[doc(hidden)]
+    fn prepare_scope(
+        &self,
+        cancellation: CancellationToken,
+    ) -> AgentFuture<'_, Result<PreparedAgentScope<'_>, ComponentBuildError>> {
+        Box::pin(async move {
+            if cancellation.is_cancelled() {
+                return Err(ComponentBuildError::InvalidConfig(
+                    "Agent scope preparation was cancelled".into(),
+                ));
+            }
+            Ok(PreparedAgentScope::from_generated(
+                move |model, tool_binding, runtime| {
+                    self.build_driver_with_tools(model, tool_binding, runtime)
+                        .map(AgentScopeOutput::driver_only)
+                },
+            ))
+        })
+    }
+}
+
+const MAX_AGENT_SCOPE_LIFECYCLE_COMPONENTS: usize = 256;
+
+/// Generated, fully constructed Agent-scoped services waiting for ordered initialization.
+#[allow(missing_debug_implementations)]
+pub struct AgentScopeOutput {
+    driver: AgentDriverBinding,
+    lifecycle: Vec<ComponentLifecycle>,
+}
+
+impl AgentScopeOutput {
+    fn driver_only(driver: AgentDriverBinding) -> Self {
+        Self {
+            driver,
+            lifecycle: Vec::new(),
+        }
+    }
+
+    #[doc(hidden)]
+    pub fn from_generated(
+        driver: AgentDriverBinding,
+        lifecycle: Vec<ComponentLifecycle>,
+    ) -> Result<Self, ComponentBuildError> {
+        if lifecycle.len() > MAX_AGENT_SCOPE_LIFECYCLE_COMPONENTS {
+            return Err(ComponentBuildError::InvalidConfig(
+                "Agent scope has too many lifecycle Components".into(),
+            ));
+        }
+        if lifecycle
+            .iter()
+            .any(|component| component.initializer().is_none() || component.activator().is_some())
+        {
+            return Err(ComponentBuildError::InvalidConfig(
+                "Phase 4 Agent scope accepts only initializable lifecycle Components".into(),
+            ));
+        }
+        Ok(Self { driver, lifecycle })
+    }
+
+    fn into_parts(self) -> (AgentDriverBinding, Vec<ComponentLifecycle>) {
+        (self.driver, self.lifecycle)
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+type PreparedAgentScopeBuilder<'a> = dyn FnOnce(
+        ModelRegistryBinding,
+        Option<GeneratedToolConsumerBinding>,
+        RuntimePrimitives,
+    ) -> Result<AgentScopeOutput, ComponentBuildError>
+    + Send
+    + 'a;
+
+#[cfg(target_arch = "wasm32")]
+type PreparedAgentScopeBuilder<'a> = dyn FnOnce(
+        ModelRegistryBinding,
+        Option<GeneratedToolConsumerBinding>,
+        RuntimePrimitives,
+    ) -> Result<AgentScopeOutput, ComponentBuildError>
+    + 'a;
+
+/// Opaque result of pre-identity Agent-scope resource preparation.
+#[allow(missing_debug_implementations)]
+pub struct PreparedAgentScope<'a> {
+    builder: Option<Box<PreparedAgentScopeBuilder<'a>>>,
+}
+
+impl<'a> PreparedAgentScope<'a> {
+    #[cfg(not(target_arch = "wasm32"))]
+    #[doc(hidden)]
+    pub fn from_generated<F>(builder: F) -> Self
+    where
+        F: FnOnce(
+                ModelRegistryBinding,
+                Option<GeneratedToolConsumerBinding>,
+                RuntimePrimitives,
+            ) -> Result<AgentScopeOutput, ComponentBuildError>
+            + Send
+            + 'a,
+    {
+        Self {
+            builder: Some(Box::new(builder)),
+        }
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    #[doc(hidden)]
+    pub fn from_generated<F>(builder: F) -> Self
+    where
+        F: FnOnce(
+                ModelRegistryBinding,
+                Option<GeneratedToolConsumerBinding>,
+                RuntimePrimitives,
+            ) -> Result<AgentScopeOutput, ComponentBuildError>
+            + 'a,
+    {
+        Self {
+            builder: Some(Box::new(builder)),
+        }
+    }
+
+    fn build(
+        mut self,
+        model: ModelRegistryBinding,
+        tool_binding: Option<GeneratedToolConsumerBinding>,
+        runtime: RuntimePrimitives,
+    ) -> Result<AgentScopeOutput, ComponentBuildError> {
+        self.builder
+            .take()
+            .expect("prepared Agent scope builder is consumed exactly once")(
+            model,
+            tool_binding,
+            runtime,
+        )
+    }
 }
 
 struct RequestJournalFacade {
@@ -1038,6 +1175,7 @@ pub enum AgentShutdownError {
     SessionFlushFailed { reason: SessionPersistenceError },
     Publication(PublicationDirectoryError),
     Runtime(rust_agent_runtime_api::RuntimePrimitiveError),
+    Component(ShutdownError),
 }
 
 impl fmt::Display for AgentShutdownError {
@@ -1048,6 +1186,7 @@ impl fmt::Display for AgentShutdownError {
             }
             Self::Publication(error) => write!(formatter, "Agent removal failed: {error}"),
             Self::Runtime(error) => write!(formatter, "Agent runtime drain failed: {error}"),
+            Self::Component(error) => write!(formatter, "Agent Component teardown failed: {error}"),
         }
     }
 }
@@ -1752,6 +1891,7 @@ struct AgentInner {
     app: Weak<AppInner>,
     notification: Mutex<Option<NotificationReservation>>,
     request_task_owner: Mutex<Option<rust_agent_runtime_api::RuntimeTaskOwner>>,
+    scope_lifecycle: Vec<ComponentLifecycle>,
     state: Mutex<AgentState>,
 }
 
@@ -2658,6 +2798,7 @@ impl AgentInner {
                     .map_err(AgentShutdownError::Runtime)?
                     .await;
             }
+            let component_result = shutdown_agent_scope(&self.scope_lifecycle).await;
             self.publisher.close(AgentPublicStatus::Closed);
             self.publisher
                 .drain()
@@ -2711,7 +2852,7 @@ impl AgentInner {
             for waiter in waiters {
                 waiter.wake();
             }
-            Ok(())
+            component_result.map_err(AgentShutdownError::Component)
         })
     }
 
@@ -2806,6 +2947,11 @@ async fn create_sessionless_agent(
     }
     let _creation =
         CreationReservation::begin(app, allocated.operation.id(), allocated.fingerprint)?;
+    let prepared_scope = app
+        .scope_factory
+        .prepare_scope(CancellationToken::new())
+        .await
+        .map_err(AgentLifecycleError::Construction)?;
     let agent_sequence = app
         .next_agent
         .fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| {
@@ -2850,25 +2996,46 @@ async fn create_sessionless_agent(
         .and_then(|authority| authority.into_agent_journal_parts(&app.binding_assembly))
         .map_err(|_| AgentLifecycleError::JournalAuthority)?;
     let model = app.model.bind_generated_scope(model_verifier);
-    let driver = app
-        .scope_factory
-        .build_driver_with_tools(model, tool_binding, app.runtime.clone())
+    let scope_output = prepared_scope
+        .build(model, tool_binding, app.runtime.clone())
         .map_err(AgentLifecycleError::Construction)?;
+    let (driver, scope_lifecycle) = scope_output.into_parts();
     if driver.generated_component_identity() != Some(driver_component_identity) {
         return Err(AgentLifecycleError::JournalAuthority);
     }
-    let reservation = app
-        .dispatcher
-        .reserve_pair()
-        .ok_or(AgentLifecycleError::NotificationCapacityExceeded)?;
-    let publisher = EventPublisher::new(
-        agent_id,
-        lifecycle,
-        AgentPublicStatus::Closing,
-        app.runtime_config.agent_resource_budget().clone(),
-        app.runtime.clone(),
-    )
-    .map_err(|error| AgentLifecycleError::Construction(ComponentBuildError::Runtime(error)))?;
+    let scope_lifecycle = initialize_agent_scope(scope_lifecycle)
+        .await
+        .map_err(AgentLifecycleError::Construction)?;
+    let Some(reservation) = app.dispatcher.reserve_pair() else {
+        shutdown_agent_scope(&scope_lifecycle)
+            .await
+            .map_err(|error| {
+                AgentLifecycleError::Construction(ComponentBuildError::InvalidConfig(format!(
+                    "Agent scope rollback failed: {error}"
+                )))
+            })?;
+        return Err(AgentLifecycleError::NotificationCapacityExceeded);
+    };
+    let publisher =
+        match EventPublisher::new(
+            agent_id,
+            lifecycle,
+            AgentPublicStatus::Closing,
+            app.runtime_config.agent_resource_budget().clone(),
+            app.runtime.clone(),
+        ) {
+            Ok(publisher) => publisher,
+            Err(error) => {
+                shutdown_agent_scope(&scope_lifecycle).await.map_err(|shutdown| {
+                AgentLifecycleError::Construction(ComponentBuildError::InvalidConfig(format!(
+                    "Agent scope rollback failed after runtime error `{error}`: {shutdown}"
+                )))
+            })?;
+                return Err(AgentLifecycleError::Construction(
+                    ComponentBuildError::Runtime(error),
+                ));
+            }
+        };
     let agent = Arc::new(AgentInner {
         id: agent_id,
         lifecycle,
@@ -2884,6 +3051,7 @@ async fn create_sessionless_agent(
         app: Arc::downgrade(app),
         notification: Mutex::new(Some(reservation)),
         request_task_owner: Mutex::new(None),
+        scope_lifecycle,
         state: Mutex::new(AgentState {
             status: AgentPublicStatus::Closing,
             next_request: 1,
@@ -2921,6 +3089,38 @@ async fn create_sessionless_agent(
         return Err(rollback_constructed_agent(&agent, error).await);
     }
     Ok(AgentHandle { inner: agent })
+}
+
+async fn initialize_agent_scope(
+    components: Vec<ComponentLifecycle>,
+) -> Result<Vec<ComponentLifecycle>, ComponentBuildError> {
+    let mut attempted = Vec::with_capacity(components.len());
+    for component in components {
+        let initializer = component
+            .initializer()
+            .expect("AgentScopeOutput validates initializable-only lifecycle")
+            .clone();
+        attempted.push(component);
+        if let Err(error) = initializer.initialize().await {
+            let rollback = shutdown_agent_scope(&attempted).await;
+            let message = rollback.map_or_else(
+                |shutdown| format!("initialization failed: {error}; rollback failed: {shutdown}"),
+                |()| format!("initialization failed: {error}"),
+            );
+            return Err(ComponentBuildError::InvalidConfig(message));
+        }
+    }
+    Ok(attempted)
+}
+
+async fn shutdown_agent_scope(components: &[ComponentLifecycle]) -> Result<(), ShutdownError> {
+    let mut first_error = None;
+    for component in components.iter().rev() {
+        if let Err(error) = component.shutdown().shutdown().await {
+            first_error.get_or_insert(error);
+        }
+    }
+    first_error.map_or(Ok(()), Err)
 }
 
 fn publish_constructed_agent(
@@ -3020,10 +3220,17 @@ async fn rollback_constructed_agent(
     agent: &Arc<AgentInner>,
     original: AgentLifecycleError,
 ) -> AgentLifecycleError {
+    let component_result = shutdown_agent_scope(&agent.scope_lifecycle).await;
     agent.publisher.close(AgentPublicStatus::Closed);
-    match agent.publisher.drain().await {
-        Ok(()) => original,
-        Err(error) => AgentLifecycleError::Construction(ComponentBuildError::Runtime(error)),
+    let publisher_result = agent.publisher.drain().await;
+    match (component_result, publisher_result) {
+        (Ok(()), Ok(())) => original,
+        (Err(error), _) => AgentLifecycleError::Construction(ComponentBuildError::InvalidConfig(
+            format!("Agent scope publication rollback failed: {error}"),
+        )),
+        (Ok(()), Err(error)) => {
+            AgentLifecycleError::Construction(ComponentBuildError::Runtime(error))
+        }
     }
 }
 
@@ -5764,5 +5971,108 @@ mod tests {
         assert_eq!(first.status(), AgentPublicStatus::Closed);
         assert_eq!(second.status(), AgentPublicStatus::Closed);
         assert_eq!(app.status(), AppStatus::Closed);
+    }
+
+    #[derive(Debug)]
+    struct LifecycleProbe {
+        name: &'static str,
+        fail_initialize: bool,
+        events: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl rust_agent_runtime_api::Initializable for LifecycleProbe {
+        fn initialize(
+            &self,
+        ) -> rust_agent_runtime_api::RuntimeFuture<
+            '_,
+            Result<(), rust_agent_runtime_api::InitializeError>,
+        > {
+            Box::pin(async move {
+                self.events
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(format!("initialize:{}", self.name));
+                if self.fail_initialize {
+                    Err(rust_agent_runtime_api::InitializeError::ResourcePreparationFailed)
+                } else {
+                    Ok(())
+                }
+            })
+        }
+    }
+
+    impl rust_agent_runtime_api::Shutdown for LifecycleProbe {
+        fn shutdown(
+            &self,
+        ) -> rust_agent_runtime_api::RuntimeFuture<
+            '_,
+            Result<(), rust_agent_runtime_api::ShutdownError>,
+        > {
+            Box::pin(async move {
+                self.events
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(format!("shutdown:{}", self.name));
+                Ok(())
+            })
+        }
+    }
+
+    fn probe_lifecycle(
+        name: &'static str,
+        fail_initialize: bool,
+        events: &Arc<Mutex<Vec<String>>>,
+    ) -> ComponentLifecycle {
+        rust_agent_runtime_api::ComponentOutput::initializable(LifecycleProbe {
+            name,
+            fail_initialize,
+            events: events.clone(),
+        })
+        .lifecycle()
+        .unwrap()
+    }
+
+    #[test]
+    fn agent_scope_initializes_in_dag_order_and_shuts_down_in_reverse_order() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let initialized = run(initialize_agent_scope(vec![
+            probe_lifecycle("subprocess", false, &events),
+            probe_lifecycle("terminal", false, &events),
+        ]))
+        .unwrap();
+        run(shutdown_agent_scope(&initialized)).unwrap();
+        assert_eq!(
+            *events
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            [
+                "initialize:subprocess",
+                "initialize:terminal",
+                "shutdown:terminal",
+                "shutdown:subprocess",
+            ]
+        );
+    }
+
+    #[test]
+    fn agent_scope_initialization_failure_rolls_back_every_attempted_owner() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let error = run(initialize_agent_scope(vec![
+            probe_lifecycle("subprocess", false, &events),
+            probe_lifecycle("terminal", true, &events),
+        ]))
+        .unwrap_err();
+        assert!(error.to_string().contains("initialization failed"));
+        assert_eq!(
+            *events
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            [
+                "initialize:subprocess",
+                "initialize:terminal",
+                "shutdown:terminal",
+                "shutdown:subprocess",
+            ]
+        );
     }
 }

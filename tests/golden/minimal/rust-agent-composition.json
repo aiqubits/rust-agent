@@ -1,7 +1,7 @@
 {
   "schema": 2,
   "algorithm": "sha256-rust-agent-composition-v2",
-  "composition-hash": "7ab58e4e6e36a0213f661250f51ad2ba831ce2c88f8b0d4f9b3ee0265de6e77d",
+  "composition-hash": "09ef182242d5232d92e1110bed58fef50446f1c44e0a8d4bf131caded9066142",
   "build-kind": "library",
   "profile-name": "fixture-minimal",
   "normalized-profile": {
@@ -33,6 +33,7 @@
       "secret-access",
       "write-local"
     ],
+    "confinement": null,
     "resolver-decision-budget": 100
   },
   "target": "x86_64-unknown-linux-gnu",
@@ -2308,6 +2309,7 @@
         "effects": []
       }
     ],
+    "generated-infrastructure-bindings": [],
     "resource-namespace-bindings": [],
     "construction-order": [
       "fixture-model",
@@ -2357,6 +2359,7 @@
       "environment": []
     },
     "app-handoff": "concurrent",
+    "confinement": null,
     "explored-decisions": 2,
     "diagnostics": [
       {
@@ -3018,7 +3021,7 @@
       "id": "rust-agent-runtime-api",
       "package": "rust-agent-runtime-api",
       "logical-path": "crates/api/rust-agent-runtime-api",
-      "tree-digest": "374161076a6f7267e5151f73506189d044292a6c42ed4aafaf4d9e7ff6fb5074",
+      "tree-digest": "80d486c49d7baf25098026aba557ffcc9cd4b205f3e901bff567820b51b1093f",
       "tree-entries": [
         {
           "path": "Cargo.toml",
@@ -3066,8 +3069,8 @@
           "path": "src/lib.rs",
           "kind": {
             "kind": "regular-file",
-            "sha256": "19bed2d518aec45150a0c461babb2a3bff3be8de5aa868b7503abac929f649f9",
-            "bytes": 136600
+            "sha256": "5300ec8f78f0587eb97c9b99c41f4bb23cfba9a880927594753c4ea084419c1f",
+            "bytes": 138811
           },
           "metadata": {
             "contract": "read-only-epoch-v1",

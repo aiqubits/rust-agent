@@ -54,7 +54,7 @@ use crate::{
         HostBoundaryKind, MAX_CATALOG_TRUST_POLICY_BYTES,
     },
     profile::{BuildKind, CompositionProfile, MAX_PROFILE_DOCUMENT_BYTES},
-    resolver::{ResolutionError, resolve},
+    resolver::{GeneratedInfrastructureId, ResolutionError, resolve},
     snapshot::{
         CanonicalSnapshotEntry, CanonicalSnapshotEntryKind, CanonicalSnapshotError,
         CanonicalSnapshotTree, MAX_CANONICAL_SNAPSHOT_ENTRIES, MAX_CANONICAL_SNAPSHOT_FILE_BYTES,
@@ -514,6 +514,7 @@ fn compose_in_staging(
             host_runtime_effects,
             compiled_runtime_effects: resolution.compiled_runtime_effects.clone(),
             build_requirements,
+            confinement: resolution.confinement.clone(),
         },
     )?;
 
@@ -734,6 +735,34 @@ fn mandatory_api_packages(
                     "rust-agent-tools",
                     "rust-agent-tools",
                     "crates/api/rust-agent-tools",
+                ),
+            ]);
+        }
+        if resolution.selected_components.iter().any(|component| {
+            matches!(
+                component.as_str(),
+                "resource-namespace-bootstrap-local"
+                    | "fs-read-local"
+                    | "fs-local"
+                    | "tool-fs"
+                    | "sandbox-linux"
+                    | "subprocess-local"
+                    | "shell-local"
+                    | "terminal-local"
+                    | "tool-shell"
+            )
+        }) {
+            packages.extend([
+                ("rust-agent-fs", "rust-agent-fs", "crates/api/rust-agent-fs"),
+                (
+                    "rust-agent-process",
+                    "rust-agent-process",
+                    "crates/api/rust-agent-process",
+                ),
+                (
+                    "rust-agent-resource-namespace",
+                    "rust-agent-resource-namespace",
+                    "crates/api/rust-agent-resource-namespace",
                 ),
             ]);
         }
@@ -1596,6 +1625,7 @@ fn verify_composition_with_location_policy(
         host_runtime_effects: manifest.host_runtime_effects.clone(),
         compiled_runtime_effects: manifest.compiled_runtime_effects.clone(),
         build_requirements: manifest.build_requirements.clone(),
+        confinement: manifest.resolution.confinement.clone(),
     };
     let expected_security_bytes =
         deterministic_json_bytes(&expected_security).map_err(|error| {
@@ -2453,6 +2483,9 @@ fn normalize_package_manifest(
     package.remove("repository");
     reject_remaining_workspace_inheritance(package, &manifest_path)?;
 
+    if has_workspace_dependency_inheritance(table) {
+        resolve_workspace_dependency_inheritance(table, workspace_root, &manifest_path)?;
+    }
     table.remove("dev-dependencies");
     table.remove("lints");
     expand_target_dependencies(table, target, &manifest_path)?;
@@ -2493,6 +2526,175 @@ fn normalize_package_manifest(
         path_dependencies,
         requires_registry,
     })
+}
+
+fn has_workspace_dependency_inheritance(package: &toml::Table) -> bool {
+    let table_has_inheritance = |value: Option<&toml::Value>| {
+        value
+            .and_then(toml::Value::as_table)
+            .is_some_and(|dependencies| {
+                dependencies.values().any(|specification| {
+                    specification
+                        .as_table()
+                        .is_some_and(|table| table.contains_key("workspace"))
+                })
+            })
+    };
+    if ["dependencies", "build-dependencies", "dev-dependencies"]
+        .into_iter()
+        .any(|section| table_has_inheritance(package.get(section)))
+    {
+        return true;
+    }
+    package
+        .get("target")
+        .and_then(toml::Value::as_table)
+        .is_some_and(|targets| {
+            targets.values().any(|clause| {
+                clause.as_table().is_some_and(|clause| {
+                    ["dependencies", "build-dependencies", "dev-dependencies"]
+                        .into_iter()
+                        .any(|section| table_has_inheritance(clause.get(section)))
+                })
+            })
+        })
+}
+
+fn resolve_workspace_dependency_inheritance(
+    package: &mut toml::Table,
+    workspace_root: &Path,
+    manifest_path: &Path,
+) -> Result<(), ComposeError> {
+    let workspace_manifest_path = workspace_root.join("Cargo.toml");
+    let workspace_input =
+        read_bounded_snapshot_source_file(&workspace_manifest_path, MAX_SOURCE_MANIFEST_BYTES)?;
+    let workspace_input = std::str::from_utf8(&workspace_input).map_err(|error| {
+        ComposeError::ManifestNormalization {
+            path: workspace_manifest_path.display().to_string(),
+            message: error.to_string(),
+        }
+    })?;
+    let workspace: toml::Value =
+        toml::from_str(workspace_input).map_err(|error| ComposeError::ManifestNormalization {
+            path: workspace_manifest_path.display().to_string(),
+            message: error.to_string(),
+        })?;
+    let inherited = workspace
+        .get("workspace")
+        .and_then(|value| value.get("dependencies"))
+        .and_then(toml::Value::as_table)
+        .ok_or_else(|| ComposeError::ManifestNormalization {
+            path: workspace_manifest_path.display().to_string(),
+            message: "workspace.dependencies must be a table".into(),
+        })?;
+
+    for section in ["dependencies", "build-dependencies", "dev-dependencies"] {
+        if let Some(dependencies) = package.get_mut(section).and_then(toml::Value::as_table_mut) {
+            resolve_dependency_table_inheritance(dependencies, inherited, manifest_path, section)?;
+        }
+    }
+    if let Some(targets) = package
+        .get_mut("target")
+        .and_then(toml::Value::as_table_mut)
+    {
+        for (selector, clause) in targets {
+            let clause =
+                clause
+                    .as_table_mut()
+                    .ok_or_else(|| ComposeError::ManifestNormalization {
+                        path: manifest_path.display().to_string(),
+                        message: format!("Cargo target selector `{selector}` is not a table"),
+                    })?;
+            for section in ["dependencies", "build-dependencies", "dev-dependencies"] {
+                if let Some(dependencies) =
+                    clause.get_mut(section).and_then(toml::Value::as_table_mut)
+                {
+                    resolve_dependency_table_inheritance(
+                        dependencies,
+                        inherited,
+                        manifest_path,
+                        &format!("target `{selector}` {section}"),
+                    )?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn resolve_dependency_table_inheritance(
+    dependencies: &mut toml::Table,
+    workspace_dependencies: &toml::Table,
+    manifest_path: &Path,
+    context: &str,
+) -> Result<(), ComposeError> {
+    for (alias, specification) in dependencies {
+        let Some(local) = specification.as_table() else {
+            continue;
+        };
+        let Some(workspace) = local.get("workspace") else {
+            continue;
+        };
+        if workspace.as_bool() != Some(true) {
+            return manifest_error(
+                manifest_path,
+                format!("{context} dependency `{alias}` has invalid workspace inheritance"),
+            );
+        }
+        let inherited = workspace_dependencies.get(alias).ok_or_else(|| {
+            ComposeError::ManifestNormalization {
+                path: manifest_path.display().to_string(),
+                message: format!(
+                    "{context} dependency `{alias}` is absent from workspace.dependencies"
+                ),
+            }
+        })?;
+        let mut resolved = match inherited {
+            toml::Value::String(version) => {
+                toml::Table::from_iter([("version".into(), toml::Value::String(version.clone()))])
+            }
+            toml::Value::Table(table) => table.clone(),
+            _ => {
+                return manifest_error(
+                    manifest_path,
+                    format!("workspace dependency `{alias}` has an unsupported specification"),
+                );
+            }
+        };
+        if resolved.contains_key("workspace") || resolved.contains_key("path") {
+            return manifest_error(
+                manifest_path,
+                format!(
+                    "workspace dependency `{alias}` cannot recursively inherit or use a path in a standalone snapshot"
+                ),
+            );
+        }
+        for (key, value) in local {
+            if key == "workspace" {
+                continue;
+            }
+            if key == "features" {
+                let mut features = resolved
+                    .remove("features")
+                    .and_then(|value| value.as_array().cloned())
+                    .unwrap_or_default();
+                let Some(additional) = value.as_array() else {
+                    return manifest_error(
+                        manifest_path,
+                        format!("{context} dependency `{alias}` features must be an array"),
+                    );
+                };
+                features.extend(additional.iter().cloned());
+                features.sort_by(|left, right| left.as_str().cmp(&right.as_str()));
+                features.dedup();
+                resolved.insert("features".into(), toml::Value::Array(features));
+            } else {
+                resolved.insert(key.clone(), value.clone());
+            }
+        }
+        *specification = toml::Value::Table(resolved);
+    }
+    Ok(())
 }
 
 fn valid_cargo_package_name(name: &str) -> bool {
@@ -4106,6 +4308,350 @@ fn phase2_runtime_binding_expression(
     ))
 }
 
+fn phase4_effects_expression(effects: &BTreeSet<String>) -> Result<String, ComposeError> {
+    let mut parts = vec!["rust_agent_core::SecurityEffects::empty()"];
+    for effect in effects {
+        parts.push(match effect.as_str() {
+            "read-local" => "rust_agent_core::SecurityEffects::READ_LOCAL",
+            "write-local" => "rust_agent_core::SecurityEffects::WRITE_LOCAL",
+            "network-outbound" => "rust_agent_core::SecurityEffects::NETWORK",
+            "process-exec" => "rust_agent_core::SecurityEffects::PROCESS_EXEC",
+            "remote-execution" => "rust_agent_core::SecurityEffects::REMOTE_EXEC",
+            "secret-access" => "rust_agent_core::SecurityEffects::SECRET_ACCESS",
+            "host-bridge" => "rust_agent_core::SecurityEffects::HOST_BRIDGE",
+            "persistent-storage" => "rust_agent_core::SecurityEffects::PERSISTENT_STORAGE",
+            "code-execution" => "rust_agent_core::SecurityEffects::CODE_EXEC",
+            unknown => {
+                return Err(ComposeError::UnsupportedPhase1A(format!(
+                    "Phase 4 cannot emit unknown runtime effect `{unknown}`"
+                )));
+            }
+        });
+    }
+    Ok(parts.join(" | "))
+}
+
+fn phase4_binding_effects(
+    resolution: &crate::resolver::Resolution,
+    capability: &str,
+    provider: &str,
+    consumer: &str,
+    field: &str,
+) -> Result<String, ComposeError> {
+    let bindings = resolution
+        .bindings
+        .iter()
+        .filter(|binding| {
+            binding.capability == capability
+                && binding.provider == provider
+                && binding.consumer == consumer
+                && binding.field == field
+        })
+        .collect::<Vec<_>>();
+    let [binding] = bindings.as_slice() else {
+        return Err(ComposeError::UnsupportedPhase1A(format!(
+            "Phase 4 needs exactly one `{capability}` route from `{provider}` to `{consumer}.{field}`"
+        )));
+    };
+    phase4_effects_expression(&binding.effects)
+}
+
+fn require_phase4_component<'a>(
+    catalog: &'a NormalizedCatalog,
+    id: &str,
+    package: &str,
+    scope: crate::metadata::ScopeKind,
+    config_source: ConfigSource,
+) -> Result<&'a ComponentSpec, ComposeError> {
+    let component = catalog.components.get(id).ok_or_else(|| {
+        ComposeError::UnsupportedPhase1A(format!("Phase 4 component `{id}` is missing"))
+    })?;
+    if component.package != package
+        || component.scope != scope
+        || component.config_source != config_source
+    {
+        return Err(ComposeError::UnsupportedPhase1A(format!(
+            "Phase 4 component `{id}` does not match its closed generated role"
+        )));
+    }
+    Ok(component)
+}
+
+fn generate_phase4_lib_rs(
+    catalog: &NormalizedCatalog,
+    resolution: &crate::resolver::Resolution,
+    build_kind: BuildKind,
+    catalog_digest: &str,
+) -> Result<String, ComposeError> {
+    if build_kind != BuildKind::Library {
+        return Err(ComposeError::UnsupportedPhase1A(
+            "the complete Phase 4 local composition is emitted as a Host-neutral library".into(),
+        ));
+    }
+    let expected = BTreeSet::from([
+        "driver-tools",
+        "fs-local",
+        "model-replay",
+        "permission-default",
+        "resource-namespace-bootstrap-local",
+        "sandbox-linux",
+        "shell-local",
+        "subprocess-local",
+        "terminal-local",
+        "tool-executor-guarded",
+        "tool-fs",
+        "tool-shell",
+    ]);
+    let selected = resolution
+        .selected_components
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    if selected != expected {
+        return Err(ComposeError::UnsupportedPhase1A(format!(
+            "Phase 4 generated local root requires the exact complete provider set; selected `{}`",
+            selected.into_iter().collect::<Vec<_>>().join(", ")
+        )));
+    }
+    require_phase4_component(
+        catalog,
+        "driver-tools",
+        "rust-agent-driver-tools",
+        crate::metadata::ScopeKind::Agent,
+        ConfigSource::None,
+    )?;
+    require_phase4_component(
+        catalog,
+        "model-replay",
+        "rust-agent-model-replay",
+        crate::metadata::ScopeKind::App,
+        ConfigSource::None,
+    )?;
+    require_phase4_component(
+        catalog,
+        "permission-default",
+        "rust-agent-permission-default",
+        crate::metadata::ScopeKind::Agent,
+        ConfigSource::None,
+    )?;
+    require_phase4_component(
+        catalog,
+        "tool-executor-guarded",
+        "rust-agent-tool-executor-guarded",
+        crate::metadata::ScopeKind::Agent,
+        ConfigSource::None,
+    )?;
+    require_phase4_component(
+        catalog,
+        "resource-namespace-bootstrap-local",
+        "rust-agent-resource-namespace-bootstrap-local",
+        crate::metadata::ScopeKind::App,
+        ConfigSource::None,
+    )?;
+    for (id, package) in [
+        ("fs-local", "rust-agent-fs-local"),
+        ("subprocess-local", "rust-agent-subprocess-local"),
+        ("shell-local", "rust-agent-shell-local"),
+        ("terminal-local", "rust-agent-terminal-local"),
+    ] {
+        require_phase4_component(
+            catalog,
+            id,
+            package,
+            crate::metadata::ScopeKind::Agent,
+            ConfigSource::File,
+        )?;
+    }
+    for (id, package) in [
+        ("sandbox-linux", "rust-agent-sandbox-linux"),
+        ("tool-fs", "rust-agent-tool-fs"),
+        ("tool-shell", "rust-agent-tool-shell"),
+    ] {
+        require_phase4_component(
+            catalog,
+            id,
+            package,
+            crate::metadata::ScopeKind::Agent,
+            ConfigSource::None,
+        )?;
+    }
+
+    let expected_generated = BTreeSet::from([
+        (
+            "cap:confinement-issuer",
+            GeneratedInfrastructureId::GeneratedConfinementIssuer,
+            "sandbox-linux",
+            "confinement_issuer",
+        ),
+        (
+            "cap:confinement-verifier",
+            GeneratedInfrastructureId::GeneratedConfinementVerifier,
+            "subprocess-local",
+            "confinement_verifier",
+        ),
+    ]);
+    let actual_generated = resolution
+        .generated_infrastructure_bindings
+        .iter()
+        .map(|binding| {
+            (
+                binding.capability.as_str(),
+                binding.provider,
+                binding.consumer.as_str(),
+                binding.field.as_str(),
+            )
+        })
+        .collect::<BTreeSet<_>>();
+    if actual_generated != expected_generated
+        || resolution
+            .generated_infrastructure_bindings
+            .iter()
+            .any(|binding| !binding.effects.is_empty())
+    {
+        return Err(ComposeError::UnsupportedPhase1A(
+            "Phase 4 generated confinement authority routes are not exact".into(),
+        ));
+    }
+    let confinement = resolution.confinement.as_ref().ok_or_else(|| {
+        ComposeError::UnsupportedPhase1A(
+            "Phase 4 generated local root requires a confinement ceiling".into(),
+        )
+    })?;
+    let filesystem = if confinement.permits("write-local") {
+        "rust_agent_policy::process::FilesystemAccess::ReadWrite"
+    } else if confinement.permits("read-local") {
+        "rust_agent_policy::process::FilesystemAccess::ReadOnly"
+    } else {
+        "rust_agent_policy::process::FilesystemAccess::None"
+    };
+    let network = if confinement.permits("network-outbound") {
+        "rust_agent_policy::process::NetworkAccess::Outbound"
+    } else {
+        "rust_agent_policy::process::NetworkAccess::Deny"
+    };
+
+    let namespace = resolution
+        .resource_namespace_bindings
+        .iter()
+        .filter(|binding| binding.consumer == "fs-local")
+        .collect::<Vec<_>>();
+    let [namespace] = namespace.as_slice() else {
+        return Err(ComposeError::UnsupportedPhase1A(
+            "Phase 4 fs-local needs exactly one resource namespace route".into(),
+        ));
+    };
+    if namespace.provide_capability != "cap:fs-read"
+        || namespace.provide_key.is_some()
+        || namespace.bootstrap_provider != "resource-namespace-bootstrap-local"
+        || namespace.bootstrap_key != "resource-namespace-bootstrap-local"
+    {
+        return Err(ComposeError::UnsupportedPhase1A(
+            "Phase 4 fs-local resource namespace route is not exact".into(),
+        ));
+    }
+    let namespace_effects = phase4_effects_expression(&namespace.effects)?;
+    let fs_read_effects =
+        phase4_binding_effects(resolution, "cap:fs-read", "fs-local", "tool-fs", "fs_read")?;
+    let fs_write_effects = phase4_binding_effects(
+        resolution,
+        "cap:fs-write",
+        "fs-local",
+        "tool-fs",
+        "fs_write",
+    )?;
+    let subprocess_effects = phase4_binding_effects(
+        resolution,
+        "cap:subprocess",
+        "subprocess-local",
+        "shell-local",
+        "subprocess",
+    )?;
+    let sandbox_effects = phase4_binding_effects(
+        resolution,
+        "cap:sandbox",
+        "sandbox-linux",
+        "shell-local",
+        "sandbox",
+    )?;
+    let shell_effects = phase4_binding_effects(
+        resolution,
+        "cap:shell",
+        "shell-local",
+        "tool-shell",
+        "shell",
+    )?;
+    let tool_fs_effects = phase4_binding_effects(
+        resolution,
+        "cap:tool-provider",
+        "tool-fs",
+        "tool-executor-guarded",
+        "providers",
+    )?;
+    let tool_shell_effects = phase4_binding_effects(
+        resolution,
+        "cap:tool-provider",
+        "tool-shell",
+        "tool-executor-guarded",
+        "providers",
+    )?;
+    let terminal_subprocess_effects = phase4_binding_effects(
+        resolution,
+        "cap:subprocess",
+        "subprocess-local",
+        "terminal-local",
+        "subprocess",
+    )?;
+    let terminal_sandbox_effects = phase4_binding_effects(
+        resolution,
+        "cap:sandbox",
+        "sandbox-linux",
+        "terminal-local",
+        "sandbox",
+    )?;
+    if subprocess_effects != terminal_subprocess_effects
+        || sandbox_effects != terminal_sandbox_effects
+    {
+        return Err(ComposeError::UnsupportedPhase1A(
+            "Phase 4 shell and terminal must receive the same exact process bindings".into(),
+        ));
+    }
+
+    let adapter = &catalog.runtime_adapters[&resolution.runtime_adapter];
+    let handoff_mode = match resolution.app_handoff {
+        crate::resolver::AppHandoff::Concurrent => {
+            "rust_agent_runtime_api::AppHandoffMode::Concurrent"
+        }
+        crate::resolver::AppHandoff::StopOldApp => {
+            "rust_agent_runtime_api::AppHandoffMode::StopOldApp"
+        }
+    };
+    let mut output = format!(
+        "#![forbid(unsafe_code)]\n\nmod identity;\n\npub use identity::COMPOSITION_HASH;\npub use rust_agent_agent::{{AgentHandle, AgentInput, AgentOperationDraft, AgentSendRequest, AppBuildError, AppHandle, ModelRouteSelection, ProviderKey}};\npub use rust_agent_runtime_api::{{AppHandoffError, AppHandoffMode, RuntimePrimitives}};\npub use {} as create_runtime_primitives;\n\npub const CATALOG_DIGEST: &str = {catalog_digest:?};\n\n",
+        adapter.constructor
+    );
+    output.push_str(
+        "#[derive(Clone, Copy, Debug, Eq, PartialEq)]\npub enum CompiledModelProvider { ModelReplay }\n\nimpl CompiledModelProvider {\n    pub const fn key(self) -> &'static str { \"replay\" }\n    pub fn route(self) -> ModelRouteSelection {\n        ModelRouteSelection::Explicit(ProviderKey::new(self.key()).expect(\"generated provider key is canonical\"))\n    }\n}\n\n#[derive(Clone, Copy, Debug, Eq, PartialEq)]\npub enum ModelRouting { Default(CompiledModelProvider), ExplicitPerRequest }\n\npub struct RuntimeConfig {\n    pub runtime: rust_agent_agent::Phase2RuntimeConfig,\n    pub model_routing: Option<ModelRouting>,\n    pub fs_local: rust_agent_fs_local::Config,\n    pub subprocess_local: rust_agent_subprocess_local::Config,\n    pub shell_local: rust_agent_shell_local::Config,\n    pub terminal_local: rust_agent_terminal_local::Config,\n}\n\n#[derive(Default)]\npub struct HostBindings;\n\n#[derive(Debug)]\nstruct GeneratedAgentScopeFactory {\n    runtime: RuntimePrimitives,\n    bootstrap: rust_agent_resource_namespace::ResourceNamespaceBootstrapBinding,\n    fs_local: rust_agent_fs_local::Config,\n    subprocess_local: rust_agent_subprocess_local::Config,\n    shell_local: rust_agent_shell_local::Config,\n    terminal_local: rust_agent_terminal_local::Config,\n}\n\n",
+    );
+    output.push_str(&format!(
+        "impl rust_agent_agent::AgentScopeFactory for GeneratedAgentScopeFactory {{\n    fn driver_component_identity(&self) -> &'static str {{ \"driver-tools\" }}\n\n    fn tool_consumer_edge(&self) -> Option<(&'static str, &'static str)> {{\n        Some((\"driver-tools\", \"tool-executor-guarded\"))\n    }}\n\n    fn build_driver(\n        &self,\n        _model: rust_agent_model::ModelRegistryBinding,\n        _runtime: RuntimePrimitives,\n    ) -> Result<rust_agent_agent::AgentDriverBinding, rust_agent_runtime_api::ComponentBuildError> {{\n        Err(rust_agent_runtime_api::ComponentBuildError::MissingDependency(\"tools\"))\n    }}\n\n    fn prepare_scope<'a>(\n        &'a self,\n        cancellation: rust_agent_runtime_api::CancellationToken,\n    ) -> rust_agent_agent::AgentFuture<'a, Result<rust_agent_agent::PreparedAgentScope<'a>, rust_agent_runtime_api::ComponentBuildError>> {{\n        Box::pin(async move {{\n            if cancellation.is_cancelled() {{\n                return Err(rust_agent_runtime_api::ComponentBuildError::InvalidConfig(\"Agent scope preparation was cancelled\".into()));\n            }}\n            let limits = rust_agent_policy::process::ProcessResourceLimits::checked(\n                std::num::NonZeroU32::new(rust_agent_policy::process::MAX_PROCESS_COUNT).expect(\"hard process count is nonzero\"),\n                std::num::NonZeroU64::new(rust_agent_policy::process::MAX_PROCESS_MEMORY_BYTES).expect(\"hard memory limit is nonzero\"),\n                std::num::NonZeroUsize::new(rust_agent_policy::process::MAX_PROCESS_OUTPUT_BYTES).expect(\"hard output limit is nonzero\"),\n                std::num::NonZeroU64::new(rust_agent_policy::process::MAX_PROCESS_WALL_TIME_MILLIS).expect(\"hard wall-time limit is nonzero\"),\n            ).map_err(|error| rust_agent_runtime_api::ComponentBuildError::InvalidConfig(error.to_string()))?;\n            let ceiling = rust_agent_policy::process::SandboxPolicyCeiling::new(\n                rust_agent_policy::process::SandboxPolicy::new({filesystem}, {network}, limits),\n            );\n            let (issuer, verifier) = rust_agent_process::ConfinementAuthority::new(ceiling)\n                .map_err(|error| rust_agent_runtime_api::ComponentBuildError::InvalidConfig(error.to_string()))?;\n            let route = rust_agent_resource_namespace::ResourceNamespaceRoute::checked(\n                \"fs-local\",\n                \"cap:fs-read\",\n                None,\n                \"resource-namespace-bootstrap-local\",\n                \"resource-namespace-bootstrap-local\",\n                {namespace_effects},\n            ).map_err(|error| rust_agent_runtime_api::ComponentBuildError::InvalidConfig(error.to_string()))?;\n            let projection = rust_agent_resource_namespace::BootstrapAuthorityProjection::checked(\n                route,\n                {namespace_effects},\n                true,\n            ).map_err(|error| rust_agent_runtime_api::ComponentBuildError::InvalidConfig(error.to_string()))?;\n            let context = projection.context(&self.bootstrap, cancellation, None)\n                .map_err(|error| rust_agent_runtime_api::ComponentBuildError::InvalidConfig(error.to_string()))?;\n            let prepared_fs = rust_agent_fs_local::prepare_resource_namespaces(&self.fs_local, context)\n                .await\n                .map_err(|error| rust_agent_runtime_api::ComponentBuildError::InvalidConfig(error.to_string()))?\n                .into_value();\n            Ok(rust_agent_agent::PreparedAgentScope::from_generated(move |model, binding, runtime| {{\n                if !self.runtime.same_bundle_identity(&runtime) {{\n                    return Err(rust_agent_runtime_api::ComponentBuildError::Runtime(\n                        rust_agent_runtime_api::RuntimePrimitiveError::AdapterMismatch {{\n                            expected: self.runtime.adapter().as_str().to_owned(),\n                            actual: runtime.adapter().as_str().to_owned(),\n                        }},\n                    ));\n                }}\n                let permission_output = rust_agent_permission_default::build(\n                    &Default::default(),\n                    rust_agent_permission_default::Dependencies {{}},\n                    rust_agent_runtime_api::RuntimePrimitiveBindings::none(),\n                )?;\n                let fs_output = rust_agent_fs_local::build(\n                    &prepared_fs,\n                    rust_agent_fs_local::Dependencies {{}},\n                    rust_agent_runtime_api::RuntimePrimitiveBindings::projected(runtime.clone(), &[rust_agent_runtime_api::RuntimePrimitiveKind::Clock])\n                        .map_err(rust_agent_runtime_api::ComponentBuildError::Runtime)?,\n                )?;\n                let fs_read = rust_agent_fs::FileReadBinding::from_generated_component(\n                    \"fs-local\", {fs_read_effects}, fs_output.service().clone(),\n                ).map_err(|error| rust_agent_runtime_api::ComponentBuildError::InvalidConfig(error.to_string()))?;\n                let fs_write = rust_agent_fs::FileWriteBinding::from_generated_component(\n                    \"fs-local\", {fs_write_effects}, fs_output.service().clone(),\n                ).map_err(|error| rust_agent_runtime_api::ComponentBuildError::InvalidConfig(error.to_string()))?;\n                let tool_fs_output = rust_agent_tool_fs::build(\n                    &Default::default(),\n                    rust_agent_tool_fs::Dependencies {{ fs_read, fs_write: Some(fs_write) }},\n                    rust_agent_runtime_api::RuntimePrimitiveBindings::none(),\n                )?;\n                let mut lifecycle = Vec::new();\n                let subprocess_output = rust_agent_subprocess_local::build(\n                    &self.subprocess_local,\n                    rust_agent_subprocess_local::Dependencies {{\n                        confinement_verifier: rust_agent_process::ConfinementVerifierBinding::from_generated_authority(verifier),\n                    }},\n                    rust_agent_runtime_api::RuntimePrimitiveBindings::projected(runtime.clone(), &[rust_agent_runtime_api::RuntimePrimitiveKind::Clock, rust_agent_runtime_api::RuntimePrimitiveKind::Sleep])\n                        .map_err(rust_agent_runtime_api::ComponentBuildError::Runtime)?,\n                )?;\n                lifecycle.push(subprocess_output.lifecycle().expect(\"subprocess-local lifecycle is metadata-required\"));\n                let subprocess = rust_agent_process::SubprocessBinding::from_generated_component(\n                    \"subprocess-local\", {subprocess_effects}, subprocess_output.service().clone(),\n                ).map_err(|error| rust_agent_runtime_api::ComponentBuildError::InvalidConfig(error.to_string()))?;\n                let sandbox_output = rust_agent_sandbox_linux::build(\n                    &Default::default(),\n                    rust_agent_sandbox_linux::Dependencies {{\n                        confinement_issuer: rust_agent_process::ConfinementIssuerBinding::from_generated_authority(issuer),\n                    }},\n                    rust_agent_runtime_api::RuntimePrimitiveBindings::none(),\n                )?;\n                let sandbox = rust_agent_process::SandboxBinding::from_generated_component(\n                    \"sandbox-linux\", {sandbox_effects}, sandbox_output.into_service(),\n                ).map_err(|error| rust_agent_runtime_api::ComponentBuildError::InvalidConfig(error.to_string()))?;\n                let shell_output = rust_agent_shell_local::build(\n                    &self.shell_local,\n                    rust_agent_shell_local::Dependencies {{ subprocess: subprocess.clone(), sandbox: sandbox.clone() }},\n                    rust_agent_runtime_api::RuntimePrimitiveBindings::none(),\n                )?;\n                let shell = rust_agent_process::ShellBinding::from_generated_component(\n                    \"shell-local\", {shell_effects}, shell_output.into_service(),\n                ).map_err(|error| rust_agent_runtime_api::ComponentBuildError::InvalidConfig(error.to_string()))?;\n                let tool_shell_output = rust_agent_tool_shell::build(\n                    &Default::default(),\n                    rust_agent_tool_shell::Dependencies {{ shell }},\n                    rust_agent_runtime_api::RuntimePrimitiveBindings::none(),\n                )?;\n                let providers = vec![\n                    rust_agent_tools::ToolProviderBinding::from_generated_component(\n                        \"tool-fs\", {tool_fs_effects}, tool_fs_output.into_service(),\n                    ).map_err(|error| rust_agent_runtime_api::ComponentBuildError::InvalidConfig(error.to_string()))?,\n                    rust_agent_tools::ToolProviderBinding::from_generated_component(\n                        \"tool-shell\", {tool_shell_effects}, tool_shell_output.into_service(),\n                    ).map_err(|error| rust_agent_runtime_api::ComponentBuildError::InvalidConfig(error.to_string()))?,\n                ];\n                let executor_dependencies = rust_agent_tool_executor_guarded::Dependencies::from_generated_agent(\n                    providers,\n                    rust_agent_policy::PermissionPolicyBinding::from_provider(permission_output.into_service()),\n                    None,\n                    Vec::new(),\n                    self.driver_component_identity(),\n                    binding.ok_or(rust_agent_runtime_api::ComponentBuildError::MissingDependency(\"tools\"))?,\n                )?;\n                let executor_output = rust_agent_tool_executor_guarded::build(\n                    &Default::default(),\n                    executor_dependencies,\n                    rust_agent_runtime_api::RuntimePrimitiveBindings::projected(runtime.clone(), &[rust_agent_runtime_api::RuntimePrimitiveKind::Clock, rust_agent_runtime_api::RuntimePrimitiveKind::Sleep])\n                        .map_err(rust_agent_runtime_api::ComponentBuildError::Runtime)?,\n                )?;\n                let driver_output = rust_agent_driver_tools::build(\n                    &Default::default(),\n                    rust_agent_driver_tools::Dependencies {{\n                        model,\n                        tools: rust_agent_tools::ToolExecutorBinding::from_provider(executor_output.into_service()),\n                    }},\n                    rust_agent_runtime_api::RuntimePrimitiveBindings::projected(runtime, &[rust_agent_runtime_api::RuntimePrimitiveKind::Clock])\n                        .map_err(rust_agent_runtime_api::ComponentBuildError::Runtime)?,\n                )?;\n                let driver = rust_agent_agent::AgentDriverBinding::from_generated_component(\n                    self.driver_component_identity(), driver_output.into_service(),\n                )?;\n                let terminal_output = rust_agent_terminal_local::build(\n                    &self.terminal_local,\n                    rust_agent_terminal_local::Dependencies {{ subprocess, sandbox }},\n                    rust_agent_runtime_api::RuntimePrimitiveBindings::none(),\n                )?;\n                lifecycle.push(terminal_output.lifecycle().expect(\"terminal-local lifecycle is metadata-required\"));\n                rust_agent_agent::AgentScopeOutput::from_generated(driver, lifecycle)\n            }}))\n        }})\n    }}\n}}\n\n"
+    ));
+    output.push_str(&format!(
+        "pub fn build(runtime_config: RuntimeConfig, host_bindings: HostBindings, runtime: RuntimePrimitives) -> Result<AppHandle, AppBuildError> {{\n    if runtime.adapter().as_str() != {:?} {{\n        return Err(AppBuildError::RuntimeAdapterMismatch);\n    }}\n    let _ = host_bindings;\n    let composition = rust_agent_core::CompositionHash::from_digest(rust_agent_core::Digest::from_lower_hex(COMPOSITION_HASH).expect(\"generator emitted a canonical composition digest\"));\n    let catalog = rust_agent_core::Digest::from_lower_hex(CATALOG_DIGEST).expect(\"generator emitted a canonical catalog digest\");\n    let infrastructure_config = runtime_config.runtime;\n    let model_routing = runtime_config.model_routing.map(|routing| match routing {{\n        ModelRouting::Default(provider) => rust_agent_model::ModelRoutingMode::Default {{ provider: rust_agent_model::ProviderKey::new(provider.key()).expect(\"generated provider key is canonical\") }},\n        ModelRouting::ExplicitPerRequest => rust_agent_model::ModelRoutingMode::ExplicitPerRequest,\n    }});\n    let model_routing = rust_agent_model::ModelRegistry::validate_generated_routing(\n        vec![rust_agent_model::ProviderKey::new(\"replay\").expect(\"generated provider key is canonical\")],\n        model_routing,\n    )?;\n    let binding_plan = rust_agent_runtime_api::GeneratedModelBindingPlan::checked(\n        \"driver-tools\",\n        vec![(std::sync::Arc::<str>::from(\"model-replay\"), std::sync::Arc::<str>::from(\"replay\"))],\n        Vec::new(),\n        &[rust_agent_runtime_api::RuntimePrimitiveKind::Clock, rust_agent_runtime_api::RuntimePrimitiveKind::Sleep],\n    )?.with_tool_consumer_edge(\"driver-tools\", \"tool-executor-guarded\")?;\n    let runtime_owner = runtime.claim_generated_composition_owner(composition, catalog, binding_plan)?;\n    let handoff = rust_agent_runtime_api::AppHandoffSeal::new(\n        {handoff_mode}, COMPOSITION_HASH, CATALOG_DIGEST, Vec::new(),\n    )?;\n    let model_output = rust_agent_model_replay::build(\n        &Default::default(),\n        rust_agent_model_replay::Dependencies {{}},\n        rust_agent_runtime_api::RuntimePrimitiveBindings::none(),\n    )?;\n    let model = rust_agent_model::ModelRegistry::from_compiled_validated(\n        vec![rust_agent_model::ModelProviderBinding::from_generated_component(\n            \"model-replay\", model_output.into_service(),\n        )?],\n        model_routing,\n    )?;\n    let bootstrap_output = rust_agent_resource_namespace_bootstrap_local::build(\n        &Default::default(),\n        rust_agent_resource_namespace_bootstrap_local::Dependencies {{}},\n        rust_agent_runtime_api::RuntimePrimitiveBindings::none(),\n    )?;\n    let bootstrap = rust_agent_resource_namespace::ResourceNamespaceBootstrapBinding::from_provider(bootstrap_output.into_service());\n    let binding_assembly = rust_agent_runtime_api::begin_composition_assembly(\n        runtime_owner, composition, catalog,\n    )?.finish();\n    let scope_factory = std::sync::Arc::new(GeneratedAgentScopeFactory {{\n        runtime: runtime.clone(),\n        bootstrap,\n        fs_local: runtime_config.fs_local,\n        subprocess_local: runtime_config.subprocess_local,\n        shell_local: runtime_config.shell_local,\n        terminal_local: runtime_config.terminal_local,\n    }});\n    rust_agent_agent::AppHandle::from_generated(\n        composition, catalog, handoff, infrastructure_config, runtime, model, binding_assembly, scope_factory, Vec::new(),\n    )\n}}\n",
+        adapter.id
+    ));
+    output = output.replacen(
+        "        &[rust_agent_runtime_api::RuntimePrimitiveKind::Clock, rust_agent_runtime_api::RuntimePrimitiveKind::Sleep],\n    )?.with_tool_consumer_edge",
+        "        vec![rust_agent_runtime_api::RuntimePrimitiveKind::Clock, rust_agent_runtime_api::RuntimePrimitiveKind::Sleep],\n    )?.with_tool_consumer_edge",
+        1,
+    );
+    output = output.replacen(
+        "rust_agent_runtime_api::RuntimePrimitiveBindings::projected(runtime, &[rust_agent_runtime_api::RuntimePrimitiveKind::Clock])\n                        .map_err(rust_agent_runtime_api::ComponentBuildError::Runtime)?",
+        "rust_agent_runtime_api::RuntimePrimitiveBindings::none()",
+        1,
+    );
+    Ok(output)
+}
+
 fn generate_phase2_lib_rs(
     catalog: &NormalizedCatalog,
     resolution: &crate::resolver::Resolution,
@@ -4116,6 +4662,22 @@ fn generate_phase2_lib_rs(
         return Err(ComposeError::UnsupportedPhase1A(
             "Phase 2 Agent compositions do not yet expose a WASM Host boundary".into(),
         ));
+    }
+    if resolution.selected_components.iter().any(|component| {
+        matches!(
+            component.as_str(),
+            "resource-namespace-bootstrap-local"
+                | "fs-read-local"
+                | "fs-local"
+                | "tool-fs"
+                | "sandbox-linux"
+                | "subprocess-local"
+                | "shell-local"
+                | "terminal-local"
+                | "tool-shell"
+        )
+    }) {
+        return generate_phase4_lib_rs(catalog, resolution, build_kind, catalog_digest);
     }
     let adapter = &catalog.runtime_adapters[&resolution.runtime_adapter];
     let driver = resolution
@@ -5379,6 +5941,7 @@ mod tests {
                 host_runtime_effects: manifest.host_runtime_effects.clone(),
                 compiled_runtime_effects: manifest.compiled_runtime_effects.clone(),
                 build_requirements: manifest.build_requirements.clone(),
+                confinement: manifest.resolution.confinement.clone(),
             },
         )
         .unwrap();
@@ -5826,6 +6389,7 @@ mod tests {
                 host_runtime_effects: resealed.host_runtime_effects.clone(),
                 compiled_runtime_effects: resealed.compiled_runtime_effects.clone(),
                 build_requirements: resealed.build_requirements.clone(),
+                confinement: resealed.resolution.confinement.clone(),
             },
         )
         .unwrap();
@@ -6020,6 +6584,50 @@ target-wasm = { default-features = false, path = "../wasm", version = "0.1.0" }
             normalize_package_manifest(temp.path(), "packages/root", &native_test_target())
                 .unwrap();
         assert_eq!(native, reordered);
+    }
+
+    #[test]
+    fn workspace_dependency_inheritance_is_expanded_for_standalone_snapshots() {
+        let temp = TempDir::new().unwrap();
+        fs::write(
+            temp.path().join("Cargo.toml"),
+            concat!(
+                "[workspace]\nresolver = \"2\"\nmembers = [\"packages/root\"]\n\n",
+                "[workspace.dependencies]\n",
+                "rustix = { version = \"1.1.2\", default-features = false, features = [\"fs\"] }\n",
+            ),
+        )
+        .unwrap();
+        write_test_package(
+            temp.path(),
+            "packages/root",
+            "workspace-inheritance",
+            concat!(
+                "[target.'cfg(target_os = \"linux\")'.dependencies]\n",
+                "rustix = { workspace = true, features = [\"process\", \"fs\"] }\n",
+            ),
+        );
+
+        let normalized =
+            normalize_package_manifest(temp.path(), "packages/root", &native_test_target())
+                .unwrap();
+        let text = String::from_utf8(normalized.bytes).unwrap();
+        assert!(!text.contains("workspace = true"));
+        assert!(!text.contains("[target."));
+        assert!(text.contains("version = \"1.1.2\""));
+        assert!(text.contains("default-features = false"));
+        assert!(text.contains("features = [\"fs\", \"process\"]"));
+
+        fs::write(
+            temp.path().join("Cargo.toml"),
+            "[workspace]\nresolver = \"2\"\nmembers = [\"packages/root\"]\n",
+        )
+        .unwrap();
+        assert!(matches!(
+            normalize_package_manifest(temp.path(), "packages/root", &native_test_target()),
+            Err(ComposeError::ManifestNormalization { message, .. })
+                if message.contains("workspace.dependencies must be a table")
+        ));
     }
 
     #[test]
@@ -6675,6 +7283,224 @@ helper = { path = "../link" }
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn phase_four_local_composition_is_deterministic_graph_exact_and_lifecycle_owned() {
+        let temp = TempDir::new().unwrap();
+        let mut phase4_options = options(&temp, "tests/fixtures/profiles/phase4-local.toml");
+        phase4_options.output_root = temp.path().join("phase4-first");
+        phase4_options.registry_cache_path = Some(registry_cache());
+        let mut repeated_options = phase4_options.clone();
+        repeated_options.output_root = temp.path().join("phase4-second");
+        let generated = compose(&phase4_options).unwrap();
+        let repeated = compose(&repeated_options).unwrap();
+
+        assert_eq!(generated.composition_hash, repeated.composition_hash);
+        assert_eq!(generated.manifest, repeated.manifest);
+        for path in ["Cargo.toml", "Cargo.lock", "src/lib.rs"] {
+            assert_eq!(
+                fs::read(generated.path.join(path)).unwrap(),
+                fs::read(repeated.path.join(path)).unwrap(),
+                "generated Phase 4 composition changed {path} across identical inputs"
+            );
+        }
+        assert_eq!(
+            generated.manifest.resolution.construction_order,
+            [
+                "model-replay",
+                "permission-default",
+                "resource-namespace-bootstrap-local",
+                "fs-local",
+                "tool-fs",
+                "subprocess-local",
+                "sandbox-linux",
+                "shell-local",
+                "tool-shell",
+                "tool-executor-guarded",
+                "driver-tools",
+                "terminal-local",
+            ]
+        );
+        assert_eq!(
+            generated
+                .manifest
+                .resolution
+                .generated_infrastructure_bindings
+                .iter()
+                .map(|binding| {
+                    (
+                        binding.capability.as_str(),
+                        binding.provider,
+                        binding.consumer.as_str(),
+                        binding.field.as_str(),
+                    )
+                })
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([
+                (
+                    "cap:confinement-issuer",
+                    crate::resolver::GeneratedInfrastructureId::GeneratedConfinementIssuer,
+                    "sandbox-linux",
+                    "confinement_issuer",
+                ),
+                (
+                    "cap:confinement-verifier",
+                    crate::resolver::GeneratedInfrastructureId::GeneratedConfinementVerifier,
+                    "subprocess-local",
+                    "confinement_verifier",
+                ),
+            ])
+        );
+        assert!(
+            generated
+                .manifest
+                .resolution
+                .generated_infrastructure_bindings
+                .iter()
+                .all(|binding| binding.effects.is_empty())
+        );
+        assert_eq!(
+            generated.manifest.resolution.confinement,
+            generated.manifest.normalized_profile.confinement
+        );
+        let security: SecurityManifest = serde_json::from_slice(
+            &fs::read(generated.path.join("rust-agent-security.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            security.confinement,
+            generated.manifest.resolution.confinement
+        );
+        assert_eq!(
+            generated.manifest.resolution.resource_namespace_bindings,
+            [crate::resolver::ResolvedResourceNamespaceBinding {
+                consumer: "fs-local".into(),
+                provide_capability: "cap:fs-read".into(),
+                provide_key: None,
+                bootstrap_provider: "resource-namespace-bootstrap-local".into(),
+                bootstrap_key: "resource-namespace-bootstrap-local".into(),
+                effects: BTreeSet::from(["read-local".into()]),
+            }]
+        );
+
+        let source = fs::read_to_string(generated.path.join("src/lib.rs")).unwrap();
+        for required in [
+            "fn prepare_scope<'a>",
+            "rust_agent_process::ConfinementAuthority::new",
+            "rust_agent_resource_namespace::BootstrapAuthorityProjection::checked",
+            "rust_agent_fs_local::prepare_resource_namespaces",
+            "ConfinementVerifierBinding::from_generated_authority(verifier)",
+            "ConfinementIssuerBinding::from_generated_authority(issuer)",
+            "subprocess_output.lifecycle()",
+            "terminal_output.lifecycle()",
+            "rust_agent_agent::AgentScopeOutput::from_generated(driver, lifecycle)",
+        ] {
+            assert!(
+                source.contains(required),
+                "missing Phase 4 wiring: {required}"
+            );
+        }
+        let authority = source.find("ConfinementAuthority::new").unwrap();
+        let namespace = source.find("prepare_resource_namespaces").unwrap();
+        let subprocess = source.find("rust_agent_subprocess_local::build").unwrap();
+        let sandbox = source.find("rust_agent_sandbox_linux::build").unwrap();
+        let shell = source.find("rust_agent_shell_local::build").unwrap();
+        let terminal = source.find("rust_agent_terminal_local::build").unwrap();
+        assert!(authority < namespace && namespace < subprocess);
+        assert!(subprocess < sandbox && sandbox < shell && shell < terminal);
+        assert!(!source.contains("rust_agent_fs_read_local"));
+
+        let fs_manifest = fs::read_to_string(
+            generated
+                .path
+                .join("sources/crates/components/fs-local/Cargo.toml"),
+        )
+        .unwrap();
+        assert!(!fs_manifest.contains("workspace = true"));
+        assert!(fs_manifest.contains("version = \"1.1.4\""));
+
+        let tree = cargo_tree(&generated.path);
+        let metadata = cargo_metadata_packages(&generated.path);
+        let lock = fs::read_to_string(generated.path.join("Cargo.lock")).unwrap();
+        for package in [
+            "rust-agent-driver-tools",
+            "rust-agent-fs",
+            "rust-agent-fs-local",
+            "rust-agent-permission-default",
+            "rust-agent-policy",
+            "rust-agent-process",
+            "rust-agent-resource-namespace",
+            "rust-agent-resource-namespace-bootstrap-local",
+            "rust-agent-sandbox-linux",
+            "rust-agent-shell-local",
+            "rust-agent-subprocess-local",
+            "rust-agent-terminal-local",
+            "rust-agent-tool-executor-guarded",
+            "rust-agent-tool-fs",
+            "rust-agent-tool-shell",
+        ] {
+            assert!(tree.contains(package), "generated graph omitted {package}");
+            assert!(metadata.contains(package), "metadata omitted {package}");
+            assert!(
+                lock.contains(&format!("name = {package:?}")),
+                "lockfile omitted {package}"
+            );
+        }
+        for package in ["rust-agent-fs-read-local", "fixture-fs-read"] {
+            assert!(
+                !tree.contains(package),
+                "generated graph retained {package}"
+            );
+            assert!(!metadata.contains(package), "metadata retained {package}");
+            assert!(!lock.contains(&format!("name = {package:?}")));
+        }
+        verify_composition(&generated.path).unwrap();
+        verify_composition(&repeated.path).unwrap();
+
+        make_staging_tree_owner_writable(&generated.path).unwrap();
+        fs::create_dir(generated.path.join("tests")).unwrap();
+        let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../..")
+            .canonicalize()
+            .unwrap();
+        fs::copy(
+            workspace.join("tests/fixtures/generated-phase4-lifecycle.rs"),
+            generated.path.join("tests/generated_phase4_lifecycle.rs"),
+        )
+        .unwrap();
+        let runtime_anchor = env::current_exe().unwrap().canonicalize().unwrap();
+        let runtime_digest = sha256_hex(&fs::read(&runtime_anchor).unwrap());
+        let shell = tool("bash");
+        let output = Command::new(tool("cargo"))
+            .args(["test", "--manifest-path"])
+            .arg(generated.path.join("Cargo.toml"))
+            .args([
+                "--locked",
+                "--offline",
+                "--test",
+                "generated_phase4_lifecycle",
+            ])
+            .env(
+                "CARGO_TARGET_DIR",
+                temp.path().join("generated-phase4-target"),
+            )
+            .env("RUST_AGENT_PHASE4_WORKSPACE_ROOT", &workspace)
+            .env("RUST_AGENT_PHASE4_BWRAP", &runtime_anchor)
+            .env("RUST_AGENT_PHASE4_BWRAP_SHA256", &runtime_digest)
+            .env("RUST_AGENT_PHASE4_LAUNCHER", &runtime_anchor)
+            .env("RUST_AGENT_PHASE4_LAUNCHER_SHA256", &runtime_digest)
+            .env("RUST_AGENT_PHASE4_SHELL", &shell)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "generated Phase 4 lifecycle composition failed:\n{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        make_staging_tree_owner_writable(&repeated.path).unwrap();
     }
 
     #[test]
@@ -7570,6 +8396,7 @@ helper = { path = "../link" }
                 host_runtime_effects: legacy.host_runtime_effects.clone(),
                 compiled_runtime_effects: legacy.compiled_runtime_effects.clone(),
                 build_requirements: legacy.build_requirements.clone(),
+                confinement: legacy.resolution.confinement.clone(),
             },
         )
         .unwrap();
@@ -7949,6 +8776,7 @@ helper = { path = "../link" }
                     host_runtime_effects: manifest.host_runtime_effects.clone(),
                     compiled_runtime_effects: manifest.compiled_runtime_effects.clone(),
                     build_requirements: manifest.build_requirements.clone(),
+                    confinement: manifest.resolution.confinement.clone(),
                 },
             )
             .unwrap();

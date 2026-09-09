@@ -14,10 +14,20 @@ use crate::{
 pub const MAX_PROFILE_DOCUMENT_BYTES: usize = 256 * 1024;
 pub const MAX_PROFILE_SELECTION_ENTRIES: usize = 256;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+const CONFINEMENT_EFFECTS: &[&str] = &[
+    "code-execution",
+    "network-outbound",
+    "read-local",
+    "remote-execution",
+    "secret-access",
+    "write-local",
+];
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum ProfileResourceBoundsError {
     SelectionCountOverflow,
     TooManySelections { actual: usize, maximum: usize },
+    InvalidConfinement(String),
 }
 
 impl fmt::Display for ProfileResourceBoundsError {
@@ -30,6 +40,7 @@ impl fmt::Display for ProfileResourceBoundsError {
                 formatter,
                 "profile has {actual} selections; maximum is {maximum}"
             ),
+            Self::InvalidConfinement(message) => formatter.write_str(message),
         }
     }
 }
@@ -55,6 +66,8 @@ pub struct CompositionProfile {
     pub preferred_providers: BTreeMap<String, String>,
     #[serde(default, rename = "denied-effects")]
     pub denied_effects: BTreeSet<String>,
+    #[serde(default)]
+    pub confinement: Option<ConfinementProfile>,
     #[serde(
         default = "default_decision_budget",
         rename = "resolver-decision-budget"
@@ -97,6 +110,8 @@ struct UncheckedCompositionProfile {
         deserialize_with = "deserialize_profile_denied_effects"
     )]
     denied_effects: BTreeSet<String>,
+    #[serde(default)]
+    confinement: Option<ConfinementProfile>,
     #[serde(
         default = "default_decision_budget",
         rename = "resolver-decision-budget"
@@ -160,6 +175,7 @@ impl<'de> Deserialize<'de> for CompositionProfile {
             bindings: unchecked.bindings,
             preferred_providers: unchecked.preferred_providers,
             denied_effects: unchecked.denied_effects,
+            confinement: unchecked.confinement,
             resolver_decision_budget: unchecked.resolver_decision_budget,
         };
         profile
@@ -187,6 +203,15 @@ impl CompositionProfile {
             .checked_add(self.bindings.len())
             .and_then(|count| count.checked_add(self.preferred_providers.len()))
             .and_then(|count| count.checked_add(self.denied_effects.len()))
+            .and_then(|count| {
+                self.confinement
+                    .as_ref()
+                    .map_or(Some(count), |confinement| {
+                        count
+                            .checked_add(confinement.allow.len())
+                            .and_then(|count| count.checked_add(confinement.deny.len()))
+                    })
+            })
             .ok_or(ProfileResourceBoundsError::SelectionCountOverflow)?;
         if selection_count > MAX_PROFILE_SELECTION_ENTRIES {
             return Err(ProfileResourceBoundsError::TooManySelections {
@@ -194,7 +219,60 @@ impl CompositionProfile {
                 maximum: MAX_PROFILE_SELECTION_ENTRIES,
             });
         }
+        if let Some(confinement) = &self.confinement {
+            confinement
+                .validate()
+                .map_err(ProfileResourceBoundsError::InvalidConfinement)?;
+        }
         Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct ConfinementProfile {
+    pub allow: BTreeSet<String>,
+    pub deny: BTreeSet<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UncheckedConfinementProfile {
+    #[serde(deserialize_with = "deserialize_profile_denied_effects")]
+    allow: BTreeSet<String>,
+    #[serde(deserialize_with = "deserialize_profile_denied_effects")]
+    deny: BTreeSet<String>,
+}
+
+impl<'de> Deserialize<'de> for ConfinementProfile {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let unchecked = UncheckedConfinementProfile::deserialize(deserializer)?;
+        let profile = Self {
+            allow: unchecked.allow,
+            deny: unchecked.deny,
+        };
+        profile.validate().map_err(de::Error::custom)?;
+        Ok(profile)
+    }
+}
+
+impl ConfinementProfile {
+    fn validate(&self) -> Result<(), String> {
+        if self.allow.is_empty() && self.deny.is_empty() {
+            return Err("confinement policy must contain at least one allow or deny effect".into());
+        }
+        for effect in self.allow.iter().chain(&self.deny) {
+            if !CONFINEMENT_EFFECTS.contains(&effect.as_str()) {
+                return Err(format!("unknown confinement effect `{effect}`"));
+            }
+        }
+        Ok(())
+    }
+
+    pub fn permits(&self, effect: &str) -> bool {
+        self.allow.contains(effect) && !self.deny.contains(effect)
     }
 }
 
@@ -274,5 +352,28 @@ runtime-adapter = "runtime-test"
             .unwrap()
             .insert("overflow".into(), serde_json::json!("disabled"));
         assert!(serde_json::from_value::<CompositionProfile>(direct_json).is_err());
+    }
+
+    #[test]
+    fn confinement_policy_is_closed_bounded_and_deny_wins() {
+        let profile = CompositionProfile::from_toml(&format!(
+            "{}\n[confinement]\nallow = [\"read-local\", \"write-local\"]\ndeny = [\"write-local\"]\n",
+            profile_with_components(0)
+        ))
+        .unwrap();
+        let confinement = profile.confinement.unwrap();
+        assert!(confinement.permits("read-local"));
+        assert!(!confinement.permits("write-local"));
+
+        for policy in [
+            "[confinement]\nallow = []\ndeny = []\n",
+            "[confinement]\nallow = [\"ambient-authority\"]\ndeny = []\n",
+            "[confinement]\nallow = [\"read-local\"]\ndeny = []\nmode = \"permissive\"\n",
+        ] {
+            assert!(
+                CompositionProfile::from_toml(&format!("{}\n{policy}", profile_with_components(0)))
+                    .is_err()
+            );
+        }
     }
 }

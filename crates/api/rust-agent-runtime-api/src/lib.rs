@@ -1981,6 +1981,41 @@ pub trait Shutdown: MaybeSendSync {
     fn shutdown(&self) -> RuntimeFuture<'_, Result<(), ShutdownError>>;
 }
 
+/// Opaque lifecycle registration derived from one concrete [`ComponentOutput`] owner.
+#[derive(Clone)]
+pub struct ComponentLifecycle {
+    initializer: Option<Arc<dyn Initializable>>,
+    activator: Option<Arc<dyn Activatable>>,
+    shutdown: Arc<dyn Shutdown>,
+}
+
+impl ComponentLifecycle {
+    #[doc(hidden)]
+    pub fn initializer(&self) -> Option<&Arc<dyn Initializable>> {
+        self.initializer.as_ref()
+    }
+
+    #[doc(hidden)]
+    pub fn activator(&self) -> Option<&Arc<dyn Activatable>> {
+        self.activator.as_ref()
+    }
+
+    #[doc(hidden)]
+    pub fn shutdown(&self) -> &Arc<dyn Shutdown> {
+        &self.shutdown
+    }
+}
+
+impl fmt::Debug for ComponentLifecycle {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ComponentLifecycle")
+            .field("initializer", &self.initializer.is_some())
+            .field("activator", &self.activator.is_some())
+            .finish_non_exhaustive()
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum InitializeError {
     AlreadyInitialized,
@@ -2108,6 +2143,16 @@ impl<T> ComponentOutput<T> {
 
     pub fn shutdown_hook(&self) -> Option<&Arc<dyn Shutdown>> {
         self.shutdown.as_ref()
+    }
+
+    /// Returns an opaque registration whose hooks are guaranteed to belong to this output owner.
+    #[doc(hidden)]
+    pub fn lifecycle(&self) -> Option<ComponentLifecycle> {
+        self.shutdown.as_ref().map(|shutdown| ComponentLifecycle {
+            initializer: self.initializer.clone(),
+            activator: self.activator.clone(),
+            shutdown: shutdown.clone(),
+        })
     }
 
     pub fn into_service(self) -> Arc<T> {
@@ -3259,6 +3304,7 @@ mod tests {
         assert!(stateless.initializer().is_none());
         assert!(stateless.activator().is_none());
         assert!(stateless.shutdown_hook().is_none());
+        assert!(stateless.lifecycle().is_none());
         assert_eq!(Arc::strong_count(stateless.service()), 1);
 
         let initializable = ComponentOutput::initializable(LifecycleOwner);
@@ -3266,18 +3312,30 @@ mod tests {
         assert!(initializable.activator().is_none());
         assert!(initializable.shutdown_hook().is_some());
         assert_eq!(Arc::strong_count(initializable.service()), 3);
+        let initializable_lifecycle = initializable.lifecycle().unwrap();
+        assert!(initializable_lifecycle.initializer().is_some());
+        assert!(initializable_lifecycle.activator().is_none());
+        assert_eq!(Arc::strong_count(initializable.service()), 5);
 
         let activatable = ComponentOutput::activatable(LifecycleOwner);
         assert!(activatable.initializer().is_none());
         assert!(activatable.activator().is_some());
         assert!(activatable.shutdown_hook().is_some());
         assert_eq!(Arc::strong_count(activatable.service()), 3);
+        let activatable_lifecycle = activatable.lifecycle().unwrap();
+        assert!(activatable_lifecycle.initializer().is_none());
+        assert!(activatable_lifecycle.activator().is_some());
+        assert_eq!(Arc::strong_count(activatable.service()), 5);
 
         let managed = ComponentOutput::managed(LifecycleOwner);
         assert!(managed.initializer().is_some());
         assert!(managed.activator().is_some());
         assert!(managed.shutdown_hook().is_some());
         assert_eq!(Arc::strong_count(managed.service()), 4);
+        let managed_lifecycle = managed.lifecycle().unwrap();
+        assert!(managed_lifecycle.initializer().is_some());
+        assert!(managed_lifecycle.activator().is_some());
+        assert_eq!(Arc::strong_count(managed.service()), 7);
     }
 
     #[derive(Debug, Default)]

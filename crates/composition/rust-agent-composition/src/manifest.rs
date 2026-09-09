@@ -12,7 +12,7 @@ use crate::{
     custom_target::CustomTargetSpecRecord,
     generator_input::GeneratorInputCommitment,
     metadata::{BuildRequirements, MAX_CATALOG_OWNERS},
-    profile::{BuildKind, CompositionProfile},
+    profile::{BuildKind, CompositionProfile, ConfinementProfile},
     resolver::{AppHandoff, MAX_RESOLUTION_EFFECT_ENTRIES, Resolution},
     serde_bounds::{
         deserialize_bounded_vec, deserialize_unique_bounded_map, deserialize_unique_bounded_set,
@@ -537,6 +537,8 @@ pub struct SecurityManifest {
     pub compiled_runtime_effects: BTreeSet<String>,
     #[serde(rename = "build-requirements")]
     pub build_requirements: BuildRequirements,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confinement: Option<ConfinementProfile>,
 }
 
 #[derive(Deserialize)]
@@ -562,6 +564,8 @@ struct UncheckedSecurityManifest {
     compiled_runtime_effects: BTreeSet<String>,
     #[serde(rename = "build-requirements")]
     build_requirements: BuildRequirements,
+    #[serde(default)]
+    confinement: Option<ConfinementProfile>,
 }
 
 impl<'de> Deserialize<'de> for SecurityManifest {
@@ -577,6 +581,7 @@ impl<'de> Deserialize<'de> for SecurityManifest {
             host_runtime_effects: unchecked.host_runtime_effects,
             compiled_runtime_effects: unchecked.compiled_runtime_effects,
             build_requirements: unchecked.build_requirements,
+            confinement: unchecked.confinement,
         })
     }
 }

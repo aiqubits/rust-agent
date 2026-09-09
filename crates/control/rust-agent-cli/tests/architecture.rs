@@ -2637,6 +2637,123 @@ fn phase_three_acceptance_mapping_is_complete_and_generated() {
 }
 
 #[test]
+fn phase_four_acceptance_mapping_is_complete_and_generated() {
+    let root = workspace_root();
+    let architecture = fs::read_to_string(root.join("ARCHITECTURE.md")).unwrap();
+    let contract = markdown_section(
+        &architecture,
+        "### Phase 4 — Local Execution Providers",
+        "### Phase 5 — Session Plane",
+    );
+    for required in [
+        "resource-namespace-bootstrap-local",
+        "fs",
+        "subprocess",
+        "shell",
+        "terminal",
+        "sandbox",
+        "permission",
+        "tool-fs / tool-shell",
+        "symlink/TOCTOU",
+        "canonical cwd",
+        "process tree kill",
+        "output budgets",
+        "fail-closed sandbox",
+    ] {
+        assert!(
+            contract.contains(required),
+            "Phase 4 acceptance contract lost `{required}`"
+        );
+    }
+
+    let invariant_map = fs::read_to_string(root.join("docs/invariant-tests.md")).unwrap();
+    let mapped = markdown_section(&invariant_map, "## Phase 4", "## Accepted ADR amendments");
+    for required in [
+        "profile::tests::confinement_policy_is_closed_bounded_and_deny_wins",
+        "catalog::tests::generated_confinement_capabilities_have_exact_consumers_and_no_component_provider",
+        "resolver::tests::phase_four_generated_infrastructure_is_closed_and_confinement_bound",
+        "generator::tests::workspace_dependency_inheritance_is_expanded_for_standalone_snapshots",
+        "rust_agent_agent::tests::agent_scope_initializes_in_dag_order_and_shuts_down_in_reverse_order",
+        "rust_agent_agent::tests::agent_scope_initialization_failure_rolls_back_every_attempted_owner",
+        "generator::tests::phase_four_local_composition_is_deterministic_graph_exact_and_lifecycle_owned",
+        ".github/workflows/ci.yml::quality::Verify Phase 4 acceptance completion",
+        ".github/workflows/ci.yml::quality::Verify Phase 4 generated local composition",
+        ".github/workflows/ci.yml::phase-1b-linux-production::Verify real Phase 4 subprocess confinement and teardown",
+    ] {
+        assert!(
+            mapped.contains(required),
+            "unmapped Phase 4 gate: {required}"
+        );
+    }
+
+    let status = fs::read_to_string(root.join("docs/phase-status.md")).unwrap();
+    assert!(status.contains("| 4 — local execution providers | Complete |"));
+    assert!(!status.contains("Generated lifecycle/namespace/factory/confinement wiring remains"));
+    assert!(status.contains("| 5 — session plane | Not started |"));
+
+    let profile =
+        fs::read_to_string(root.join("tests/fixtures/profiles/phase4-local.toml")).unwrap();
+    for required in [
+        "[confinement]",
+        "allow = [\"read-local\", \"write-local\"]",
+        "network-outbound",
+        "resource-namespace-bootstrap-local = \"enabled\"",
+        "fs-local = \"enabled\"",
+        "subprocess-local = \"enabled\"",
+        "sandbox-linux = \"enabled\"",
+        "shell-local = \"enabled\"",
+        "terminal-local = \"enabled\"",
+        "tool-fs = \"enabled\"",
+        "tool-shell = \"enabled\"",
+        "fs-read-local = \"disabled\"",
+    ] {
+        assert!(
+            profile.contains(required),
+            "Phase 4 profile lost `{required}`"
+        );
+    }
+    assert!(
+        root.join("tests/fixtures/generated-phase4-lifecycle.rs")
+            .is_file()
+    );
+
+    let agent = fs::read_to_string(root.join("crates/api/rust-agent-agent/src/lib.rs")).unwrap();
+    let prepare = agent
+        .find(".prepare_scope(CancellationToken::new())")
+        .unwrap();
+    let identity = agent.find("next_agent\n        .fetch_update").unwrap();
+    assert!(
+        prepare < identity,
+        "resource preparation must precede Agent identity allocation"
+    );
+    for required in [
+        "initialize_agent_scope(scope_lifecycle)",
+        "shutdown_agent_scope(&self.scope_lifecycle)",
+        "shutdown_agent_scope(&agent.scope_lifecycle)",
+        "components.iter().rev()",
+    ] {
+        assert!(
+            agent.contains(required),
+            "Agent lifecycle closure lost `{required}`"
+        );
+    }
+    let manifest =
+        fs::read_to_string(root.join("crates/composition/rust-agent-composition/src/manifest.rs"))
+            .unwrap();
+    assert!(manifest.contains("pub confinement: Option<ConfinementProfile>"));
+
+    let ci = fs::read_to_string(root.join(".github/workflows/ci.yml")).unwrap();
+    for required in [
+        "Verify Phase 4 acceptance completion",
+        "phase_four_acceptance_mapping_is_complete_and_generated -- --exact",
+        "Verify Phase 4 generated local composition",
+        "phase_four_local_composition_is_deterministic_graph_exact_and_lifecycle_owned -- --exact",
+    ] {
+        assert!(ci.contains(required), "missing Phase 4 CI gate: {required}");
+    }
+}
+
+#[test]
 fn phase_one_b_linux_reference_runner_executes_every_real_backend_gate() {
     let ci = fs::read_to_string(workspace_root().join(".github/workflows/ci.yml")).unwrap();
     let (_, phase_job) = ci

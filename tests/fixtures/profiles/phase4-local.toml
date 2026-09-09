@@ -1,0 +1,47 @@
+schema = 1
+name = "phase4-local"
+build-kind = "library"
+target = "x86_64-unknown-linux-gnu"
+environment = "desktop"
+support-tier = "production"
+runtime-adapter = "runtime-tokio"
+resolver-decision-budget = 256
+denied-effects = ["code-execution", "host-bridge", "network-outbound", "persistent-storage", "remote-execution", "secret-access"]
+
+[confinement]
+allow = ["read-local", "write-local"]
+deny = ["code-execution", "network-outbound", "remote-execution", "secret-access"]
+
+[components]
+driver-direct = "disabled"
+driver-tools = "enabled"
+model-replay = "enabled"
+model-host = "disabled"
+permission-default = "enabled"
+tool-executor-guarded = "enabled"
+lifecycle-observer-noop = "disabled"
+resource-namespace-bootstrap-local = "enabled"
+fs-read-local = "disabled"
+fs-local = "enabled"
+tool-fs = "enabled"
+sandbox-linux = "enabled"
+subprocess-local = "enabled"
+shell-local = "enabled"
+terminal-local = "enabled"
+tool-shell = "enabled"
+fixture-driver = "disabled"
+fixture-model = "disabled"
+fixture-model-fallback = "disabled"
+fixture-model-shared = "disabled"
+fixture-fs-read = "disabled"
+fixture-build-proof = "disabled"
+
+[bindings]
+agent-driver = "driver-tools"
+fs-read = "fs-local"
+fs-write = "fs-local"
+resource-namespace-bootstrap = "resource-namespace-bootstrap-local"
+sandbox = "sandbox-linux"
+shell = "shell-local"
+subprocess = "subprocess-local"
+terminal = "terminal-local"

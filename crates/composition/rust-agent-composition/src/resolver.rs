@@ -14,7 +14,10 @@ use crate::{
         MAX_BUILD_REQUIREMENT_ENTRIES_PER_KIND, MAX_CATALOG_DOCUMENT_BYTES, MAX_CATALOG_OWNERS,
         RequirementMode, ScopeKind, SupportTier, TargetSupport,
     },
-    profile::{BuildKind, ComponentChoice, CompositionProfile, ProfileResourceBoundsError},
+    profile::{
+        BuildKind, ComponentChoice, CompositionProfile, ConfinementProfile,
+        ProfileResourceBoundsError,
+    },
     serde_bounds::{deserialize_bounded_vec, deserialize_unique_bounded_set},
     target::{
         MAX_TARGET_PREDICATE_PARTITIONS, MAX_TARGET_TRIPLE_BYTES, PredicateAnalysisBudget, Target,
@@ -24,6 +27,7 @@ use crate::{
 
 pub const MAX_RESOLUTION_SELECTED_COMPONENTS: usize = MAX_CATALOG_OWNERS;
 pub const MAX_RESOLUTION_BINDINGS: usize = 16 * 1_024;
+pub const MAX_RESOLUTION_GENERATED_INFRASTRUCTURE_BINDINGS: usize = 64;
 pub const MAX_RESOLUTION_RESOURCE_NAMESPACE_BINDINGS: usize = 16 * 1_024;
 pub const MAX_RESOLUTION_DIAGNOSTICS: usize = MAX_CATALOG_OWNERS;
 pub const MAX_RESOLUTION_DIAGNOSTIC_REASONS_PER_COMPONENT: usize = MAX_DIAGNOSTIC_REASONS;
@@ -45,6 +49,8 @@ pub struct Resolution {
     #[serde(rename = "selected-components")]
     pub selected_components: Vec<String>,
     pub bindings: Vec<ResolvedBinding>,
+    #[serde(rename = "generated-infrastructure-bindings")]
+    pub generated_infrastructure_bindings: Vec<ResolvedGeneratedInfrastructureBinding>,
     #[serde(rename = "resource-namespace-bindings")]
     pub resource_namespace_bindings: Vec<ResolvedResourceNamespaceBinding>,
     #[serde(rename = "construction-order")]
@@ -61,6 +67,7 @@ pub struct Resolution {
     pub build_requirements: BuildRequirements,
     #[serde(rename = "app-handoff")]
     pub app_handoff: AppHandoff,
+    pub confinement: Option<ConfinementProfile>,
     #[serde(rename = "explored-decisions")]
     pub explored_decisions: u32,
     pub diagnostics: Vec<Diagnostic>,
@@ -81,6 +88,11 @@ struct UncheckedResolution {
     selected_components: Vec<String>,
     #[serde(deserialize_with = "deserialize_resolution_bindings")]
     bindings: Vec<ResolvedBinding>,
+    #[serde(
+        rename = "generated-infrastructure-bindings",
+        deserialize_with = "deserialize_generated_infrastructure_bindings"
+    )]
+    generated_infrastructure_bindings: Vec<ResolvedGeneratedInfrastructureBinding>,
     #[serde(
         rename = "resource-namespace-bindings",
         deserialize_with = "deserialize_resource_namespace_bindings"
@@ -112,6 +124,7 @@ struct UncheckedResolution {
     build_requirements: BuildRequirements,
     #[serde(rename = "app-handoff")]
     app_handoff: AppHandoff,
+    confinement: Option<ConfinementProfile>,
     #[serde(rename = "explored-decisions")]
     explored_decisions: u32,
     #[serde(deserialize_with = "deserialize_resolution_diagnostics")]
@@ -131,6 +144,7 @@ impl<'de> Deserialize<'de> for Resolution {
             target_fact_digest: unchecked.target_fact_digest,
             selected_components: unchecked.selected_components,
             bindings: unchecked.bindings,
+            generated_infrastructure_bindings: unchecked.generated_infrastructure_bindings,
             resource_namespace_bindings: unchecked.resource_namespace_bindings,
             construction_order: unchecked.construction_order,
             runtime_adapter: unchecked.runtime_adapter,
@@ -139,6 +153,7 @@ impl<'de> Deserialize<'de> for Resolution {
             compiled_runtime_effects: unchecked.compiled_runtime_effects,
             build_requirements: unchecked.build_requirements,
             app_handoff: unchecked.app_handoff,
+            confinement: unchecked.confinement,
             explored_decisions: unchecked.explored_decisions,
             diagnostics: unchecked.diagnostics,
         };
@@ -212,6 +227,19 @@ where
     D: Deserializer<'de>,
 {
     deserialize_bounded_vec(deserializer, MAX_RESOLUTION_BINDINGS, "bindings")
+}
+
+fn deserialize_generated_infrastructure_bindings<'de, D>(
+    deserializer: D,
+) -> Result<Vec<ResolvedGeneratedInfrastructureBinding>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    deserialize_bounded_vec(
+        deserializer,
+        MAX_RESOLUTION_GENERATED_INFRASTRUCTURE_BINDINGS,
+        "generated-infrastructure-bindings",
+    )
 }
 
 fn deserialize_resource_namespace_bindings<'de, D>(
@@ -374,6 +402,52 @@ pub struct ResolvedBinding {
     pub effects: BTreeSet<String>,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum GeneratedInfrastructureId {
+    GeneratedAgentScopeFactory,
+    GeneratedSessionEventCatalog,
+    GeneratedPublicationDirectory,
+    GeneratedConfinementIssuer,
+    GeneratedConfinementVerifier,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct ResolvedGeneratedInfrastructureBinding {
+    pub capability: String,
+    pub provider: GeneratedInfrastructureId,
+    pub consumer: String,
+    pub field: String,
+    pub effects: BTreeSet<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UncheckedResolvedGeneratedInfrastructureBinding {
+    capability: String,
+    provider: GeneratedInfrastructureId,
+    consumer: String,
+    field: String,
+    #[serde(deserialize_with = "deserialize_runtime_effects")]
+    effects: BTreeSet<String>,
+}
+
+impl<'de> Deserialize<'de> for ResolvedGeneratedInfrastructureBinding {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let unchecked = UncheckedResolvedGeneratedInfrastructureBinding::deserialize(deserializer)?;
+        Ok(Self {
+            capability: unchecked.capability,
+            provider: unchecked.provider,
+            consumer: unchecked.consumer,
+            field: unchecked.field,
+            effects: unchecked.effects,
+        })
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct UncheckedResolvedBinding {
@@ -508,6 +582,8 @@ pub enum ResolutionError {
     UnsupportedProfileSchema(u32),
     #[error("profile `{0}` has an invalid resolver decision budget")]
     InvalidDecisionBudget(String),
+    #[error("invalid confinement policy: {0}")]
+    InvalidConfinement(String),
     #[error("profile references unknown component `{0}`")]
     UnknownComponent(String),
     #[error("profile references unknown capability `{0}`")]
@@ -569,6 +645,7 @@ struct State {
     selected: BTreeSet<String>,
     visiting: BTreeSet<String>,
     bindings: Vec<ResolvedBinding>,
+    generated_infrastructure_bindings: Vec<ResolvedGeneratedInfrastructureBinding>,
     resource_namespace_bindings: Vec<ResolvedResourceNamespaceBinding>,
     order: Vec<String>,
     reasons: BTreeMap<String, Vec<String>>,
@@ -655,8 +732,37 @@ pub fn resolve(
     selected_components.sort();
     state.bindings.sort_by(compare_resolved_bindings);
     state
+        .generated_infrastructure_bindings
+        .sort_by(compare_generated_infrastructure_bindings);
+    state
         .resource_namespace_bindings
         .sort_by(compare_resource_namespace_bindings);
+
+    let has_confinement_authority = !state.generated_infrastructure_bindings.is_empty();
+    match (has_confinement_authority, profile.confinement.as_ref()) {
+        (true, None) => {
+            return Err(ResolutionError::InvalidConfinement(
+                "a composition with cap:confinement-issuer requires [confinement]".into(),
+            ));
+        }
+        (false, Some(_)) => {
+            return Err(ResolutionError::InvalidConfinement(
+                "[confinement] is only valid when cap:confinement-issuer is selected".into(),
+            ));
+        }
+        (_, Some(confinement)) => {
+            if let Some(effect) = confinement
+                .allow
+                .intersection(&profile.denied_effects)
+                .next()
+            {
+                return Err(ResolutionError::InvalidConfinement(format!(
+                    "allowed effect `{effect}` is denied by the global security policy"
+                )));
+            }
+        }
+        (false, None) => {}
+    }
 
     let mut compiled_runtime_effects = BTreeSet::new();
     let mut build_requirements = BuildRequirements::default();
@@ -744,6 +850,7 @@ pub fn resolve(
         target_fact_digest: target.target_fact_digest.clone(),
         selected_components,
         bindings: state.bindings,
+        generated_infrastructure_bindings: state.generated_infrastructure_bindings,
         resource_namespace_bindings: state.resource_namespace_bindings,
         construction_order: state.order,
         runtime_adapter: adapter.id.clone(),
@@ -752,6 +859,7 @@ pub fn resolve(
         compiled_runtime_effects,
         build_requirements,
         app_handoff,
+        confinement: profile.confinement.clone(),
         explored_decisions: resolver.explored,
         diagnostics,
     };
@@ -810,6 +918,22 @@ impl Resolution {
             return Err(ResolutionError::NonCanonicalResolutionCollection { field: "bindings" });
         }
         verify_collection_limit(
+            "generated-infrastructure-bindings",
+            self.generated_infrastructure_bindings.len(),
+            MAX_RESOLUTION_GENERATED_INFRASTRUCTURE_BINDINGS,
+        )?;
+        if !self
+            .generated_infrastructure_bindings
+            .windows(2)
+            .all(|pair| {
+                compare_generated_infrastructure_bindings(&pair[0], &pair[1]) == Ordering::Less
+            })
+        {
+            return Err(ResolutionError::NonCanonicalResolutionCollection {
+                field: "generated-infrastructure-bindings",
+            });
+        }
+        verify_collection_limit(
             "resource-namespace-bindings",
             self.resource_namespace_bindings.len(),
             MAX_RESOLUTION_RESOURCE_NAMESPACE_BINDINGS,
@@ -855,6 +979,38 @@ impl Resolution {
                 &construction_positions,
                 &self.compiled_runtime_effects,
             )?;
+        }
+        for binding in &self.generated_infrastructure_bindings {
+            let expected_capability = match binding.provider {
+                GeneratedInfrastructureId::GeneratedConfinementIssuer => "cap:confinement-issuer",
+                GeneratedInfrastructureId::GeneratedConfinementVerifier => {
+                    "cap:confinement-verifier"
+                }
+                _ => {
+                    return Err(ResolutionError::InvalidResolutionRoute {
+                        kind: "generated-infrastructure binding",
+                        provider: format!("{:?}", binding.provider),
+                        consumer: binding.consumer.clone(),
+                        message: "provider is not a resolver-owned confinement capability",
+                    });
+                }
+            };
+            if binding.capability != expected_capability || !binding.effects.is_empty() {
+                return Err(ResolutionError::InvalidResolutionRoute {
+                    kind: "generated-infrastructure binding",
+                    provider: format!("{:?}", binding.provider),
+                    consumer: binding.consumer.clone(),
+                    message: "capability or effect stamp does not match generated infrastructure",
+                });
+            }
+            if !construction_positions.contains_key(binding.consumer.as_str()) {
+                return Err(ResolutionError::InvalidResolutionRoute {
+                    kind: "generated-infrastructure binding",
+                    provider: format!("{:?}", binding.provider),
+                    consumer: binding.consumer.clone(),
+                    message: "consumer is not selected",
+                });
+            }
         }
         for binding in &self.resource_namespace_bindings {
             verify_resolution_route(
@@ -960,6 +1116,11 @@ impl Resolution {
             .iter()
             .map(|binding| binding.effects.len())
             .chain(
+                self.generated_infrastructure_bindings
+                    .iter()
+                    .map(|binding| binding.effects.len()),
+            )
+            .chain(
                 self.resource_namespace_bindings
                     .iter()
                     .map(|binding| binding.effects.len()),
@@ -1013,6 +1174,14 @@ impl Resolution {
                 budget.take("binding effect", effect)?;
             }
         }
+        for binding in &self.generated_infrastructure_bindings {
+            budget.take("generated binding capability", &binding.capability)?;
+            budget.take("generated binding consumer", &binding.consumer)?;
+            budget.take("generated binding field", &binding.field)?;
+            for effect in &binding.effects {
+                budget.take("generated binding effect", effect)?;
+            }
+        }
         for binding in &self.resource_namespace_bindings {
             budget.take("resource binding consumer", &binding.consumer)?;
             budget.take(
@@ -1044,6 +1213,11 @@ impl Resolution {
         }
         for effect in &self.compiled_runtime_effects {
             budget.take("compiled runtime effect", effect)?;
+        }
+        if let Some(confinement) = &self.confinement {
+            for effect in confinement.allow.iter().chain(&confinement.deny) {
+                budget.take("confinement effect", effect)?;
+            }
         }
         for executable in &self.build_requirements.executables {
             budget.take("build executable", executable)?;
@@ -1084,12 +1258,35 @@ impl Resolution {
                 ProfileResourceBoundsError::TooManySelections { actual, maximum } => {
                     ResolutionError::ProfileSelectionLimitExceeded { actual, maximum }
                 }
+                ProfileResourceBoundsError::InvalidConfinement(message) => {
+                    ResolutionError::InvalidConfinement(message)
+                }
             })?;
         if profile.schema != 1 {
             return Err(ResolutionError::UnsupportedProfileSchema(profile.schema));
         }
         if profile.resolver_decision_budget == 0 {
             return Err(ResolutionError::InvalidDecisionBudget(profile.name.clone()));
+        }
+        if self.confinement != profile.confinement {
+            return Err(ResolutionError::InvalidResolutionProjection {
+                field: "confinement",
+            });
+        }
+        let has_confinement_authority =
+            self.generated_infrastructure_bindings
+                .iter()
+                .any(|binding| {
+                    matches!(
+                        binding.provider,
+                        GeneratedInfrastructureId::GeneratedConfinementIssuer
+                            | GeneratedInfrastructureId::GeneratedConfinementVerifier
+                    )
+                });
+        if has_confinement_authority != self.confinement.is_some() {
+            return Err(ResolutionError::InvalidConfinement(
+                "confinement policy presence does not match generated authority bindings".into(),
+            ));
         }
         for capability in profile
             .bindings
@@ -1098,6 +1295,14 @@ impl Resolution {
         {
             if capability.starts_with("cap:") {
                 return Err(ResolutionError::PrefixedBindingKey(capability.clone()));
+            }
+            if matches!(
+                capability.as_str(),
+                "confinement-issuer" | "confinement-verifier"
+            ) {
+                return Err(ResolutionError::InvalidConfinement(format!(
+                    "generated-only capability `cap:{capability}` cannot appear in profile provider selections"
+                )));
             }
         }
         for binding in &self.bindings {
@@ -1450,6 +1655,18 @@ fn compare_resource_namespace_bindings(
         ))
 }
 
+fn compare_generated_infrastructure_bindings(
+    left: &ResolvedGeneratedInfrastructureBinding,
+    right: &ResolvedGeneratedInfrastructureBinding,
+) -> Ordering {
+    (&left.consumer, &left.capability, &left.field, left.provider).cmp(&(
+        &right.consumer,
+        &right.capability,
+        &right.field,
+        right.provider,
+    ))
+}
+
 fn compare_resource_namespace_binding_routes(
     left: &ResolvedResourceNamespaceBinding,
     right: &ResolvedResourceNamespaceBinding,
@@ -1533,6 +1750,10 @@ impl Resolver<'_> {
         state.visiting.insert(id.to_owned());
 
         for requirement in &component.requires {
+            if let Some(binding) = generated_infrastructure_binding(component, requirement)? {
+                state.generated_infrastructure_bindings.push(binding);
+                continue;
+            }
             if requirement.mode == RequirementMode::UsesIfPresent {
                 let providers = self.optional_providers(
                     &state,
@@ -1829,6 +2050,43 @@ impl Resolver<'_> {
     }
 }
 
+fn generated_infrastructure_binding(
+    consumer: &ComponentSpec,
+    requirement: &crate::metadata::CapabilityRequirement,
+) -> Result<Option<ResolvedGeneratedInfrastructureBinding>, BranchFailure> {
+    let (provider, required_provide) = match requirement.capability.as_str() {
+        "cap:confinement-issuer" => (
+            GeneratedInfrastructureId::GeneratedConfinementIssuer,
+            "cap:sandbox",
+        ),
+        "cap:confinement-verifier" => (
+            GeneratedInfrastructureId::GeneratedConfinementVerifier,
+            "cap:subprocess",
+        ),
+        _ => return Ok(None),
+    };
+    if requirement.mode != RequirementMode::Required
+        || requirement.key.is_some()
+        || consumer.scope != ScopeKind::Agent
+        || !consumer
+            .provides
+            .iter()
+            .any(|provide| provide.capability == required_provide)
+    {
+        return Err(BranchFailure::Constraint(format!(
+            "generated-only capability `{}` has an invalid consumer route",
+            requirement.capability
+        )));
+    }
+    Ok(Some(ResolvedGeneratedInfrastructureBinding {
+        capability: requirement.capability.clone(),
+        provider,
+        consumer: consumer.id.clone(),
+        field: requirement.field.clone(),
+        effects: BTreeSet::new(),
+    }))
+}
+
 #[derive(Debug)]
 enum BranchFailure {
     Constraint(String),
@@ -1858,6 +2116,9 @@ fn validate_profile(
             ProfileResourceBoundsError::TooManySelections { actual, maximum } => {
                 ResolutionError::ProfileSelectionLimitExceeded { actual, maximum }
             }
+            ProfileResourceBoundsError::InvalidConfinement(message) => {
+                ResolutionError::InvalidConfinement(message)
+            }
         })?;
     if profile.schema != 1 {
         return Err(ResolutionError::UnsupportedProfileSchema(profile.schema));
@@ -1873,6 +2134,14 @@ fn validate_profile(
     for (capability, provider) in profile.bindings.iter().chain(&profile.preferred_providers) {
         if capability.starts_with("cap:") {
             return Err(ResolutionError::PrefixedBindingKey(capability.clone()));
+        }
+        if matches!(
+            capability.as_str(),
+            "confinement-issuer" | "confinement-verifier"
+        ) {
+            return Err(ResolutionError::InvalidConfinement(format!(
+                "generated-only capability `cap:{capability}` cannot appear in profile provider selections"
+            )));
         }
         let full = format!("cap:{capability}");
         if !catalog.capabilities.contains_key(&full) {
@@ -2146,6 +2415,64 @@ mod tests {
             "../../../../tests/fixtures/profiles/minimal.toml"
         ))
         .unwrap()
+    }
+
+    fn phase_four_profile() -> CompositionProfile {
+        CompositionProfile::from_toml(include_str!(
+            "../../../../tests/fixtures/profiles/phase4-local.toml"
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn phase_four_generated_infrastructure_is_closed_and_confinement_bound() {
+        let catalog = fixture_catalog();
+        let profile = phase_four_profile();
+        let resolution = resolve(&catalog, &profile, &target()).unwrap();
+        assert_eq!(resolution.confinement, profile.confinement);
+        assert_eq!(
+            resolution.generated_infrastructure_bindings,
+            [
+                ResolvedGeneratedInfrastructureBinding {
+                    capability: "cap:confinement-issuer".into(),
+                    provider: GeneratedInfrastructureId::GeneratedConfinementIssuer,
+                    consumer: "sandbox-linux".into(),
+                    field: "confinement_issuer".into(),
+                    effects: BTreeSet::new(),
+                },
+                ResolvedGeneratedInfrastructureBinding {
+                    capability: "cap:confinement-verifier".into(),
+                    provider: GeneratedInfrastructureId::GeneratedConfinementVerifier,
+                    consumer: "subprocess-local".into(),
+                    field: "confinement_verifier".into(),
+                    effects: BTreeSet::new(),
+                },
+            ]
+        );
+        assert!(resolution.bindings.iter().all(|binding| {
+            !matches!(
+                binding.capability.as_str(),
+                "cap:confinement-issuer" | "cap:confinement-verifier"
+            )
+        }));
+
+        let mut missing = profile.clone();
+        missing.confinement = None;
+        assert!(matches!(
+            resolve(&catalog, &missing, &target()),
+            Err(ResolutionError::InvalidConfinement(message))
+                if message.contains("requires [confinement]")
+        ));
+
+        let mut forged = profile;
+        forged
+            .bindings
+            .insert("confinement-issuer".into(), "sandbox-linux".into());
+        assert!(matches!(
+            resolve(&catalog, &forged, &target()),
+            Err(ResolutionError::InvalidConfinement(message))
+                if message.contains("generated-only capability")
+        ));
     }
 
     #[test]
@@ -2481,6 +2808,26 @@ mod tests {
         duplicate_effect["bindings"][0]["effects"] =
             serde_json::json!(["forged-effect", "forged-effect"]);
         let error = serde_json::from_value::<Resolution>(duplicate_effect).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("runtime effects contains a duplicate")
+        );
+
+        let generated_binding = ResolvedGeneratedInfrastructureBinding {
+            capability: "cap:confinement-issuer".into(),
+            provider: GeneratedInfrastructureId::GeneratedConfinementIssuer,
+            consumer: "sandbox-linux".into(),
+            field: "confinement_issuer".into(),
+            effects: BTreeSet::new(),
+        };
+        let mut duplicate_generated_effect = serde_json::to_value(generated_binding).unwrap();
+        duplicate_generated_effect["effects"] =
+            serde_json::json!(["forged-effect", "forged-effect"]);
+        let error = serde_json::from_value::<ResolvedGeneratedInfrastructureBinding>(
+            duplicate_generated_effect,
+        )
+        .unwrap_err();
         assert!(
             error
                 .to_string()
