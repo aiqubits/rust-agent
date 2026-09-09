@@ -158,6 +158,13 @@ jobs:
           cargo tree -p rust-agent-shell-local --edges normal --no-default-features
       - name: Verify Phase 4 local shell contracts
         run: cargo test -p rust-agent-shell-local --all-targets --all-features
+      - name: Verify Phase 4 local terminal closure
+        run: |
+          cargo check -p rust-agent-terminal-local --no-default-features
+          cargo check -p rust-agent-terminal-local --all-features
+          cargo tree -p rust-agent-terminal-local --edges normal --no-default-features
+      - name: Verify Phase 4 local terminal contracts
+        run: cargo test -p rust-agent-process -p rust-agent-subprocess-local -p rust-agent-terminal-local --all-targets --all-features
       - name: Verify Phase 4 resource namespace dependency closures
         run: |
           cargo check -p rust-agent-resource-namespace --no-default-features

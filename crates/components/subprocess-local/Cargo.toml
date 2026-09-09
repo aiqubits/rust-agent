@@ -33,12 +33,12 @@ default = []
 [dependencies]
 landlock.workspace = true
 libc.workspace = true
-nix = { workspace = true, features = ["resource"] }
+nix = { workspace = true, features = ["resource", "term"] }
 rust-agent-core = { version = "0.1.0", path = "../../api/rust-agent-core", default-features = false }
 rust-agent-policy = { version = "0.1.0", path = "../../api/rust-agent-policy", default-features = false }
 rust-agent-process = { version = "0.1.0", path = "../../api/rust-agent-process", default-features = false }
 rust-agent-runtime-api = { version = "0.1.0", path = "../../api/rust-agent-runtime-api", default-features = false }
-rustix = { workspace = true, features = ["process"] }
+rustix = { workspace = true, features = ["process", "termios"] }
 seccompy.workspace = true
 serde.workspace = true
 sha2.workspace = true

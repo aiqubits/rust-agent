@@ -1,14 +1,14 @@
 use std::{
     num::{NonZeroU32, NonZeroU64, NonZeroUsize},
-    sync::{Arc, atomic::AtomicUsize, atomic::Ordering},
+    sync::{Arc, Mutex, atomic::AtomicUsize, atomic::Ordering},
     task::{Context, Poll, Waker},
 };
 
-use rust_agent_core::{CanonicalId, SecurityEffects};
+use rust_agent_core::{CanonicalId, Digest, SecurityEffects};
 use rust_agent_fs::AgentPath;
 use rust_agent_policy::process::{
-    BackendPlan, EnforcementPrimitives, FilesystemAccess, MAX_PROCESS_OUTPUT_BYTES, NetworkAccess,
-    ProcessResourceLimits, SandboxPolicy, SandboxPolicyCeiling,
+    BackendKind, BackendPlan, EnforcementPrimitives, FilesystemAccess, MAX_PROCESS_OUTPUT_BYTES,
+    NetworkAccess, ProcessResourceLimits, SandboxPolicy, SandboxPolicyCeiling,
 };
 use rust_agent_runtime_api::CancellationToken;
 
@@ -170,6 +170,105 @@ fn confinement_authority_is_pair_exact_and_policy_digest_bound() {
 struct FixedControl {
     output: ProcessOutput,
     terminations: Arc<AtomicUsize>,
+}
+
+#[derive(Debug)]
+struct InteractiveControl {
+    reads: Mutex<Vec<u8>>,
+    writes: Arc<AtomicUsize>,
+}
+
+impl ProcessControl for InteractiveControl {
+    fn wait(
+        &self,
+        _cancellation: CancellationToken,
+    ) -> ProcessFuture<'_, Result<ProcessOutput, ProcessError>> {
+        Box::pin(async {
+            ProcessOutput::checked(ProcessExit::Code(0), Vec::new(), Vec::new(), 1024)
+        })
+    }
+
+    fn terminate_tree(&self) -> ProcessFuture<'_, Result<(), ProcessError>> {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn write_terminal(&self, data: TerminalBytes) -> ProcessFuture<'_, Result<(), ProcessError>> {
+        self.writes.fetch_add(data.len(), Ordering::SeqCst);
+        Box::pin(async { Ok(()) })
+    }
+
+    fn read_terminal(
+        &self,
+        _request: TerminalReadRequest,
+    ) -> ProcessFuture<'_, Result<Vec<u8>, ProcessError>> {
+        let bytes = self
+            .reads
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        Box::pin(async move { Ok(bytes) })
+    }
+
+    fn resize_terminal(&self, _size: TerminalSize) -> ProcessFuture<'_, Result<(), ProcessError>> {
+        Box::pin(async { Ok(()) })
+    }
+}
+
+#[test]
+fn process_terminal_mode_and_handle_io_are_exact_and_bounded() {
+    let size = TerminalSize::checked(80, 24).unwrap();
+    let spec = ProcessSpec::checked_terminal(
+        ProcessExecutable::absolute("/bin/sh").unwrap(),
+        std::iter::empty(),
+        AgentPath::root(),
+        ProcessEnvironment::empty(),
+        size,
+    )
+    .unwrap();
+    assert_eq!(spec.terminal_size(), Some(size));
+    assert!(spec.stdin().is_empty());
+
+    let report = EnforcementReport::after_child_setup(
+        Digest::from_bytes([3; Digest::LEN]),
+        BackendKind::Linux,
+        EnforcementPrimitives::all(),
+        11,
+    )
+    .unwrap();
+    let writes = Arc::new(AtomicUsize::new(0));
+    let control = Arc::new(InteractiveControl {
+        reads: Mutex::new(b"oversized".to_vec()),
+        writes: Arc::clone(&writes),
+    });
+    let handle = ProcessHandle::from_enforced_terminal(report.clone(), 1024, control).unwrap();
+    assert!(handle.is_terminal());
+    ready(handle.write_terminal(TerminalBytes::checked(b"abc".to_vec()).unwrap())).unwrap();
+    assert_eq!(writes.load(Ordering::SeqCst), 3);
+    assert_eq!(
+        ready(
+            handle.read_terminal(
+                TerminalReadRequest::checked(NonZeroUsize::new(4).unwrap()).unwrap(),
+            )
+        ),
+        Err(ProcessError::ProviderContractViolation)
+    );
+    ready(handle.resize_terminal(TerminalSize::checked(132, 40).unwrap())).unwrap();
+
+    let captured = ProcessHandle::from_enforced(
+        report,
+        1024,
+        Arc::new(FixedControl {
+            output: ProcessOutput::checked(ProcessExit::Code(0), Vec::new(), Vec::new(), 1024)
+                .unwrap(),
+            terminations: Arc::new(AtomicUsize::new(0)),
+        }),
+    )
+    .unwrap();
+    assert!(!captured.is_terminal());
+    assert_eq!(
+        ready(captured.write_terminal(TerminalBytes::checked(Vec::new()).unwrap())),
+        Err(ProcessError::InteractiveIoUnavailable)
+    );
 }
 
 impl ProcessControl for FixedControl {

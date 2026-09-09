@@ -191,6 +191,10 @@ impl ConfinedProcessSpec {
         self.effective_policy.limits().max_output_bytes().get()
     }
 
+    pub(crate) const fn is_terminal(&self) -> bool {
+        self.process.terminal_size().is_some()
+    }
+
     pub(crate) const fn backend_kind(&self) -> rust_agent_policy::process::BackendKind {
         self.backend_plan.kind()
     }

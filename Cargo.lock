@@ -1361,6 +1361,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "rust-agent-terminal-local"
+version = "0.1.0"
+dependencies = [
+ "rust-agent-core",
+ "rust-agent-fs",
+ "rust-agent-policy",
+ "rust-agent-process",
+ "rust-agent-runtime-api",
+ "rust-agent-sandbox-linux",
+ "serde",
+]
+
+[[package]]
 name = "rust-agent-tool-executor-guarded"
 version = "0.1.0"
 dependencies = [

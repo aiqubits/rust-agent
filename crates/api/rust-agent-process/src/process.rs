@@ -6,7 +6,10 @@ use rust_agent_policy::process::{
 };
 use rust_agent_runtime_api::CancellationToken;
 
-use crate::{ConfinedProcessSpec, ProcessFuture, ProcessSpec};
+use crate::{
+    ConfinedProcessSpec, ProcessFuture, ProcessSpec, TerminalBytes, TerminalReadRequest,
+    TerminalSize,
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProcessExit {
@@ -122,12 +125,28 @@ pub trait ProcessControl: MaybeSendSync {
     ) -> ProcessFuture<'_, Result<ProcessOutput, ProcessError>>;
 
     fn terminate_tree(&self) -> ProcessFuture<'_, Result<(), ProcessError>>;
+
+    fn write_terminal(&self, _data: TerminalBytes) -> ProcessFuture<'_, Result<(), ProcessError>> {
+        Box::pin(async { Err(ProcessError::InteractiveIoUnavailable) })
+    }
+
+    fn read_terminal(
+        &self,
+        _request: TerminalReadRequest,
+    ) -> ProcessFuture<'_, Result<Vec<u8>, ProcessError>> {
+        Box::pin(async { Err(ProcessError::InteractiveIoUnavailable) })
+    }
+
+    fn resize_terminal(&self, _size: TerminalSize) -> ProcessFuture<'_, Result<(), ProcessError>> {
+        Box::pin(async { Err(ProcessError::InteractiveIoUnavailable) })
+    }
 }
 
 /// Owned process mechanics returned only after the provider's setup handshake succeeds.
 pub struct ProcessHandle {
     report: EnforcementReport,
     output_budget: usize,
+    terminal: bool,
     control: Arc<dyn ProcessControl>,
 }
 
@@ -147,8 +166,23 @@ impl ProcessHandle {
         Ok(Self {
             report,
             output_budget,
+            terminal: false,
             control,
         })
+    }
+
+    #[doc(hidden)]
+    pub fn from_enforced_terminal<T>(
+        report: EnforcementReport,
+        output_budget: usize,
+        control: Arc<T>,
+    ) -> Result<Self, ProcessError>
+    where
+        T: ProcessControl + 'static,
+    {
+        let mut handle = Self::from_enforced(report, output_budget, control)?;
+        handle.terminal = true;
+        Ok(handle)
     }
 
     pub const fn enforcement_report(&self) -> &EnforcementReport {
@@ -157,6 +191,10 @@ impl ProcessHandle {
 
     pub const fn output_budget(&self) -> usize {
         self.output_budget
+    }
+
+    pub const fn is_terminal(&self) -> bool {
+        self.terminal
     }
 
     pub fn wait(
@@ -184,6 +222,44 @@ impl ProcessHandle {
     pub fn terminate_tree(&self) -> ProcessFuture<'_, Result<(), ProcessError>> {
         self.control.terminate_tree()
     }
+
+    pub fn write_terminal(
+        &self,
+        data: TerminalBytes,
+    ) -> ProcessFuture<'_, Result<(), ProcessError>> {
+        if !self.terminal {
+            return Box::pin(async { Err(ProcessError::InteractiveIoUnavailable) });
+        }
+        self.control.write_terminal(data)
+    }
+
+    pub fn read_terminal(
+        &self,
+        request: TerminalReadRequest,
+    ) -> ProcessFuture<'_, Result<TerminalBytes, ProcessError>> {
+        if !self.terminal {
+            return Box::pin(async { Err(ProcessError::InteractiveIoUnavailable) });
+        }
+        let max_bytes = request.max_bytes().get();
+        let future = self.control.read_terminal(request);
+        Box::pin(async move {
+            let bytes = future.await?;
+            if bytes.len() > max_bytes {
+                return Err(ProcessError::ProviderContractViolation);
+            }
+            TerminalBytes::checked(bytes).map_err(|_| ProcessError::ProviderContractViolation)
+        })
+    }
+
+    pub fn resize_terminal(
+        &self,
+        size: TerminalSize,
+    ) -> ProcessFuture<'_, Result<(), ProcessError>> {
+        if !self.terminal {
+            return Box::pin(async { Err(ProcessError::InteractiveIoUnavailable) });
+        }
+        self.control.resize_terminal(size)
+    }
 }
 
 impl fmt::Debug for ProcessHandle {
@@ -192,6 +268,7 @@ impl fmt::Debug for ProcessHandle {
             .debug_struct("ProcessHandle")
             .field("report", &self.report)
             .field("output_budget", &self.output_budget)
+            .field("terminal", &self.terminal)
             .finish_non_exhaustive()
     }
 }
@@ -354,6 +431,7 @@ impl SubprocessBinding {
         let expected_backend = spec.backend_kind();
         let required_primitives = spec.required_primitives();
         let expected_output_budget = spec.output_budget();
+        let expected_terminal = spec.is_terminal();
         let future = self.provider.spawn(spec, cancellation);
         Box::pin(async move {
             let handle = future.await?;
@@ -362,6 +440,7 @@ impl SubprocessBinding {
                 || report.backend() != expected_backend
                 || !report.applied_primitives().contains(required_primitives)
                 || handle.output_budget() != expected_output_budget
+                || handle.is_terminal() != expected_terminal
             {
                 handle.terminate_tree().await?;
                 return Err(ProcessError::InvalidEnforcementReport);
@@ -433,6 +512,8 @@ pub enum ProcessError {
     WaitFailed,
     TerminationFailed,
     OutputBudgetExceeded,
+    InteractiveIoUnavailable,
+    InteractiveIoFailed,
     InvalidEnforcementReport,
     InvalidProviderIdentity,
     ProviderContractViolation,
@@ -463,6 +544,8 @@ impl fmt::Display for ProcessError {
             Self::WaitFailed => "process wait failed",
             Self::TerminationFailed => "process tree termination failed",
             Self::OutputBudgetExceeded => "process output exceeds its shared byte budget",
+            Self::InteractiveIoUnavailable => "process has no interactive terminal",
+            Self::InteractiveIoFailed => "interactive process I/O failed",
             Self::InvalidEnforcementReport => "process enforcement report is invalid",
             Self::InvalidProviderIdentity => "subprocess provider identity is invalid",
             Self::ProviderContractViolation => "subprocess provider violated its binding contract",

@@ -1,7 +1,7 @@
 {
   "schema": 2,
   "algorithm": "sha256-rust-agent-composition-v2",
-  "composition-hash": "c14796881f972e0241d25acc1fc578e032221f2954f8b99a7ceba00f9556ac83",
+  "composition-hash": "24f892be8ff63100c9e1197a6075ad06b8b39f69e2784991f8c9b47f05c0467d",
   "build-kind": "library",
   "profile-name": "fixture-minimal",
   "normalized-profile": {
@@ -1472,6 +1472,72 @@
           "cargo-features": []
         },
         {
+          "id": "terminal-local",
+          "package": "rust-agent-terminal-local",
+          "package-path": "crates/components/terminal-local",
+          "scope": "agent",
+          "factory": "rust_agent_terminal_local::build",
+          "dependencies-type": "rust_agent_terminal_local::Dependencies",
+          "config-type": "rust_agent_terminal_local::Config",
+          "config-source": "file",
+          "config-key": "terminal-local",
+          "resource-namespace-preparer": null,
+          "prepared-config-type": null,
+          "targets": "cfg(target_os = \"linux\")",
+          "target-support": [
+            {
+              "predicate": "cfg(target_os = \"linux\")",
+              "tier": "production"
+            }
+          ],
+          "lifecycle-effects": [],
+          "provides": [
+            {
+              "capability": "cap:terminal",
+              "key": null,
+              "priority": 100,
+              "order": 0,
+              "layer": "provider",
+              "resource-namespace": {
+                "mode": "none"
+              },
+              "effects": [
+                "process-exec",
+                "read-local",
+                "write-local"
+              ]
+            }
+          ],
+          "requires": [
+            {
+              "capability": "cap:subprocess",
+              "mode": "required",
+              "field": "subprocess",
+              "key": null
+            },
+            {
+              "capability": "cap:sandbox",
+              "mode": "required",
+              "field": "sandbox",
+              "key": null
+            }
+          ],
+          "conflicts": [],
+          "security": [
+            "process-exec",
+            "read-local",
+            "write-local"
+          ],
+          "runtime-primitives": [],
+          "build-requirements": {
+            "executables": [],
+            "read-inputs": [],
+            "environment": []
+          },
+          "app-coexistence": null,
+          "cargo-features": []
+        },
+        {
           "id": "tool-executor-guarded",
           "package": "rust-agent-tool-executor-guarded",
           "package-path": "crates/components/tool-executor-guarded",
@@ -1767,7 +1833,7 @@
         }
       ]
     },
-    "normalized-catalog-digest": "55975486abac9cdb5866246b28ddfa23454b7ab656a2c536ac4ac8a6e9894497",
+    "normalized-catalog-digest": "4cc8525baaf5ed5861ddb3162cfecaadebe9da571f931764b2e961a5622d151f",
     "catalog-trust-input": {
       "schema": 1,
       "normalized-policy": {
@@ -2115,7 +2181,7 @@
         "environment": []
       }
     },
-    "identity-digest": "19d41a383cda3e8aee49fa2f0f6bdc241fdb8fe28e55648b1b2b0d10582277b4"
+    "identity-digest": "584e3e3c589fd6bc6ce21182820d85fe1034957947d47af2d90c299cd37cee91"
   },
   "custom-target-spec": null,
   "selected-components": [
@@ -2358,6 +2424,13 @@
       },
       {
         "component": "subprocess-local",
+        "conclusion": "excluded",
+        "reasons": [
+          "NotRequired"
+        ]
+      },
+      {
+        "component": "terminal-local",
         "conclusion": "excluded",
         "reasons": [
           "NotRequired"
@@ -3564,12 +3637,12 @@
     },
     {
       "path": "generator-inputs.json",
-      "digest": "f46961861eb915126cf6a38b581d9df5dbcf6ecebe3dc4e707c4b8e40bdc7dc3",
-      "bytes": 68064
+      "digest": "7e2e3cc069cc12d9e29626879f984069d277ce080a4dad2ac764a31ce51b2d54",
+      "bytes": 69941
     },
     {
       "path": "src/lib.rs",
-      "digest": "ad72d2a2abdbd0812fcda93bf4efcb0798ea6ff213659681ceccc5b3a3a19488",
+      "digest": "fcd6a1c6cae81cb47a61f1c035632dd0e18a5b9d409722db16bd76e1a618d90c",
       "bytes": 3591
     },
     {

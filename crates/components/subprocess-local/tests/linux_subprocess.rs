@@ -18,6 +18,7 @@ use rust_agent_policy::process::{
 use rust_agent_process::{
     ConfinementAuthority, ConfinementIssuerBinding, ConfinementVerifierBinding, ProcessEnvironment,
     ProcessError, ProcessExecutable, ProcessExit, ProcessSpec, SandboxBinding, SubprocessBinding,
+    TerminalBytes, TerminalReadRequest, TerminalSize,
 };
 use rust_agent_runtime_api::{
     CancellationToken, RuntimePrimitiveBindings, RuntimePrimitiveKind, Shutdown,
@@ -71,6 +72,17 @@ fn process(executable: &str, arguments: &[&str], input: &[u8]) -> ProcessSpec {
         AgentPath::root(),
         ProcessEnvironment::empty(),
         input.to_vec(),
+    )
+    .unwrap()
+}
+
+fn terminal_process(executable: &str, size: TerminalSize) -> ProcessSpec {
+    ProcessSpec::checked_terminal(
+        ProcessExecutable::absolute(executable).unwrap(),
+        std::iter::empty(),
+        AgentPath::root(),
+        ProcessEnvironment::checked([("TERM".to_owned(), "xterm".to_owned())]).unwrap(),
+        size,
     )
     .unwrap()
 }
@@ -193,6 +205,60 @@ fn real_linux_subprocess_enforces_anchor_handshake_budget_and_cancellation() {
         ProcessError::Cancelled
     );
     assert_eq!(block_on(handle.terminate_tree()), Ok(()));
+
+    let shell = fs::canonicalize("/bin/sh").unwrap();
+    let initial_size = TerminalSize::checked(80, 24).unwrap();
+    let confined = block_on(sandbox.confine(
+        terminal_process(shell.to_str().unwrap(), initial_size),
+        ceiling.clone(),
+    ))
+    .unwrap();
+    let handle = block_on(subprocess.spawn(confined, CancellationToken::new())).unwrap();
+    assert!(handle.is_terminal());
+    block_on(handle.resize_terminal(TerminalSize::checked(101, 31).unwrap())).unwrap();
+    block_on(
+        handle.write_terminal(
+            TerminalBytes::checked(
+                b"test -t 0 && test -t 1 && test -t 2 && echo tty-ok; stty size; exit\n".to_vec(),
+            )
+            .unwrap(),
+        ),
+    )
+    .unwrap();
+    let mut terminal_output = Vec::new();
+    for _ in 0..100 {
+        let bytes = block_on(handle.read_terminal(
+            TerminalReadRequest::checked(NonZeroUsize::new(4096).unwrap()).unwrap(),
+        ))
+        .unwrap();
+        terminal_output.extend_from_slice(bytes.as_slice());
+        if terminal_output
+            .windows(b"tty-ok".len())
+            .any(|window| window == b"tty-ok")
+            && terminal_output
+                .windows(b"31 101".len())
+                .any(|window| window == b"31 101")
+        {
+            break;
+        }
+        thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(
+        terminal_output
+            .windows(b"tty-ok".len())
+            .any(|window| window == b"tty-ok")
+    );
+    assert!(
+        terminal_output
+            .windows(b"31 101".len())
+            .any(|window| window == b"31 101")
+    );
+    assert_eq!(
+        block_on(handle.wait(CancellationToken::new()))
+            .unwrap()
+            .exit(),
+        ProcessExit::Code(0)
+    );
 
     let confined =
         block_on(sandbox.confine(process("/usr/bin/sleep", &["10"], b""), ceiling)).unwrap();

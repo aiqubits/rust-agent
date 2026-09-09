@@ -1749,6 +1749,192 @@ fn phase_four_local_shell_is_a_pure_confinement_adapter() {
 }
 
 #[test]
+fn phase_four_local_terminal_is_confined_bounded_and_pty_backed() {
+    let root = workspace_root();
+    let path = root.join("crates/components/terminal-local");
+    let manifest_text = fs::read_to_string(path.join("Cargo.toml")).unwrap();
+    let manifest: Value = toml::from_str(&manifest_text).unwrap();
+    let metadata = &manifest["package"]["metadata"]["rust-agent"];
+    assert_eq!(metadata["id"].as_str(), Some("terminal-local"));
+    assert_eq!(metadata["scope"].as_str(), Some("agent"));
+    assert_eq!(metadata["config-source"].as_str(), Some("file"));
+    assert_eq!(metadata["support"].as_str(), Some("production"));
+    assert!(metadata["lifecycle-effects"].as_array().unwrap().is_empty());
+    assert!(
+        metadata["runtime-primitives"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    let provides = metadata["provides"].as_array().unwrap();
+    assert_eq!(provides.len(), 1);
+    assert_eq!(provides[0]["capability"].as_str(), Some("cap:terminal"));
+    assert_eq!(
+        provides[0]["effects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>(),
+        ["process-exec", "read-local", "write-local"]
+    );
+    let requires = metadata["requires"].as_array().unwrap();
+    assert_eq!(requires.len(), 2);
+    assert_eq!(requires[0]["capability"].as_str(), Some("cap:subprocess"));
+    assert_eq!(requires[0]["mode"].as_str(), Some("required"));
+    assert_eq!(requires[0]["field"].as_str(), Some("subprocess"));
+    assert_eq!(requires[1]["capability"].as_str(), Some("cap:sandbox"));
+    assert_eq!(requires[1]["mode"].as_str(), Some("required"));
+    assert_eq!(requires[1]["field"].as_str(), Some("sandbox"));
+
+    let source = fs::read_to_string(path.join("src/lib.rs")).unwrap();
+    for required in [
+        "pub subprocess: SubprocessBinding",
+        "pub sandbox: SandboxBinding",
+        "ProcessSpec::checked_terminal(",
+        ".confine(process, spec.policy().clone())",
+        ".spawn(confined, cancellation.clone())",
+        ".write_terminal(data)",
+        ".read_terminal(request)",
+        ".resize_terminal(size)",
+        "impl Initializable for LocalTerminal",
+        "impl Shutdown for LocalTerminal",
+        "MAX_OPEN_TERMINALS",
+        "terminal-local declares no runtime primitives",
+    ] {
+        assert!(
+            source.contains(required),
+            "terminal-local is missing `{required}`"
+        );
+    }
+    let process = source.find("ProcessSpec::checked_terminal(").unwrap();
+    let confine = source
+        .find(".confine(process, spec.policy().clone())")
+        .unwrap();
+    let spawn = source
+        .find(".spawn(confined, cancellation.clone())")
+        .unwrap();
+    assert!(process < confine && confine < spawn);
+    let production = source.split("#[cfg(all(test").next().unwrap();
+    for forbidden in [
+        "std::process",
+        "std::fs",
+        "unsafe",
+        "ConfinementIssuer",
+        "ConfinementVerifier",
+        "rust_agent_subprocess_local",
+        "rust_agent_sandbox_linux",
+        "libc",
+        "nix",
+        "rustix",
+    ] {
+        assert!(
+            !production.contains(forbidden),
+            "terminal-local production source contains forbidden boundary `{forbidden}`"
+        );
+    }
+
+    let process_api =
+        fs::read_to_string(root.join("crates/api/rust-agent-process/src/process.rs")).unwrap();
+    let process_spec =
+        fs::read_to_string(root.join("crates/api/rust-agent-process/src/spec.rs")).unwrap();
+    let subprocess =
+        fs::read_to_string(root.join("crates/components/subprocess-local/src/lib.rs")).unwrap();
+    let launcher =
+        fs::read_to_string(root.join("crates/components/subprocess-local/src/launcher.rs"))
+            .unwrap();
+    for required in [
+        "from_enforced_terminal",
+        "handle.is_terminal() != expected_terminal",
+        "InteractiveIoUnavailable",
+        "ProviderContractViolation",
+    ] {
+        assert!(process_api.contains(required));
+    }
+    assert!(process_spec.contains("pub fn checked_terminal"));
+    for required in [
+        "nix::pty::openpty",
+        "spawn_terminal_reader",
+        "tcsetwinsize",
+        "kill_process_group(process_group, Signal::KILL)",
+    ] {
+        assert!(subprocess.contains(required));
+    }
+    for required in [
+        "--terminal-fd",
+        "ioctl_tiocsctty",
+        "tcgetwinsize",
+        "Stdio::from(terminal)",
+    ] {
+        assert!(launcher.contains(required));
+    }
+    assert!(!subprocess.contains("unsafe"));
+    assert!(!launcher.contains("unsafe"));
+
+    let tree = Command::new("cargo")
+        .args([
+            "tree",
+            "-p",
+            "rust-agent-terminal-local",
+            "--edges",
+            "normal",
+            "--no-default-features",
+        ])
+        .current_dir(&root)
+        .output()
+        .unwrap();
+    assert!(tree.status.success());
+    let tree = String::from_utf8(tree.stdout).unwrap();
+    for forbidden in [
+        "AINS",
+        "rust-agent-agent",
+        "rust-agent-subprocess-local",
+        "rust-agent-sandbox-linux",
+        "rust-agent-fs-local",
+        "rust-agent-runtime-tokio",
+        "tokio",
+        "libc",
+        "nix",
+        "rustix",
+    ] {
+        assert!(
+            !tree.contains(forbidden),
+            "terminal-local resolved forbidden dependency `{forbidden}`:\n{tree}"
+        );
+    }
+
+    let invariant_map = fs::read_to_string(root.join("docs/invariant-tests.md")).unwrap();
+    let mapped = markdown_section(&invariant_map, "## Phase 4", "## Accepted ADR amendments");
+    for required in [
+        "rust_agent_process::tests::process_terminal_mode_and_handle_io_are_exact_and_bounded",
+        "rust_agent_terminal_local::tests::opens_only_a_confined_interactive_process_and_delegates_terminal_io",
+        "rust_agent_terminal_local::tests::lifecycle_cancellation_and_sandbox_rejection_stop_before_spawn",
+        "rust_agent_terminal_local::tests::captured_handle_drift_is_terminated_before_a_terminal_id_escapes",
+        "rust_agent_terminal_local::tests::cancellation_racing_with_spawn_terminates_before_a_terminal_id_escapes",
+        "rust_agent_terminal_local::tests::dropped_open_future_releases_its_bounded_reservation",
+        "rust_agent_terminal_local::tests::open_capacity_and_identity_exhaustion_fail_before_subprocess_effects",
+        "rust_agent_terminal_local::tests::factory_is_io_free_bounded_and_runtime_exact",
+        "architecture::phase_four_local_terminal_is_confined_bounded_and_pty_backed",
+    ] {
+        assert!(
+            mapped.contains(required),
+            "unmapped Phase 4.8 evidence: {required}"
+        );
+    }
+    let ci = fs::read_to_string(root.join(".github/workflows/ci.yml")).unwrap();
+    for required in [
+        "Verify Phase 4 local terminal closure",
+        "Verify Phase 4 local terminal contracts",
+        "Verify real Phase 4 subprocess confinement and teardown",
+    ] {
+        assert!(
+            ci.contains(required),
+            "missing Phase 4.8 CI gate `{required}`"
+        );
+    }
+}
+
+#[test]
 fn rust_toolchain_version_is_pinned_and_synchronized() {
     let root = workspace_root();
     assert_eq!(env!("CARGO_PKG_RUST_VERSION"), PINNED_RUST_VERSION);

@@ -3,6 +3,7 @@
 mod protocol;
 
 use std::{
+    collections::VecDeque,
     fs::File,
     io::{self, Read, Seek, SeekFrom, Write},
     os::fd::{AsRawFd as _, OwnedFd},
@@ -23,7 +24,7 @@ use rust_agent_policy::process::{BackendKind, FilesystemAccess, NetworkAccess};
 use rust_agent_process::{
     ConfinedProcessSpec, ConfinementVerifierBinding, EnforcementReport, ProcessControl,
     ProcessError, ProcessExit, ProcessFuture, ProcessHandle, ProcessOutput, Subprocess,
-    VerifiedProcessSpec,
+    TerminalBytes, TerminalReadRequest, TerminalSize, VerifiedProcessSpec,
 };
 use rust_agent_runtime_api::{
     CancellationToken, ComponentBuildError, ComponentOutput, Initializable, InitializeError,
@@ -31,9 +32,10 @@ use rust_agent_runtime_api::{
     ShutdownError,
 };
 use rustix::{
-    fs::{CWD, FileType, Mode, OFlags, ResolveFlags, fstat, openat2},
+    fs::{CWD, FileType, Mode, OFlags, ResolveFlags, fcntl_getfl, fcntl_setfl, fstat, openat2},
     io::{Errno, FdFlags, dup, fcntl_setfd},
     process::{Pid, Signal, kill_process_group},
+    termios::{Winsize as RustixWinsize, tcsetwinsize},
 };
 use serde::Deserialize;
 use sha2::{Digest as _, Sha256};
@@ -275,6 +277,31 @@ impl LocalSubprocess {
                 inherited.push(descriptor);
             }
 
+            let terminal = verified
+                .process()
+                .terminal_size()
+                .map(|size| {
+                    let window = nix::pty::Winsize {
+                        ws_row: size.rows(),
+                        ws_col: size.columns(),
+                        ws_xpixel: 0,
+                        ws_ypixel: 0,
+                    };
+                    let pty = nix::pty::openpty(Some(&window), None)
+                        .map_err(|_| ProcessError::SpawnFailed)?;
+                    let writer =
+                        File::from(dup(&pty.master).map_err(|_| ProcessError::SpawnFailed)?);
+                    let reader = File::from(pty.master);
+                    let slave =
+                        inheritable_duplicate(&pty.slave).map_err(|_| ProcessError::SpawnFailed)?;
+                    Ok::<_, ProcessError>((size, reader, writer, slave))
+                })
+                .transpose()?;
+            let mut terminal_fd = None;
+            if let Some((_, _, _, slave)) = &terminal {
+                terminal_fd = Some(slave.as_raw_fd());
+            }
+
             let arguments = sandbox_arguments(
                 &verified,
                 launcher_fd,
@@ -283,6 +310,7 @@ impl LocalSubprocess {
                 &runtime_descriptors,
                 &allowed_executable_descriptors,
                 &config.runtime_symlinks,
+                terminal_fd,
             );
             let mut argument_file = tempfile::tempfile().map_err(|_| ProcessError::SpawnFailed)?;
             write_nul_arguments(&mut argument_file, &arguments)
@@ -318,14 +346,37 @@ impl LocalSubprocess {
             let (setup_sender, setup_receiver) = mpsc::sync_channel(1);
             let stdout_reader = spawn_stdout_reader(stdout, Arc::clone(&output), setup_sender);
             let stderr_reader = spawn_output_reader(stderr, Arc::clone(&output), Stream::Stderr);
-            let stdin_writer = spawn_stdin_writer(stdin, verified.process().stdin().to_vec());
+            let (stdin_writer, terminal_io, terminal_reader) =
+                if let Some((_size, reader, writer, _slave)) = terminal {
+                    drop(stdin);
+                    let terminal_io = Arc::new(TerminalIo::new(writer));
+                    let reader = spawn_terminal_reader(
+                        reader,
+                        Arc::clone(&terminal_io),
+                        Arc::clone(&output),
+                        process_group,
+                    );
+                    (None, Some(terminal_io), Some(reader))
+                } else {
+                    (
+                        Some(spawn_stdin_writer(
+                            stdin,
+                            verified.process().stdin().to_vec(),
+                        )),
+                        None,
+                        None,
+                    )
+                };
             let control = Arc::new(LocalControl {
                 child: Mutex::new(Some(child)),
                 process_group,
                 output,
                 stdout_reader: Mutex::new(Some(stdout_reader)),
                 stderr_reader: Mutex::new(Some(stderr_reader)),
-                stdin_writer: Mutex::new(Some(stdin_writer)),
+                stdin_writer: Mutex::new(stdin_writer),
+                terminal_reader: Mutex::new(terminal_reader),
+                terminal: terminal_io,
+                output_budget,
                 runtime: self.runtime.clone(),
                 deadline,
                 wait_started: AtomicBool::new(false),
@@ -359,7 +410,11 @@ impl LocalSubprocess {
                     acknowledgement.applied_primitives,
                     process_id,
                 )?;
-                ProcessHandle::from_enforced(report, output_budget, control)
+                if verified.process().terminal_size().is_some() {
+                    ProcessHandle::from_enforced_terminal(report, output_budget, control)
+                } else {
+                    ProcessHandle::from_enforced(report, output_budget, control)
+                }
             }
             Ok(_) => {
                 control.terminate_blocking();
@@ -616,6 +671,24 @@ impl OutputState {
         }
     }
 
+    fn reserve_terminal(&self, bytes: usize) -> bool {
+        let mut state = self
+            .captured
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.exceeded {
+            return false;
+        }
+        if bytes > state.remaining {
+            state.exceeded = true;
+            drop(state);
+            self.record_cause(FirstCause::Output);
+            return false;
+        }
+        state.remaining -= bytes;
+        true
+    }
+
     #[cfg(test)]
     fn exceeded(&self) -> bool {
         self.captured
@@ -704,6 +777,108 @@ fn spawn_stdin_writer(mut stdin: impl Write + Send + 'static, input: Vec<u8>) ->
 }
 
 #[derive(Debug)]
+struct TerminalBuffer {
+    bytes: VecDeque<u8>,
+}
+
+#[derive(Debug)]
+struct TerminalIo {
+    writer: Mutex<File>,
+    buffer: Mutex<TerminalBuffer>,
+}
+
+impl TerminalIo {
+    fn new(writer: File) -> Self {
+        Self {
+            writer: Mutex::new(writer),
+            buffer: Mutex::new(TerminalBuffer {
+                bytes: VecDeque::new(),
+            }),
+        }
+    }
+
+    fn push(&self, bytes: &[u8], output: &OutputState) -> bool {
+        if !output.reserve_terminal(bytes.len()) {
+            return false;
+        }
+        let mut state = self
+            .buffer
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.bytes.extend(bytes.iter().copied());
+        true
+    }
+
+    fn read(&self, max_bytes: usize) -> Vec<u8> {
+        let mut state = self
+            .buffer
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let count = max_bytes.min(state.bytes.len());
+        state.bytes.drain(..count).collect()
+    }
+
+    fn write_some(&self, bytes: &[u8]) -> Result<Option<usize>, ProcessError> {
+        let mut writer = self
+            .writer
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let flags = fcntl_getfl(&*writer).map_err(|_| ProcessError::InteractiveIoFailed)?;
+        fcntl_setfl(&*writer, flags | OFlags::NONBLOCK)
+            .map_err(|_| ProcessError::InteractiveIoFailed)?;
+        let result = writer.write(bytes);
+        fcntl_setfl(&*writer, flags).map_err(|_| ProcessError::InteractiveIoFailed)?;
+        match result {
+            Ok(0) => Err(ProcessError::InteractiveIoFailed),
+            Ok(written) => Ok(Some(written)),
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => Ok(None),
+            Err(_) => Err(ProcessError::InteractiveIoFailed),
+        }
+    }
+
+    fn resize(&self, size: TerminalSize) -> Result<(), ProcessError> {
+        let window = RustixWinsize {
+            ws_row: size.rows(),
+            ws_col: size.columns(),
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        };
+        let writer = self
+            .writer
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        tcsetwinsize(&*writer, window).map_err(|_| ProcessError::InteractiveIoFailed)
+    }
+}
+
+fn spawn_terminal_reader(
+    mut reader: File,
+    terminal: Arc<TerminalIo>,
+    output: Arc<OutputState>,
+    process_group: Pid,
+) -> ReaderThread {
+    thread::spawn(move || {
+        let mut buffer = [0_u8; 8192];
+        loop {
+            match reader.read(&mut buffer) {
+                Ok(0) => return Ok(()),
+                Ok(count) if terminal.push(&buffer[..count], &output) => {}
+                Ok(_) => {
+                    output.record_cause(FirstCause::Output);
+                    let _ = kill_process_group(process_group, Signal::KILL);
+                    return Ok(());
+                }
+                Err(error) if error.raw_os_error() == Some(libc::EIO) => return Ok(()),
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    thread::sleep(POLL_INTERVAL);
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    })
+}
+
+#[derive(Debug)]
 struct LocalControl {
     child: Mutex<Option<Child>>,
     process_group: Pid,
@@ -711,6 +886,9 @@ struct LocalControl {
     stdout_reader: Mutex<Option<ReaderThread>>,
     stderr_reader: Mutex<Option<ReaderThread>>,
     stdin_writer: Mutex<Option<WriterThread>>,
+    terminal_reader: Mutex<Option<ReaderThread>>,
+    terminal: Option<Arc<TerminalIo>>,
+    output_budget: usize,
     runtime: RuntimePrimitiveBindings,
     deadline: RuntimeInstant,
     wait_started: AtomicBool,
@@ -748,9 +926,10 @@ impl LocalControl {
             let mut child = child.take().ok_or(ProcessError::WaitFailed)?;
             child.wait().map_err(|_| ProcessError::WaitFailed)?
         };
-        join_thread(&self.stdin_writer)?;
-        join_thread(&self.stdout_reader)?;
-        join_thread(&self.stderr_reader)?;
+        join_optional_thread(&self.stdin_writer)?;
+        join_optional_thread(&self.stdout_reader)?;
+        join_optional_thread(&self.stderr_reader)?;
+        join_optional_thread(&self.terminal_reader)?;
         Ok(status)
     }
 
@@ -805,12 +984,7 @@ impl LocalControl {
                 if exceeded {
                     Err(ProcessError::OutputBudgetExceeded)
                 } else {
-                    ProcessOutput::checked(
-                        process_exit(status),
-                        stdout,
-                        stderr,
-                        self.output_budget(),
-                    )
+                    ProcessOutput::checked(process_exit(status), stdout, stderr, self.output_budget)
                 }
             }
             (Err(error), _) | (_, Err(error)) => Err(error),
@@ -842,6 +1016,31 @@ impl LocalControl {
 
     fn terminate_blocking(&self) {
         let _ = self.terminate_and_reap();
+    }
+
+    fn enforce_terminal_limits(&self) -> Result<(), ProcessError> {
+        let now = self.runtime.now().map_err(|_| ProcessError::WaitFailed)?;
+        if now >= self.deadline {
+            self.output.record_cause(FirstCause::Deadline);
+        }
+        if let Some(error) = self.output.first_error() {
+            return match self.finish_with_error(error) {
+                Ok(_) => Err(error),
+                Err(error) => Err(error),
+            };
+        }
+        Ok(())
+    }
+
+    fn terminal_finished(&self) -> Result<bool, ProcessError> {
+        if let Some(result) = self.cached_result() {
+            return result.map(|_| true);
+        }
+        if self.child_exited()? {
+            self.finish_with_status().map(|_| true)
+        } else {
+            Ok(false)
+        }
     }
 
     async fn wait_once(
@@ -890,15 +1089,6 @@ impl LocalControl {
                 .await;
         }
     }
-
-    fn output_budget(&self) -> usize {
-        let state = self
-            .output
-            .captured
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        state.remaining + state.stdout.len() + state.stderr.len()
-    }
 }
 
 impl ProcessControl for LocalControl {
@@ -920,6 +1110,67 @@ impl ProcessControl for LocalControl {
     fn terminate_tree(&self) -> ProcessFuture<'_, Result<(), ProcessError>> {
         Box::pin(async move { self.terminate_and_reap() })
     }
+
+    fn write_terminal(&self, data: TerminalBytes) -> ProcessFuture<'_, Result<(), ProcessError>> {
+        Box::pin(async move {
+            let terminal = self
+                .terminal
+                .as_ref()
+                .ok_or(ProcessError::InteractiveIoUnavailable)?;
+            let mut remaining = data.as_slice();
+            loop {
+                self.enforce_terminal_limits()?;
+                if self.terminal_finished()? {
+                    return Err(ProcessError::InteractiveIoFailed);
+                }
+                if remaining.is_empty() {
+                    return Ok(());
+                }
+                if let Some(written) = terminal.write_some(remaining)? {
+                    remaining = &remaining[written..];
+                } else {
+                    let now = self.runtime.now().map_err(|_| ProcessError::WaitFailed)?;
+                    let next = (now + POLL_INTERVAL).min(self.deadline);
+                    self.runtime
+                        .sleep_until(next)
+                        .map_err(|_| ProcessError::WaitFailed)?
+                        .await;
+                }
+            }
+        })
+    }
+
+    fn read_terminal(
+        &self,
+        request: TerminalReadRequest,
+    ) -> ProcessFuture<'_, Result<Vec<u8>, ProcessError>> {
+        Box::pin(async move {
+            self.enforce_terminal_limits()?;
+            let terminal = self
+                .terminal
+                .as_ref()
+                .ok_or(ProcessError::InteractiveIoUnavailable)?;
+            let bytes = terminal.read(request.max_bytes().get());
+            if !bytes.is_empty() {
+                return Ok(bytes);
+            }
+            let _ = self.terminal_finished()?;
+            Ok(Vec::new())
+        })
+    }
+
+    fn resize_terminal(&self, size: TerminalSize) -> ProcessFuture<'_, Result<(), ProcessError>> {
+        Box::pin(async move {
+            self.enforce_terminal_limits()?;
+            if self.terminal_finished()? {
+                return Err(ProcessError::InteractiveIoFailed);
+            }
+            self.terminal
+                .as_ref()
+                .ok_or(ProcessError::InteractiveIoUnavailable)?
+                .resize(size)
+        })
+    }
 }
 
 impl Drop for LocalControl {
@@ -930,17 +1181,20 @@ impl Drop for LocalControl {
     }
 }
 
-fn join_thread<T>(
+fn join_optional_thread<T>(
     slot: &Mutex<Option<thread::JoinHandle<Result<T, io::Error>>>>,
-) -> Result<T, ProcessError> {
-    let handle = slot
+) -> Result<Option<T>, ProcessError> {
+    let Some(handle) = slot
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .take()
-        .ok_or(ProcessError::WaitFailed)?;
+    else {
+        return Ok(None);
+    };
     handle
         .join()
         .map_err(|_| ProcessError::WaitFailed)?
+        .map(Some)
         .map_err(|_| ProcessError::WaitFailed)
 }
 
@@ -984,6 +1238,7 @@ fn sandbox_arguments(
     runtime_descriptors: &[(i32, String)],
     allowed_executables: &[(i32, String)],
     runtime_symlinks: &[RuntimeSymlink],
+    terminal_fd: Option<i32>,
 ) -> Vec<String> {
     let policy = spec.effective_policy();
     let mut destinations = runtime_descriptors
@@ -1005,6 +1260,9 @@ fn sandbox_arguments(
     ];
     if policy.network() == NetworkAccess::Outbound {
         arguments.push("--share-net".into());
+    }
+    if let Some(terminal_fd) = terminal_fd {
+        arguments.extend(["--sync-fd".into(), terminal_fd.to_string()]);
     }
     for directory in parent_directories {
         arguments.extend(["--dir".into(), directory]);
@@ -1097,6 +1355,9 @@ fn sandbox_arguments(
         "--max-memory-bytes".into(),
         policy.limits().max_memory_bytes().get().to_string(),
     ]);
+    if let Some(terminal_fd) = terminal_fd {
+        arguments.extend(["--terminal-fd".into(), terminal_fd.to_string()]);
+    }
     for (_, path) in runtime_descriptors {
         arguments.extend(["--runtime-read".into(), path.clone()]);
     }
@@ -1676,5 +1937,29 @@ mod tests {
             ),
             Err(ComponentBuildError::InvalidConfig(_))
         ));
+
+        let window = nix::pty::Winsize {
+            ws_row: 24,
+            ws_col: 80,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        };
+        let pty = nix::pty::openpty(Some(&window), None).unwrap();
+        let terminal_output = OutputState::new(5);
+        terminal_output.push(Stream::Stderr, b"ab");
+        let terminal = TerminalIo::new(File::from(dup(&pty.master).unwrap()));
+        assert_eq!(terminal.write_some(b"x").unwrap(), Some(1));
+        assert!(terminal.push(b"abc", &terminal_output));
+        assert_eq!(terminal.read(2), b"ab");
+        assert!(!terminal.push(b"d", &terminal_output));
+        assert_eq!(
+            terminal_output.first_error(),
+            Some(ProcessError::OutputBudgetExceeded)
+        );
+        terminal
+            .resize(TerminalSize::checked(132, 43).unwrap())
+            .unwrap();
+        let resized = rustix::termios::tcgetwinsize(&pty.master).unwrap();
+        assert_eq!((resized.ws_col, resized.ws_row), (132, 43));
     }
 }

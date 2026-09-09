@@ -449,6 +449,30 @@ build-requirements = { executables = [], read-inputs = [], environment = [] }
 cargo-features = []
 
 [[components]]
+id = "terminal-local"
+package = "rust-agent-terminal-local"
+package-path = "crates/components/terminal-local"
+scope = "agent"
+factory = "rust_agent_terminal_local::build"
+dependencies-type = "rust_agent_terminal_local::Dependencies"
+config-type = "rust_agent_terminal_local::Config"
+config-source = "file"
+config-key = "terminal-local"
+targets = 'cfg(target_os = "linux")'
+support = "production"
+lifecycle-effects = []
+provides = [{ capability = "cap:terminal", priority = 100, effects = ["process-exec", "read-local", "write-local"] }]
+requires = [
+  { capability = "cap:subprocess", mode = "required", field = "subprocess" },
+  { capability = "cap:sandbox", mode = "required", field = "sandbox" },
+]
+conflicts = []
+security = ["process-exec", "read-local", "write-local"]
+runtime-primitives = []
+build-requirements = { executables = [], read-inputs = [], environment = [] }
+cargo-features = []
+
+[[components]]
 id = "model-host"
 package = "rust-agent-model-host"
 package-path = "crates/components/model-host"

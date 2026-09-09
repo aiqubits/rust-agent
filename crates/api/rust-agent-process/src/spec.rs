@@ -2,6 +2,8 @@ use std::{collections::BTreeMap, fmt, sync::Arc};
 
 use rust_agent_fs::AgentPath;
 
+use crate::TerminalSize;
+
 pub const MAX_PROCESS_EXECUTABLE_BYTES: usize = 4 * 1024;
 pub const MAX_PROCESS_ARGUMENTS: usize = 256;
 pub const MAX_PROCESS_ARGUMENT_BYTES: usize = 64 * 1024;
@@ -153,6 +155,7 @@ pub struct ProcessSpec {
     cwd: AgentPath,
     environment: ProcessEnvironment,
     stdin: Arc<[u8]>,
+    terminal_size: Option<TerminalSize>,
 }
 
 impl fmt::Debug for ProcessSpec {
@@ -164,6 +167,7 @@ impl fmt::Debug for ProcessSpec {
             .field("cwd", &self.cwd)
             .field("environment", &self.environment)
             .field("stdin_len", &self.stdin.len())
+            .field("terminal", &self.terminal_size.is_some())
             .finish()
     }
 }
@@ -206,7 +210,23 @@ impl ProcessSpec {
             cwd,
             environment,
             stdin: Arc::from(stdin),
+            terminal_size: None,
         })
+    }
+
+    pub fn checked_terminal<I>(
+        executable: ProcessExecutable,
+        arguments: I,
+        cwd: AgentPath,
+        environment: ProcessEnvironment,
+        terminal_size: TerminalSize,
+    ) -> Result<Self, ProcessSpecError>
+    where
+        I: IntoIterator<Item = String>,
+    {
+        let mut spec = Self::checked(executable, arguments, cwd, environment, Vec::new())?;
+        spec.terminal_size = Some(terminal_size);
+        Ok(spec)
     }
 
     pub const fn executable(&self) -> &ProcessExecutable {
@@ -227,6 +247,10 @@ impl ProcessSpec {
 
     pub fn stdin(&self) -> &[u8] {
         &self.stdin
+    }
+
+    pub const fn terminal_size(&self) -> Option<TerminalSize> {
+        self.terminal_size
     }
 }
 

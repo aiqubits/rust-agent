@@ -3,6 +3,7 @@ use std::{
     env,
     ffi::OsString,
     fmt,
+    fs::{File, OpenOptions},
     io::{self, Write as _},
     mem::offset_of,
     os::unix::process::ExitStatusExt as _,
@@ -74,6 +75,7 @@ struct Request {
     network: NetworkAccess,
     max_processes: u64,
     max_memory_bytes: u64,
+    terminal_fd: Option<i32>,
     runtime_read_paths: Vec<String>,
     allowed_executables: Vec<String>,
     target: String,
@@ -82,9 +84,13 @@ struct Request {
 
 pub(super) fn run() -> Result<(), LauncherError> {
     let request = parse(env::args_os().skip(1))?;
+    let terminal = open_terminal(request.terminal_fd)?;
     apply_resource_limits(&request)?;
     if getpid() != getpgrp() {
         return Err(LauncherError::ProcessGroup);
+    }
+    if let Some(terminal) = &terminal {
+        rustix::process::ioctl_tiocsctty(terminal).map_err(|_| LauncherError::ProcessGroup)?;
     }
     set_no_new_privileges().map_err(|_| LauncherError::Seccomp)?;
     apply_landlock(&request)?;
@@ -93,19 +99,25 @@ pub(super) fn run() -> Result<(), LauncherError> {
     if !applied_primitives.contains(request.required_primitives) {
         return Err(LauncherError::Protocol);
     }
+    let interactive = terminal.is_some();
     let mut command = Command::new(&request.target);
-    command
-        .args(&request.arguments)
-        .stdin(Stdio::inherit())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::inherit());
+    command.args(&request.arguments);
+    if let Some(terminal) = terminal {
+        command
+            .stdin(Stdio::from(
+                terminal.try_clone().map_err(LauncherError::Exec)?,
+            ))
+            .stdout(Stdio::from(
+                terminal.try_clone().map_err(LauncherError::Exec)?,
+            ))
+            .stderr(Stdio::from(terminal));
+    } else {
+        command
+            .stdin(Stdio::inherit())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit());
+    }
     let mut target = command.spawn().map_err(LauncherError::Exec)?;
-    let mut target_stdout = target
-        .stdout
-        .take()
-        .ok_or(LauncherError::Exec(io::Error::other(
-            "target stdout pipe was unavailable",
-        )))?;
 
     let header = encode_setup_header(SetupAcknowledgement {
         policy_digest: request.policy_digest,
@@ -117,7 +129,19 @@ pub(super) fn run() -> Result<(), LauncherError> {
         .and_then(|()| stdout.flush())
         .map_err(|_| LauncherError::Report)?;
     drop(stdout);
-    io::copy(&mut target_stdout, &mut io::stdout()).map_err(|_| LauncherError::Report)?;
+    if interactive && target.stdout.is_some() {
+        return Err(LauncherError::Protocol);
+    }
+    if !interactive {
+        let mut target_stdout =
+            target
+                .stdout
+                .take()
+                .ok_or(LauncherError::Exec(io::Error::other(
+                    "target stdout pipe was unavailable",
+                )))?;
+        io::copy(&mut target_stdout, &mut io::stdout()).map_err(|_| LauncherError::Report)?;
+    }
     let status = target.wait().map_err(LauncherError::Exec)?;
     if let Some(code) = status.code() {
         std::process::exit(code);
@@ -131,6 +155,23 @@ pub(super) fn run() -> Result<(), LauncherError> {
     Err(LauncherError::Exec(io::Error::other(
         "target exit status was unavailable",
     )))
+}
+
+fn open_terminal(descriptor: Option<i32>) -> Result<Option<File>, LauncherError> {
+    descriptor
+        .map(|descriptor| {
+            if descriptor < 3 {
+                return Err(LauncherError::Protocol);
+            }
+            let terminal = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(format!("/proc/self/fd/{descriptor}"))
+                .map_err(|_| LauncherError::Protocol)?;
+            rustix::termios::tcgetwinsize(&terminal).map_err(|_| LauncherError::Protocol)?;
+            Ok(terminal)
+        })
+        .transpose()
 }
 
 fn parse(arguments: impl Iterator<Item = OsString>) -> Result<Request, LauncherError> {
@@ -165,6 +206,20 @@ fn parse(arguments: impl Iterator<Item = OsString>) -> Result<Request, LauncherE
     if max_processes == 0 || max_memory_bytes == 0 {
         return Err(LauncherError::Protocol);
     }
+    let terminal_fd = if arguments
+        .get(cursor)
+        .is_some_and(|value| value == "--terminal-fd")
+    {
+        let descriptor = value(&arguments, &mut cursor, "--terminal-fd")?
+            .parse()
+            .map_err(|_| LauncherError::Protocol)?;
+        if descriptor < 3 {
+            return Err(LauncherError::Protocol);
+        }
+        Some(descriptor)
+    } else {
+        None
+    };
     let mut runtime_read_paths = Vec::new();
     while arguments
         .get(cursor)
@@ -215,6 +270,7 @@ fn parse(arguments: impl Iterator<Item = OsString>) -> Result<Request, LauncherE
         network,
         max_processes,
         max_memory_bytes,
+        terminal_fd,
         runtime_read_paths,
         allowed_executables,
         target,
@@ -514,5 +570,42 @@ mod tests {
     fn parser_rejects_missing_and_unknown_protocol_fields() {
         assert!(parse(std::iter::empty()).is_err());
         assert!(parse([OsString::from("--unknown")].into_iter()).is_err());
+
+        let base = [
+            "--policy-digest".to_owned(),
+            Digest::from_bytes([0; Digest::LEN]).to_lower_hex(),
+            "--required-primitives".to_owned(),
+            EnforcementPrimitives::all().bits().to_string(),
+            "--filesystem".to_owned(),
+            "none".to_owned(),
+            "--network".to_owned(),
+            "deny".to_owned(),
+            "--max-processes".to_owned(),
+            "2".to_owned(),
+            "--max-memory-bytes".to_owned(),
+            "1048576".to_owned(),
+        ];
+        let mut terminal = base.to_vec();
+        terminal.extend([
+            "--terminal-fd".to_owned(),
+            "7".to_owned(),
+            "--".to_owned(),
+            super::super::SANDBOX_TARGET.to_owned(),
+        ]);
+        assert_eq!(
+            parse(terminal.into_iter().map(OsString::from))
+                .unwrap()
+                .terminal_fd,
+            Some(7)
+        );
+
+        let mut stdio_alias = base.to_vec();
+        stdio_alias.extend([
+            "--terminal-fd".to_owned(),
+            "2".to_owned(),
+            "--".to_owned(),
+            super::super::SANDBOX_TARGET.to_owned(),
+        ]);
+        assert!(parse(stdio_alias.into_iter().map(OsString::from)).is_err());
     }
 }
