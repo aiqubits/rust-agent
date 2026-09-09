@@ -1398,6 +1398,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "rust-agent-tool-shell"
+version = "0.1.0"
+dependencies = [
+ "rust-agent-core",
+ "rust-agent-fs",
+ "rust-agent-policy",
+ "rust-agent-process",
+ "rust-agent-runtime-api",
+ "rust-agent-tools",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "rust-agent-tools"
 version = "0.1.0"
 dependencies = [

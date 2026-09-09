@@ -22,8 +22,8 @@ pub use process::{
     Sandbox, SandboxBinding, SandboxError, Subprocess, SubprocessBinding,
 };
 pub use shell::{
-    Shell, ShellBinding, ShellError, ShellProcess, ShellProcessControl, ShellRequest, ShellResult,
-    ShellSpec,
+    MAX_SHELL_COMMAND_BYTES, Shell, ShellBinding, ShellError, ShellProcess, ShellProcessControl,
+    ShellRequest, ShellResult, ShellSpec,
 };
 pub use spec::{
     MAX_PROCESS_ARGUMENT_BYTES, MAX_PROCESS_ARGUMENTS, MAX_PROCESS_ENVIRONMENT_BYTES,

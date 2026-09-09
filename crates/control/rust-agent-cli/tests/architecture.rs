@@ -1749,6 +1749,161 @@ fn phase_four_local_shell_is_a_pure_confinement_adapter() {
 }
 
 #[test]
+fn phase_four_shell_tool_is_provider_neutral_bounded_and_effect_exact() {
+    let root = workspace_root();
+    let path = root.join("crates/components/tool-shell");
+    let manifest: Value =
+        toml::from_str(&fs::read_to_string(path.join("Cargo.toml")).unwrap()).unwrap();
+    let metadata = &manifest["package"]["metadata"]["rust-agent"];
+    assert_eq!(metadata["id"].as_str(), Some("tool-shell"));
+    assert_eq!(metadata["scope"].as_str(), Some("agent"));
+    assert_eq!(metadata["config-source"].as_str(), Some("none"));
+    assert_eq!(metadata["targets"][0].as_str(), Some("cfg(true)"));
+    assert!(metadata["security"].as_array().unwrap().is_empty());
+    assert!(metadata["lifecycle-effects"].as_array().unwrap().is_empty());
+    assert!(
+        metadata["runtime-primitives"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    let provides = metadata["provides"].as_array().unwrap();
+    assert_eq!(provides.len(), 1);
+    assert_eq!(
+        provides[0]["capability"].as_str(),
+        Some("cap:tool-provider")
+    );
+    assert_eq!(provides[0]["order"].as_integer(), Some(200));
+    assert!(provides[0]["effects"].as_array().unwrap().is_empty());
+    let requires = metadata["requires"].as_array().unwrap();
+    assert_eq!(requires.len(), 1);
+    assert_eq!(requires[0]["capability"].as_str(), Some("cap:shell"));
+    assert_eq!(requires[0]["mode"].as_str(), Some("required"));
+    assert_eq!(requires[0]["field"].as_str(), Some("shell"));
+
+    let dependencies = manifest["dependencies"]
+        .as_table()
+        .unwrap()
+        .keys()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    for forbidden in [
+        "rust-agent-shell-local",
+        "rust-agent-subprocess-local",
+        "rust-agent-sandbox-linux",
+        "rust-agent-runtime-tokio",
+        "tokio",
+        "libc",
+        "nix",
+        "rustix",
+    ] {
+        assert!(
+            !dependencies.contains(forbidden),
+            "tool-shell directly depends on concrete/effectful package `{forbidden}`"
+        );
+    }
+
+    let source = fs::read_to_string(path.join("src/lib.rs")).unwrap();
+    let production = source.split("#[cfg(test)]").next().unwrap();
+    for required in [
+        "pub shell: ShellBinding",
+        "self.shell.effects()",
+        "ShellRequest::checked(",
+        "shell.resolve(request)",
+        "shell.run(spec, cancellation)",
+        "context.cancellation()",
+        "context.output_builder()",
+        "SHELL_MAX_TIMEOUT_SECONDS",
+        "SHELL_CAPTURE_MAX_BYTES",
+        "SHELL_DISPLAY_MAX_CHARS",
+        "ToolConcurrencyRule::Exclusive",
+        "tool-shell declares no runtime primitives",
+    ] {
+        assert!(
+            production.contains(required),
+            "tool-shell is missing `{required}`"
+        );
+    }
+    for forbidden in [
+        "std::process",
+        "std::fs",
+        "unsafe",
+        "SandboxBinding",
+        "SubprocessBinding",
+        "rust_agent_shell_local",
+        "rust_agent_subprocess_local",
+        "rust_agent_sandbox_linux",
+    ] {
+        assert!(
+            !production.contains(forbidden),
+            "tool-shell production source contains provider bypass `{forbidden}`"
+        );
+    }
+
+    let tree = Command::new("cargo")
+        .args([
+            "tree",
+            "-p",
+            "rust-agent-tool-shell",
+            "--edges",
+            "normal",
+            "--no-default-features",
+        ])
+        .current_dir(&root)
+        .output()
+        .unwrap();
+    assert!(tree.status.success());
+    let tree = String::from_utf8(tree.stdout).unwrap();
+    for forbidden in [
+        "AINS",
+        "rust-agent-agent",
+        "rust-agent-shell-local",
+        "rust-agent-subprocess-local",
+        "rust-agent-sandbox-linux",
+        "rust-agent-fs-local",
+        "rust-agent-runtime-tokio",
+        "tokio",
+        "libc",
+        "nix",
+        "rustix",
+    ] {
+        assert!(
+            !tree.contains(forbidden),
+            "tool-shell resolved forbidden dependency `{forbidden}`:\n{tree}"
+        );
+    }
+
+    let invariant_map = fs::read_to_string(root.join("docs/invariant-tests.md")).unwrap();
+    let mapped = markdown_section(&invariant_map, "## Phase 4", "## Accepted ADR amendments");
+    for required in [
+        "rust_agent_tool_shell::tests::snapshot_has_one_exclusive_mutating_tool_with_exact_shell_effects",
+        "rust_agent_tool_shell::tests::invocation_uses_only_the_shell_binding_and_seals_bounded_policy",
+        "rust_agent_tool_shell::tests::invalid_and_cancelled_calls_fail_before_provider_callbacks",
+        "rust_agent_tool_shell::tests::rendering_is_normalized_merged_bounded_and_utf8_safe",
+        "rust_agent_tool_shell::tests::factory_is_stateless_deterministic_and_runtime_exact",
+        "resolver::tests::shell_tool_selects_only_the_shell_capability_and_inherits_its_exact_effects",
+        "architecture::phase_four_shell_tool_is_provider_neutral_bounded_and_effect_exact",
+    ] {
+        assert!(
+            mapped.contains(required),
+            "unmapped Phase 4.9 evidence: {required}"
+        );
+    }
+    let ci = fs::read_to_string(root.join(".github/workflows/ci.yml")).unwrap();
+    for required in [
+        "Verify Phase 4 tool-shell closure",
+        "Verify Phase 4 tool-shell target matrix",
+        "Verify Phase 4 tool-shell contracts",
+        "Verify Phase 4 shell-tool resolver projection",
+    ] {
+        assert!(
+            ci.contains(required),
+            "missing Phase 4.9 CI gate `{required}`"
+        );
+    }
+}
+
+#[test]
 fn phase_four_local_terminal_is_confined_bounded_and_pty_backed() {
     let root = workspace_root();
     let path = root.join("crates/components/terminal-local");

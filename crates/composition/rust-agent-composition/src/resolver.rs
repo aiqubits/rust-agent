@@ -2306,6 +2306,78 @@ mod tests {
     }
 
     #[test]
+    fn shell_tool_selects_only_the_shell_capability_and_inherits_its_exact_effects() {
+        let path =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../tests/fixtures/catalog.toml");
+        let input = std::fs::read_to_string(path).unwrap();
+        let mut document = CatalogDocument::from_toml(&input).unwrap();
+        document
+            .components
+            .iter_mut()
+            .find(|component| component.id == "shell-local")
+            .unwrap()
+            .requires
+            .clear();
+        let catalog = NormalizedCatalog::normalize(document).unwrap();
+        let mut profile = profile();
+        profile.components.clear();
+        profile.denied_effects.clear();
+        profile
+            .components
+            .insert("tool-executor-guarded".into(), ComponentChoice::Enabled);
+        profile
+            .components
+            .insert("tool-shell".into(), ComponentChoice::Enabled);
+        profile
+            .bindings
+            .insert("shell".into(), "shell-local".into());
+        let resolved = resolve(&catalog, &profile, &target()).unwrap();
+
+        let index = |component: &str| {
+            resolved
+                .construction_order
+                .iter()
+                .position(|candidate| candidate == component)
+                .unwrap()
+        };
+        assert!(index("shell-local") < index("tool-shell"));
+        assert!(index("tool-shell") < index("tool-executor-guarded"));
+
+        let expected = BTreeSet::from([
+            "process-exec".to_owned(),
+            "read-local".to_owned(),
+            "write-local".to_owned(),
+        ]);
+        assert_eq!(
+            resolved
+                .bindings
+                .iter()
+                .find(|binding| binding.consumer == "tool-shell" && binding.field == "shell")
+                .unwrap()
+                .effects,
+            expected
+        );
+        assert_eq!(
+            resolved
+                .bindings
+                .iter()
+                .find(|binding| {
+                    binding.consumer == "tool-executor-guarded" && binding.field == "providers"
+                })
+                .unwrap()
+                .effects,
+            expected
+        );
+        assert!(
+            resolved
+                .bindings
+                .iter()
+                .filter(|binding| binding.consumer == "tool-shell")
+                .all(|binding| binding.capability == "cap:shell")
+        );
+    }
+
+    #[test]
     fn resolver_requires_exactly_one_current_target_support_match() {
         let mut overlapping = fixture_catalog();
         let adapter = overlapping

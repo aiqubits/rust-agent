@@ -404,6 +404,29 @@ build-requirements = { executables = [], read-inputs = [], environment = [] }
 cargo-features = []
 
 [[components]]
+id = "tool-shell"
+package = "rust-agent-tool-shell"
+package-path = "crates/components/tool-shell"
+scope = "agent"
+factory = "rust_agent_tool_shell::build"
+dependencies-type = "rust_agent_tool_shell::Dependencies"
+config-type = "rust_agent_tool_shell::Config"
+config-source = "none"
+targets = "cfg(true)"
+target-support = [
+    { predicate = 'cfg(target_os = "linux")', tier = "production" },
+    { predicate = 'cfg(not(target_os = "linux"))', tier = "experimental" },
+]
+lifecycle-effects = []
+provides = [{ capability = "cap:tool-provider", order = 200, effects = [] }]
+requires = [{ capability = "cap:shell", mode = "required", field = "shell" }]
+conflicts = []
+security = []
+runtime-primitives = []
+build-requirements = { executables = [], read-inputs = [], environment = [] }
+cargo-features = []
+
+[[components]]
 id = "subprocess-local"
 package = "rust-agent-subprocess-local"
 package-path = "crates/components/subprocess-local"

@@ -198,6 +198,21 @@ jobs:
         run: cargo test -p rust-agent-fs-read-local -p rust-agent-fs-local -p rust-agent-tool-fs --all-targets --all-features
       - name: Verify Phase 4 filesystem resolver projection
         run: cargo test -p rust-agent-composition resolver::tests::optional_tool_provider_is_order_independent_and_inherits_exact_fs_effects -- --exact
+      - name: Verify Phase 4 tool-shell closure
+        run: |
+          cargo check -p rust-agent-tool-shell --no-default-features
+          cargo check -p rust-agent-tool-shell --all-features
+          cargo tree -p rust-agent-tool-shell --edges normal --no-default-features
+      - name: Verify Phase 4 tool-shell target matrix
+        shell: bash
+        run: |
+          for target in wasm32-unknown-unknown aarch64-linux-android aarch64-apple-ios x86_64-apple-darwin x86_64-pc-windows-msvc; do
+            cargo check --target "$target" --all-features -p rust-agent-tool-shell
+          done
+      - name: Verify Phase 4 tool-shell contracts
+        run: cargo test -p rust-agent-tool-shell --all-targets --all-features
+      - name: Verify Phase 4 shell-tool resolver projection
+        run: cargo test -p rust-agent-composition resolver::tests::shell_tool_selects_only_the_shell_capability_and_inherits_its_exact_effects -- --exact
       - run: cargo fmt --all --check
       - run: cargo check --workspace --all-targets
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings

@@ -1497,6 +1497,62 @@
         },
         "app-coexistence": null,
         "cargo-features": []
+      },
+      {
+        "id": "tool-shell",
+        "package": "rust-agent-tool-shell",
+        "package-path": "crates/components/tool-shell",
+        "scope": "agent",
+        "factory": "rust_agent_tool_shell::build",
+        "dependencies-type": "rust_agent_tool_shell::Dependencies",
+        "config-type": "rust_agent_tool_shell::Config",
+        "config-source": "none",
+        "config-key": null,
+        "resource-namespace-preparer": null,
+        "prepared-config-type": null,
+        "targets": "cfg(true)",
+        "target-support": [
+          {
+            "predicate": "cfg(not(target_os = \"linux\"))",
+            "tier": "experimental"
+          },
+          {
+            "predicate": "cfg(target_os = \"linux\")",
+            "tier": "production"
+          }
+        ],
+        "lifecycle-effects": [],
+        "provides": [
+          {
+            "capability": "cap:tool-provider",
+            "key": null,
+            "priority": 0,
+            "order": 200,
+            "layer": "provider",
+            "resource-namespace": {
+              "mode": "none"
+            },
+            "effects": []
+          }
+        ],
+        "requires": [
+          {
+            "capability": "cap:shell",
+            "mode": "required",
+            "field": "shell",
+            "key": null
+          }
+        ],
+        "conflicts": [],
+        "security": [],
+        "runtime-primitives": [],
+        "build-requirements": {
+          "executables": [],
+          "read-inputs": [],
+          "environment": []
+        },
+        "app-coexistence": null,
+        "cargo-features": []
       }
     ],
     "runtime-adapters": [
@@ -1655,7 +1711,7 @@
       }
     ]
   },
-  "normalized-catalog-digest": "4cc8525baaf5ed5861ddb3162cfecaadebe9da571f931764b2e961a5622d151f",
+  "normalized-catalog-digest": "a3f27a03f59dc8194ab2c40dc3f19ba0c11a86e786958702472cbe58df60b217",
   "catalog-trust-input": {
     "schema": 1,
     "normalized-policy": {
@@ -2003,5 +2059,5 @@
       "environment": []
     }
   },
-  "identity-digest": "584e3e3c589fd6bc6ce21182820d85fe1034957947d47af2d90c299cd37cee91"
+  "identity-digest": "1a99da35d197cf37e8fa5b246eef1fbc9f82602ebf6245421263797ae4fbdc81"
 }
