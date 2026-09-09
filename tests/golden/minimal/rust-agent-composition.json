@@ -1,7 +1,7 @@
 {
   "schema": 2,
   "algorithm": "sha256-rust-agent-composition-v2",
-  "composition-hash": "0b115af4d596ddf76b8b75adbe65e3a29061d1f804173e9f092923509e8f7ac2",
+  "composition-hash": "35cde39d24def0075baae755b4bdbe83e0cd89fa0566389647bea3735e9b6aa4",
   "build-kind": "library",
   "profile-name": "fixture-minimal",
   "normalized-profile": {
@@ -1359,6 +1359,7 @@
             }
           ],
           "lifecycle-effects": [
+            "process-exec",
             "read-local"
           ],
           "provides": [
@@ -1700,7 +1701,7 @@
         }
       ]
     },
-    "normalized-catalog-digest": "65cc07ea604902ff765d3e0cb2832fbcbcbb999efaa6bf96846e41c89c577eb4",
+    "normalized-catalog-digest": "5b094e032b5a8ceb0f3181f95eff7518fced53c04afe615fdd89e91e2aef5cc4",
     "catalog-trust-input": {
       "schema": 1,
       "normalized-policy": {
@@ -2048,7 +2049,7 @@
         "environment": []
       }
     },
-    "identity-digest": "b182a007d66055e7a951e2d1ed63579a6abefab84691cb4bc261dd3a2cb06a6a"
+    "identity-digest": "1532b96bac2be5a74a65cfcc57d7736fe2b9d84361beb1331ff4763ff8ff759c"
   },
   "custom-target-spec": null,
   "selected-components": [
@@ -2808,7 +2809,7 @@
       "id": "rust-agent-runtime-api",
       "package": "rust-agent-runtime-api",
       "logical-path": "crates/api/rust-agent-runtime-api",
-      "tree-digest": "b1d430ee6fc467a21f13d85e643cc76c22fc27f4e5d17b94681e6491e11e445a",
+      "tree-digest": "374161076a6f7267e5151f73506189d044292a6c42ed4aafaf4d9e7ff6fb5074",
       "tree-entries": [
         {
           "path": "Cargo.toml",
@@ -2856,8 +2857,8 @@
           "path": "src/lib.rs",
           "kind": {
             "kind": "regular-file",
-            "sha256": "bd59b627a0a8b7f6fa19393f88c30deb2c0bff14321e2ea9260106c0778bf8b0",
-            "bytes": 130972
+            "sha256": "19bed2d518aec45150a0c461babb2a3bff3be8de5aa868b7503abac929f649f9",
+            "bytes": 136600
           },
           "metadata": {
             "contract": "read-only-epoch-v1",
@@ -2964,6 +2965,50 @@
             "kind": "regular-file",
             "sha256": "676a2ed8cd8d06599b871dae149305f0673dcdd1c927f218021e710fa7d87362",
             "bytes": 1543
+          },
+          "metadata": {
+            "contract": "read-only-epoch-v1",
+            "mode": 292,
+            "uid": 0,
+            "gid": 0,
+            "atime-nanos": 0,
+            "mtime-nanos": 0,
+            "ctime-nanos": 0,
+            "birthtime-nanos": 0,
+            "link-count": 1,
+            "device": 0,
+            "inode": 0,
+            "generation": 0
+          }
+        },
+        {
+          "path": "tests/ui/forge_component_output.rs",
+          "kind": {
+            "kind": "regular-file",
+            "sha256": "b01c08b95f36136af07a4246b6b2d410d9db9f677cda6b4597b03a86fb12c334",
+            "bytes": 302
+          },
+          "metadata": {
+            "contract": "read-only-epoch-v1",
+            "mode": 292,
+            "uid": 0,
+            "gid": 0,
+            "atime-nanos": 0,
+            "mtime-nanos": 0,
+            "ctime-nanos": 0,
+            "birthtime-nanos": 0,
+            "link-count": 1,
+            "device": 0,
+            "inode": 0,
+            "generation": 0
+          }
+        },
+        {
+          "path": "tests/ui/forge_component_output.stderr",
+          "kind": {
+            "kind": "regular-file",
+            "sha256": "615e9e473329f0bf728f3c1f769a9369c05defe23160b1dc17cb6a479c9bb51d",
+            "bytes": 580
           },
           "metadata": {
             "contract": "read-only-epoch-v1",
@@ -3446,12 +3491,12 @@
     },
     {
       "path": "generator-inputs.json",
-      "digest": "b7ccc502e5f33184af7f2b47665fbb8d40d51e0ede6b51029a62147637b749f8",
-      "bytes": 66185
+      "digest": "fa29cb5595c54328074bf0da0eab0e421bffe2ea8f17d003eb87b353a2a2c05c",
+      "bytes": 66211
     },
     {
       "path": "src/lib.rs",
-      "digest": "5b40299fe037e3ad8bc26119aadb12bb19069f09431bbe24e75cd0fef5b1c717",
+      "digest": "aa5e2e4a6f21007d3641485e8d4978c68d3b22ab61ac80836be06ee616b3490b",
       "bytes": 3591
     },
     {

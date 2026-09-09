@@ -19,7 +19,9 @@ use rust_agent_process::{
     ConfinementAuthority, ConfinementIssuerBinding, ConfinementVerifierBinding, ProcessEnvironment,
     ProcessError, ProcessExecutable, ProcessExit, ProcessSpec, SandboxBinding, SubprocessBinding,
 };
-use rust_agent_runtime_api::{CancellationToken, RuntimePrimitiveBindings, RuntimePrimitiveKind};
+use rust_agent_runtime_api::{
+    CancellationToken, RuntimePrimitiveBindings, RuntimePrimitiveKind, Shutdown,
+};
 use rust_agent_subprocess_local::{Config, Dependencies, RuntimeSymlink};
 use sha2::{Digest as _, Sha256};
 
@@ -73,7 +75,10 @@ fn process(executable: &str, arguments: &[&str], input: &[u8]) -> ProcessSpec {
     .unwrap()
 }
 
-fn bindings(config: &Config, ceiling: SandboxPolicy) -> (SandboxBinding, SubprocessBinding) {
+fn bindings(
+    config: &Config,
+    ceiling: SandboxPolicy,
+) -> (SandboxBinding, SubprocessBinding, Arc<dyn Shutdown>) {
     let (issuer, verifier) = ConfinementAuthority::new(SandboxPolicyCeiling::new(ceiling)).unwrap();
     let sandbox = rust_agent_sandbox_linux::build(
         &rust_agent_sandbox_linux::Config,
@@ -96,8 +101,10 @@ fn bindings(config: &Config, ceiling: SandboxPolicy) -> (SandboxBinding, Subproc
         )
         .unwrap(),
     )
-    .unwrap()
-    .into_service();
+    .unwrap();
+    block_on(subprocess.initializer().unwrap().initialize()).unwrap();
+    let subprocess_service = subprocess.service().clone();
+    let shutdown = subprocess.shutdown_hook().unwrap().clone();
     (
         SandboxBinding::from_generated_component(
             "sandbox-linux",
@@ -110,9 +117,10 @@ fn bindings(config: &Config, ceiling: SandboxPolicy) -> (SandboxBinding, Subproc
             SecurityEffects::READ_LOCAL
                 | SecurityEffects::WRITE_LOCAL
                 | SecurityEffects::PROCESS_EXEC,
-            subprocess,
+            subprocess_service,
         )
         .unwrap(),
+        shutdown,
     )
 }
 
@@ -141,7 +149,7 @@ fn real_linux_subprocess_enforces_anchor_handshake_budget_and_cancellation() {
     )
     .unwrap();
     let ceiling = policy(FilesystemAccess::ReadWrite, 4096, 30_000);
-    let (sandbox, subprocess) = bindings(&config, ceiling.clone());
+    let (sandbox, subprocess, shutdown) = bindings(&config, ceiling.clone());
 
     let moved = owner.path().join("workspace-moved");
     fs::rename(&workspace, &moved).unwrap();
@@ -171,7 +179,8 @@ fn real_linux_subprocess_enforces_anchor_handshake_budget_and_cancellation() {
     );
 
     let confined =
-        block_on(sandbox.confine(process("/usr/bin/sleep", &["10"], b""), ceiling)).unwrap();
+        block_on(sandbox.confine(process("/usr/bin/sleep", &["10"], b""), ceiling.clone()))
+            .unwrap();
     let handle = block_on(subprocess.spawn(confined, CancellationToken::new())).unwrap();
     let cancellation = CancellationToken::new();
     cancellation.cancel();
@@ -184,4 +193,13 @@ fn real_linux_subprocess_enforces_anchor_handshake_budget_and_cancellation() {
         ProcessError::Cancelled
     );
     assert_eq!(block_on(handle.terminate_tree()), Ok(()));
+
+    let confined =
+        block_on(sandbox.confine(process("/usr/bin/sleep", &["10"], b""), ceiling)).unwrap();
+    let handle = block_on(subprocess.spawn(confined, CancellationToken::new())).unwrap();
+    assert_eq!(block_on(shutdown.shutdown()), Ok(()));
+    assert_eq!(
+        block_on(handle.wait(CancellationToken::new())).unwrap_err(),
+        ProcessError::Cancelled
+    );
 }

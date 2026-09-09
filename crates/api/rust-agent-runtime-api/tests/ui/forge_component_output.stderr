@@ -1,0 +1,13 @@
+error[E0451]: fields `service`, `initializer`, `activator` and `shutdown` of struct `ComponentOutput` are private
+  --> tests/ui/forge_component_output.rs:10:9
+   |
+ 9 |     let _forged = ComponentOutput::<LifecycleOwner> {
+   |                   --------------------------------- in this type
+10 |         service: Arc::new(LifecycleOwner),
+   |         ^^^^^^^ private field
+11 |         initializer: None,
+   |         ^^^^^^^^^^^ private field
+12 |         activator: None,
+   |         ^^^^^^^^^ private field
+13 |         shutdown: None,
+   |         ^^^^^^^^ private field

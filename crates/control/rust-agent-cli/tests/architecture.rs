@@ -1444,8 +1444,13 @@ fn phase_four_linux_subprocess_is_verified_anchored_and_fail_closed() {
     assert_eq!(metadata["config-source"].as_str(), Some("file"));
     assert_eq!(metadata["support"].as_str(), Some("production"));
     assert_eq!(
-        metadata["lifecycle-effects"].as_array().unwrap()[0].as_str(),
-        Some("read-local")
+        metadata["lifecycle-effects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>(),
+        ["read-local", "process-exec"]
     );
     assert_eq!(
         metadata["runtime-primitives"]
@@ -1488,7 +1493,7 @@ fn phase_four_linux_subprocess_is_verified_anchored_and_fail_closed() {
     );
     for required in [
         "ResolveFlags::NO_SYMLINKS | ResolveFlags::NO_MAGICLINKS",
-        "inheritable_duplicate(&self.config.workspace)",
+        "inheritable_duplicate(&config.workspace)",
         "mpsc::sync_channel(1)",
         "EnforcementReport::after_child_setup",
         "kill_process_group(self.process_group, Signal::KILL)",
@@ -1496,6 +1501,9 @@ fn phase_four_linux_subprocess_is_verified_anchored_and_fail_closed() {
         "FirstCause::Cancelled",
         "FirstCause::Deadline",
         "cleanup: Mutex<()>",
+        "impl Initializable for LocalSubprocess",
+        "impl Shutdown for LocalSubprocess",
+        "ComponentOutput::initializable",
     ] {
         assert!(
             source.contains(required),
@@ -1534,6 +1542,18 @@ fn phase_four_linux_subprocess_is_verified_anchored_and_fail_closed() {
         );
     }
     assert!(!source.contains("pub fn run_linux_launcher"));
+    let factory =
+        &source[source.find("pub fn build(").unwrap()..source.find("fn prepare_config(").unwrap()];
+    for forbidden in [
+        "open_directory(",
+        "open_verified_executable(",
+        "Command::new(",
+    ] {
+        assert!(
+            !factory.contains(forbidden),
+            "subprocess-local factory performs I/O through `{forbidden}`"
+        );
+    }
 
     let tree = Command::new("cargo")
         .args([

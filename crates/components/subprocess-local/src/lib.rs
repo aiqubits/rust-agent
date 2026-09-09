@@ -10,7 +10,7 @@ use std::{
     path::{Component, Path},
     process::{Child, Command, ExitStatus, Stdio},
     sync::{
-        Arc, Mutex,
+        Arc, Mutex, Weak,
         atomic::{AtomicBool, AtomicU8, Ordering},
         mpsc,
     },
@@ -26,8 +26,9 @@ use rust_agent_process::{
     VerifiedProcessSpec,
 };
 use rust_agent_runtime_api::{
-    CancellationToken, ComponentBuildError, ComponentOutput, RuntimeInstant,
-    RuntimePrimitiveBindings, RuntimePrimitiveKind,
+    CancellationToken, ComponentBuildError, ComponentOutput, Initializable, InitializeError,
+    RuntimeFuture, RuntimeInstant, RuntimePrimitiveBindings, RuntimePrimitiveKind, Shutdown,
+    ShutdownError,
 };
 use rustix::{
     fs::{CWD, FileType, Mode, OFlags, ResolveFlags, fstat, openat2},
@@ -43,6 +44,7 @@ const PROVIDER_KEY: &str = "local";
 const POLL_INTERVAL: Duration = Duration::from_millis(2);
 const MAX_CONFIG_PATHS: usize = 128;
 const MAX_CONFIG_BYTES: usize = 128 * 1024;
+const MAX_TRACKED_PROCESSES: usize = 1024;
 const SANDBOX_WORKSPACE: &str = "/workspace";
 const SANDBOX_LAUNCHER: &str = "/rust-agent/launcher";
 const SANDBOX_TARGET: &str = "/rust-agent/target";
@@ -141,9 +143,24 @@ struct PreparedConfig {
 }
 
 #[derive(Debug)]
+enum PreparationState {
+    Uninitialized,
+    Initializing,
+    Ready(PreparedConfig),
+    Closed,
+}
+
+#[derive(Debug)]
+struct LifecycleState {
+    preparation: PreparationState,
+    live: Vec<Weak<LocalControl>>,
+}
+
+#[derive(Debug)]
 pub struct LocalSubprocess {
     confinement_verifier: ConfinementVerifierBinding,
-    config: PreparedConfig,
+    config: Config,
+    lifecycle: Mutex<LifecycleState>,
     runtime: RuntimePrimitiveBindings,
 }
 
@@ -194,105 +211,137 @@ impl LocalSubprocess {
         let deadline = started
             .checked_add(timeout)
             .ok_or(ProcessError::UnsupportedPolicy)?;
-        validate_cwd(&self.config.workspace, &verified)?;
-        let executable = open_absolute(
-            verified.process().executable().as_str(),
-            OFlags::RDONLY | OFlags::CLOEXEC,
-        )
-        .map_err(|_| ProcessError::SpawnFailed)?;
-        ensure_executable(&executable).map_err(|_| ProcessError::SpawnFailed)?;
-
-        let mut inherited = Vec::new();
-        let bubblewrap = inheritable_duplicate(&self.config.bubblewrap)
+        let (control, setup_receiver, inherited, argument_file, process_id, output_budget) = {
+            let mut lifecycle = self
+                .lifecycle
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            lifecycle.live.retain(|control| {
+                control
+                    .upgrade()
+                    .is_some_and(|control| control.cached_result().is_none())
+            });
+            if lifecycle.live.len() >= MAX_TRACKED_PROCESSES {
+                return Err(ProcessError::SpawnFailed);
+            }
+            let config = match &lifecycle.preparation {
+                PreparationState::Ready(config) => config,
+                PreparationState::Closed => return Err(ProcessError::Cancelled),
+                PreparationState::Uninitialized | PreparationState::Initializing => {
+                    return Err(ProcessError::SetupFailed);
+                }
+            };
+            validate_cwd(&config.workspace, &verified)?;
+            let executable = open_absolute(
+                verified.process().executable().as_str(),
+                OFlags::RDONLY | OFlags::CLOEXEC,
+            )
             .map_err(|_| ProcessError::SpawnFailed)?;
-        let bubblewrap_fd = bubblewrap.as_raw_fd();
-        inherited.push(bubblewrap);
-        let launcher =
-            inheritable_duplicate(&self.config.launcher).map_err(|_| ProcessError::SpawnFailed)?;
-        let launcher_fd = launcher.as_raw_fd();
-        inherited.push(launcher);
-        let target = inheritable_duplicate(&executable).map_err(|_| ProcessError::SpawnFailed)?;
-        let target_fd = target.as_raw_fd();
-        inherited.push(target);
-        let workspace =
-            inheritable_duplicate(&self.config.workspace).map_err(|_| ProcessError::SpawnFailed)?;
-        let workspace_fd = workspace.as_raw_fd();
-        inherited.push(workspace);
+            ensure_executable(&executable).map_err(|_| ProcessError::SpawnFailed)?;
 
-        let mut runtime_descriptors = Vec::with_capacity(self.config.runtime_read_paths.len());
-        for path in &self.config.runtime_read_paths {
-            let descriptor =
-                inheritable_duplicate(&path.descriptor).map_err(|_| ProcessError::SpawnFailed)?;
-            runtime_descriptors.push((descriptor.as_raw_fd(), path.destination.clone()));
-            inherited.push(descriptor);
-        }
+            let mut inherited = Vec::new();
+            let bubblewrap =
+                inheritable_duplicate(&config.bubblewrap).map_err(|_| ProcessError::SpawnFailed)?;
+            let bubblewrap_fd = bubblewrap.as_raw_fd();
+            inherited.push(bubblewrap);
+            let launcher =
+                inheritable_duplicate(&config.launcher).map_err(|_| ProcessError::SpawnFailed)?;
+            let launcher_fd = launcher.as_raw_fd();
+            inherited.push(launcher);
+            let target =
+                inheritable_duplicate(&executable).map_err(|_| ProcessError::SpawnFailed)?;
+            let target_fd = target.as_raw_fd();
+            inherited.push(target);
+            let workspace =
+                inheritable_duplicate(&config.workspace).map_err(|_| ProcessError::SpawnFailed)?;
+            let workspace_fd = workspace.as_raw_fd();
+            inherited.push(workspace);
 
-        let mut allowed_executable_descriptors =
-            Vec::with_capacity(self.config.allowed_executables.len());
-        for path in &self.config.allowed_executables {
-            let descriptor =
-                inheritable_duplicate(&path.descriptor).map_err(|_| ProcessError::SpawnFailed)?;
-            allowed_executable_descriptors.push((descriptor.as_raw_fd(), path.destination.clone()));
-            inherited.push(descriptor);
-        }
+            let mut runtime_descriptors = Vec::with_capacity(config.runtime_read_paths.len());
+            for path in &config.runtime_read_paths {
+                let descriptor = inheritable_duplicate(&path.descriptor)
+                    .map_err(|_| ProcessError::SpawnFailed)?;
+                runtime_descriptors.push((descriptor.as_raw_fd(), path.destination.clone()));
+                inherited.push(descriptor);
+            }
 
-        let arguments = sandbox_arguments(
-            &verified,
-            launcher_fd,
-            target_fd,
-            workspace_fd,
-            &runtime_descriptors,
-            &allowed_executable_descriptors,
-            &self.config.runtime_symlinks,
-        );
-        let mut argument_file = tempfile::tempfile().map_err(|_| ProcessError::SpawnFailed)?;
-        write_nul_arguments(&mut argument_file, &arguments)
-            .map_err(|_| ProcessError::SpawnFailed)?;
-        argument_file
-            .seek(SeekFrom::Start(0))
-            .map_err(|_| ProcessError::SpawnFailed)?;
-        let argument_descriptor =
-            inheritable_duplicate(&argument_file).map_err(|_| ProcessError::SpawnFailed)?;
-        let argument_fd = argument_descriptor.as_raw_fd();
-        inherited.push(argument_descriptor);
+            let mut allowed_executable_descriptors =
+                Vec::with_capacity(config.allowed_executables.len());
+            for path in &config.allowed_executables {
+                let descriptor = inheritable_duplicate(&path.descriptor)
+                    .map_err(|_| ProcessError::SpawnFailed)?;
+                allowed_executable_descriptors
+                    .push((descriptor.as_raw_fd(), path.destination.clone()));
+                inherited.push(descriptor);
+            }
 
-        let mut command = Command::new(format!("/proc/self/fd/{bubblewrap_fd}"));
-        command
-            .args(["--args", &argument_fd.to_string()])
-            .env_clear()
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .process_group(0);
-        let mut child = command.spawn().map_err(|_| ProcessError::SpawnFailed)?;
-        let process_id = child.id();
-        let process_group = Pid::from_child(&child);
-        let stdin = child.stdin.take().ok_or(ProcessError::SpawnFailed)?;
-        let stdout = child.stdout.take().ok_or(ProcessError::SpawnFailed)?;
-        let stderr = child.stderr.take().ok_or(ProcessError::SpawnFailed)?;
-        let output_budget = verified
-            .effective_policy()
-            .limits()
-            .max_output_bytes()
-            .get();
-        let output = Arc::new(OutputState::new(output_budget));
-        let (setup_sender, setup_receiver) = mpsc::sync_channel(1);
-        let stdout_reader = spawn_stdout_reader(stdout, Arc::clone(&output), setup_sender);
-        let stderr_reader = spawn_output_reader(stderr, Arc::clone(&output), Stream::Stderr);
-        let stdin_writer = spawn_stdin_writer(stdin, verified.process().stdin().to_vec());
-        let control = Arc::new(LocalControl {
-            child: Mutex::new(Some(child)),
-            process_group,
-            output,
-            stdout_reader: Mutex::new(Some(stdout_reader)),
-            stderr_reader: Mutex::new(Some(stderr_reader)),
-            stdin_writer: Mutex::new(Some(stdin_writer)),
-            runtime: self.runtime.clone(),
-            deadline,
-            wait_started: AtomicBool::new(false),
-            cleanup: Mutex::new(()),
-            completed: Mutex::new(None),
-        });
+            let arguments = sandbox_arguments(
+                &verified,
+                launcher_fd,
+                target_fd,
+                workspace_fd,
+                &runtime_descriptors,
+                &allowed_executable_descriptors,
+                &config.runtime_symlinks,
+            );
+            let mut argument_file = tempfile::tempfile().map_err(|_| ProcessError::SpawnFailed)?;
+            write_nul_arguments(&mut argument_file, &arguments)
+                .map_err(|_| ProcessError::SpawnFailed)?;
+            argument_file
+                .seek(SeekFrom::Start(0))
+                .map_err(|_| ProcessError::SpawnFailed)?;
+            let argument_descriptor =
+                inheritable_duplicate(&argument_file).map_err(|_| ProcessError::SpawnFailed)?;
+            let argument_fd = argument_descriptor.as_raw_fd();
+            inherited.push(argument_descriptor);
+
+            let mut command = Command::new(format!("/proc/self/fd/{bubblewrap_fd}"));
+            command
+                .args(["--args", &argument_fd.to_string()])
+                .env_clear()
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .process_group(0);
+            let mut child = command.spawn().map_err(|_| ProcessError::SpawnFailed)?;
+            let process_id = child.id();
+            let process_group = Pid::from_child(&child);
+            let stdin = child.stdin.take().ok_or(ProcessError::SpawnFailed)?;
+            let stdout = child.stdout.take().ok_or(ProcessError::SpawnFailed)?;
+            let stderr = child.stderr.take().ok_or(ProcessError::SpawnFailed)?;
+            let output_budget = verified
+                .effective_policy()
+                .limits()
+                .max_output_bytes()
+                .get();
+            let output = Arc::new(OutputState::new(output_budget));
+            let (setup_sender, setup_receiver) = mpsc::sync_channel(1);
+            let stdout_reader = spawn_stdout_reader(stdout, Arc::clone(&output), setup_sender);
+            let stderr_reader = spawn_output_reader(stderr, Arc::clone(&output), Stream::Stderr);
+            let stdin_writer = spawn_stdin_writer(stdin, verified.process().stdin().to_vec());
+            let control = Arc::new(LocalControl {
+                child: Mutex::new(Some(child)),
+                process_group,
+                output,
+                stdout_reader: Mutex::new(Some(stdout_reader)),
+                stderr_reader: Mutex::new(Some(stderr_reader)),
+                stdin_writer: Mutex::new(Some(stdin_writer)),
+                runtime: self.runtime.clone(),
+                deadline,
+                wait_started: AtomicBool::new(false),
+                cleanup: Mutex::new(()),
+                completed: Mutex::new(None),
+            });
+            lifecycle.live.push(Arc::downgrade(&control));
+            (
+                control,
+                setup_receiver,
+                inherited,
+                argument_file,
+                process_id,
+                output_budget,
+            )
+        };
 
         let setup = wait_for_setup(&control, setup_receiver, &cancellation).await;
         drop(inherited);
@@ -324,6 +373,74 @@ impl LocalSubprocess {
     }
 }
 
+impl Initializable for LocalSubprocess {
+    fn initialize(&self) -> RuntimeFuture<'_, Result<(), InitializeError>> {
+        Box::pin(async move {
+            {
+                let mut lifecycle = self
+                    .lifecycle
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                match lifecycle.preparation {
+                    PreparationState::Uninitialized => {
+                        lifecycle.preparation = PreparationState::Initializing;
+                    }
+                    PreparationState::Initializing | PreparationState::Ready(_) => {
+                        return Err(InitializeError::AlreadyInitialized);
+                    }
+                    PreparationState::Closed => return Err(InitializeError::ScopeClosed),
+                }
+            }
+
+            let prepared = prepare_config(&self.config);
+            let mut lifecycle = self
+                .lifecycle
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if matches!(lifecycle.preparation, PreparationState::Closed) {
+                return Err(InitializeError::ScopeClosed);
+            }
+            if let Ok(prepared) = prepared {
+                lifecycle.preparation = PreparationState::Ready(prepared);
+                Ok(())
+            } else {
+                lifecycle.preparation = PreparationState::Uninitialized;
+                Err(InitializeError::ResourcePreparationFailed)
+            }
+        })
+    }
+}
+
+impl Shutdown for LocalSubprocess {
+    fn shutdown(&self) -> RuntimeFuture<'_, Result<(), ShutdownError>> {
+        Box::pin(async move {
+            let controls = {
+                let mut lifecycle = self
+                    .lifecycle
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                lifecycle.preparation = PreparationState::Closed;
+                lifecycle
+                    .live
+                    .drain(..)
+                    .filter_map(|control| control.upgrade())
+                    .collect::<Vec<_>>()
+            };
+            let mut failed = false;
+            for control in controls {
+                if control.terminate_and_reap().is_err() {
+                    failed = true;
+                }
+            }
+            if failed {
+                Err(ShutdownError::ResourceTeardownFailed)
+            } else {
+                Ok(())
+            }
+        })
+    }
+}
+
 pub fn build(
     config: &Config,
     dependencies: Dependencies,
@@ -344,54 +461,59 @@ pub fn build(
     #[cfg(target_os = "linux")]
     {
         validate_config(config)?;
-        let workspace = open_directory(&config.workspace_root)?;
-        let bubblewrap = open_verified_executable(
-            &config.bubblewrap_path,
-            &config.bubblewrap_sha256,
-            "bubblewrap",
-        )?;
-        let launcher =
-            open_verified_executable(&config.launcher_path, &config.launcher_sha256, "launcher")?;
-        let runtime_read_paths = config
-            .runtime_read_paths
-            .iter()
-            .map(|path| {
-                Ok(AnchoredPath {
-                    destination: path.clone(),
-                    descriptor: open_absolute(path, OFlags::PATH | OFlags::CLOEXEC)
-                        .map_err(|_| invalid_config("runtime read path could not be anchored"))?,
-                })
-            })
-            .collect::<Result<Vec<_>, ComponentBuildError>>()?;
-        Ok(ComponentOutput::stateless(LocalSubprocess {
+        Ok(ComponentOutput::initializable(LocalSubprocess {
             confinement_verifier: dependencies.confinement_verifier,
-            config: PreparedConfig {
-                workspace,
-                bubblewrap,
-                launcher,
-                runtime_read_paths,
-                allowed_executables: config
-                    .allowed_executables
-                    .iter()
-                    .map(|path| {
-                        let descriptor = open_absolute(path, OFlags::RDONLY | OFlags::CLOEXEC)
-                            .map_err(|_| {
-                                invalid_config("allowed executable could not be anchored")
-                            })?;
-                        ensure_executable(&descriptor).map_err(|_| {
-                            invalid_config("allowed executable is not a regular file")
-                        })?;
-                        Ok(AnchoredPath {
-                            destination: path.clone(),
-                            descriptor,
-                        })
-                    })
-                    .collect::<Result<Vec<_>, ComponentBuildError>>()?,
-                runtime_symlinks: config.runtime_symlinks.clone(),
-            },
+            config: config.clone(),
+            lifecycle: Mutex::new(LifecycleState {
+                preparation: PreparationState::Uninitialized,
+                live: Vec::new(),
+            }),
             runtime,
         }))
     }
+}
+
+fn prepare_config(config: &Config) -> Result<PreparedConfig, ComponentBuildError> {
+    let workspace = open_directory(&config.workspace_root)?;
+    let bubblewrap = open_verified_executable(
+        &config.bubblewrap_path,
+        &config.bubblewrap_sha256,
+        "bubblewrap",
+    )?;
+    let launcher =
+        open_verified_executable(&config.launcher_path, &config.launcher_sha256, "launcher")?;
+    let runtime_read_paths = config
+        .runtime_read_paths
+        .iter()
+        .map(|path| {
+            Ok(AnchoredPath {
+                destination: path.clone(),
+                descriptor: open_absolute(path, OFlags::PATH | OFlags::CLOEXEC)
+                    .map_err(|_| invalid_config("runtime read path could not be anchored"))?,
+            })
+        })
+        .collect::<Result<Vec<_>, ComponentBuildError>>()?;
+    Ok(PreparedConfig {
+        workspace,
+        bubblewrap,
+        launcher,
+        runtime_read_paths,
+        allowed_executables: config
+            .allowed_executables
+            .iter()
+            .map(|path| {
+                let descriptor = open_absolute(path, OFlags::RDONLY | OFlags::CLOEXEC)
+                    .map_err(|_| invalid_config("allowed executable could not be anchored"))?;
+                ensure_executable(&descriptor)
+                    .map_err(|_| invalid_config("allowed executable is not a regular file"))?;
+                Ok(AnchoredPath {
+                    destination: path.clone(),
+                    descriptor,
+                })
+            })
+            .collect::<Result<Vec<_>, ComponentBuildError>>()?,
+        runtime_symlinks: config.runtime_symlinks.clone(),
+    })
 }
 
 async fn wait_for_setup(
@@ -1363,18 +1485,22 @@ mod tests {
             1024,
         )))
         .unwrap();
-        assert!(matches!(
-            build(
-                &config,
-                Dependencies {
-                    confinement_verifier: ConfinementVerifierBinding::from_generated_authority(
-                        verifier
-                    ),
-                },
-                runtime(),
-            ),
-            Err(ComponentBuildError::InvalidConfig(_))
-        ));
+        let output = build(
+            &config,
+            Dependencies {
+                confinement_verifier: ConfinementVerifierBinding::from_generated_authority(
+                    verifier,
+                ),
+            },
+            runtime(),
+        )
+        .unwrap();
+        assert!(output.initializer().is_some());
+        assert!(output.shutdown_hook().is_some());
+        assert_eq!(
+            ready(output.initializer().unwrap().initialize()),
+            Err(InitializeError::ResourcePreparationFailed)
+        );
         assert!(
             Config::checked(
                 "/workspace/overlap",
@@ -1387,6 +1513,34 @@ mod tests {
                 Vec::new(),
             )
             .is_err()
+        );
+
+        let initialized_owner = tempfile::tempdir_in(".").unwrap();
+        let config = fixture_config(&initialized_owner);
+        let (_issuer, verifier) = ConfinementAuthority::new(SandboxPolicyCeiling::new(policy(
+            FilesystemAccess::ReadOnly,
+            1024,
+        )))
+        .unwrap();
+        let output = build(
+            &config,
+            Dependencies {
+                confinement_verifier: ConfinementVerifierBinding::from_generated_authority(
+                    verifier,
+                ),
+            },
+            runtime(),
+        )
+        .unwrap();
+        assert_eq!(ready(output.initializer().unwrap().initialize()), Ok(()));
+        assert_eq!(
+            ready(output.initializer().unwrap().initialize()),
+            Err(InitializeError::AlreadyInitialized)
+        );
+        assert_eq!(ready(output.shutdown_hook().unwrap().shutdown()), Ok(()));
+        assert_eq!(
+            ready(output.initializer().unwrap().initialize()),
+            Err(InitializeError::ScopeClosed)
         );
         assert!(
             Config::checked(
@@ -1458,6 +1612,18 @@ mod tests {
         )
         .unwrap()
         .into_service();
+        let projection = issuer.project(&ceiling);
+        let plan = rust_agent_policy::process::BackendPlan::linux(
+            &ceiling,
+            rust_agent_policy::process::EnforcementPrimitives::all(),
+        )
+        .unwrap();
+        let confined = issuer.seal(process.clone(), projection, plan).unwrap();
+        assert!(matches!(
+            ready(provider.spawn(confined, CancellationToken::new())),
+            Err(ProcessError::SetupFailed)
+        ));
+
         let projection = issuer.project(&ceiling);
         let plan = rust_agent_policy::process::BackendPlan::linux(
             &ceiling,

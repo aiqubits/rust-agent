@@ -19,14 +19,14 @@ use sha2::{Digest as _, Sha256};
 use tempfile::TempDir;
 
 const MAX_SIZE_GROWTH_PERCENT: u64 = 10;
-const RAW_WASM_ABSOLUTE_CEILING: u64 = 8 * 1024 * 1024;
+const RAW_WASM_ABSOLUTE_CEILING: u64 = 9 * 1024 * 1024;
 const BUNDLE_ABSOLUTE_CEILING: u64 = 512 * 1024;
 const WASM_SIZE_BASELINES: [(&str, u64); 5] = [
     ("bundle/rust_agent.d.ts", 2_940),
     ("bundle/rust_agent.js", 19_330),
     ("bundle/rust_agent_bg.wasm", 387_494),
     ("bundle/rust_agent_bg.wasm.d.ts", 1_703),
-    ("intermediate/rust_agent_raw.wasm", 8_338_807),
+    ("intermediate/rust_agent_raw.wasm", 8_433_950),
 ];
 
 fn repository_root() -> PathBuf {

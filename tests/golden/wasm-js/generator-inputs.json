@@ -1181,6 +1181,7 @@
           }
         ],
         "lifecycle-effects": [
+          "process-exec",
           "read-local"
         ],
         "provides": [
@@ -1522,7 +1523,7 @@
       }
     ]
   },
-  "normalized-catalog-digest": "65cc07ea604902ff765d3e0cb2832fbcbcbb999efaa6bf96846e41c89c577eb4",
+  "normalized-catalog-digest": "5b094e032b5a8ceb0f3181f95eff7518fced53c04afe615fdd89e91e2aef5cc4",
   "catalog-trust-input": {
     "schema": 1,
     "normalized-policy": {
@@ -1870,5 +1871,5 @@
       "environment": []
     }
   },
-  "identity-digest": "b182a007d66055e7a951e2d1ed63579a6abefab84691cb4bc261dd3a2cb06a6a"
+  "identity-digest": "1532b96bac2be5a74a65cfcc57d7736fe2b9d84361beb1331ff4763ff8ff759c"
 }

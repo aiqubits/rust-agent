@@ -18,7 +18,7 @@ config-key = "subprocess-local"
 config-source = "file"
 targets = ['cfg(target_os = "linux")']
 support = "production"
-lifecycle-effects = ["read-local"]
+lifecycle-effects = ["read-local", "process-exec"]
 provides = [{ capability = "cap:subprocess", priority = 100, effects = ["read-local", "write-local", "process-exec"] }]
 requires = [{ capability = "cap:confinement-verifier", mode = "required", field = "confinement_verifier" }]
 conflicts = []

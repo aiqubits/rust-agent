@@ -1969,21 +1969,145 @@ impl RuntimePrimitiveBindings {
     }
 }
 
-/// Factory result that keeps a concrete Component owner alive.
-#[derive(Debug)]
+pub trait Initializable: MaybeSendSync {
+    fn initialize(&self) -> RuntimeFuture<'_, Result<(), InitializeError>>;
+}
+
+pub trait Activatable: MaybeSendSync {
+    fn activate(&self) -> RuntimeFuture<'_, Result<(), ActivateError>>;
+}
+
+pub trait Shutdown: MaybeSendSync {
+    fn shutdown(&self) -> RuntimeFuture<'_, Result<(), ShutdownError>>;
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum InitializeError {
+    AlreadyInitialized,
+    ResourcePreparationFailed,
+    ScopeClosed,
+}
+
+impl fmt::Display for InitializeError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::AlreadyInitialized => "component is already initialized",
+            Self::ResourcePreparationFailed => "component resource preparation failed",
+            Self::ScopeClosed => "component scope is already closed",
+        })
+    }
+}
+
+impl std::error::Error for InitializeError {}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ActivateError;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ShutdownError {
+    ResourceTeardownFailed,
+}
+
+impl fmt::Display for ShutdownError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::ResourceTeardownFailed => "component resource teardown failed",
+        })
+    }
+}
+
+impl std::error::Error for ShutdownError {}
+
+/// Factory result that keeps a concrete Component owner and its typed hooks alive.
 pub struct ComponentOutput<T> {
     service: Arc<T>,
+    initializer: Option<Arc<dyn Initializable>>,
+    activator: Option<Arc<dyn Activatable>>,
+    shutdown: Option<Arc<dyn Shutdown>>,
+}
+
+impl<T: fmt::Debug> fmt::Debug for ComponentOutput<T> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ComponentOutput")
+            .field("service", &self.service)
+            .field("initializer", &self.initializer.is_some())
+            .field("activator", &self.activator.is_some())
+            .field("shutdown", &self.shutdown.is_some())
+            .finish()
+    }
 }
 
 impl<T> ComponentOutput<T> {
     pub fn stateless(service: T) -> Self {
         Self {
             service: Arc::new(service),
+            initializer: None,
+            activator: None,
+            shutdown: None,
+        }
+    }
+
+    pub fn initializable(service: T) -> Self
+    where
+        T: Initializable + Shutdown + 'static,
+    {
+        let service = Arc::new(service);
+        let initializer: Arc<dyn Initializable> = service.clone();
+        let shutdown: Arc<dyn Shutdown> = service.clone();
+        Self {
+            service,
+            initializer: Some(initializer),
+            activator: None,
+            shutdown: Some(shutdown),
+        }
+    }
+
+    pub fn activatable(service: T) -> Self
+    where
+        T: Activatable + Shutdown + 'static,
+    {
+        let service = Arc::new(service);
+        let activator: Arc<dyn Activatable> = service.clone();
+        let shutdown: Arc<dyn Shutdown> = service.clone();
+        Self {
+            service,
+            initializer: None,
+            activator: Some(activator),
+            shutdown: Some(shutdown),
+        }
+    }
+
+    pub fn managed(service: T) -> Self
+    where
+        T: Initializable + Activatable + Shutdown + 'static,
+    {
+        let service = Arc::new(service);
+        let initializer: Arc<dyn Initializable> = service.clone();
+        let activator: Arc<dyn Activatable> = service.clone();
+        let shutdown: Arc<dyn Shutdown> = service.clone();
+        Self {
+            service,
+            initializer: Some(initializer),
+            activator: Some(activator),
+            shutdown: Some(shutdown),
         }
     }
 
     pub fn service(&self) -> &Arc<T> {
         &self.service
+    }
+
+    pub fn initializer(&self) -> Option<&Arc<dyn Initializable>> {
+        self.initializer.as_ref()
+    }
+
+    pub fn activator(&self) -> Option<&Arc<dyn Activatable>> {
+        self.activator.as_ref()
+    }
+
+    pub fn shutdown_hook(&self) -> Option<&Arc<dyn Shutdown>> {
+        self.shutdown.as_ref()
     }
 
     pub fn into_service(self) -> Arc<T> {
@@ -3107,6 +3231,54 @@ impl From<AppHandoffError> for BuildError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[derive(Debug)]
+    struct LifecycleOwner;
+
+    impl Initializable for LifecycleOwner {
+        fn initialize(&self) -> RuntimeFuture<'_, Result<(), InitializeError>> {
+            Box::pin(async { Ok(()) })
+        }
+    }
+
+    impl Activatable for LifecycleOwner {
+        fn activate(&self) -> RuntimeFuture<'_, Result<(), ActivateError>> {
+            Box::pin(async { Ok(()) })
+        }
+    }
+
+    impl Shutdown for LifecycleOwner {
+        fn shutdown(&self) -> RuntimeFuture<'_, Result<(), ShutdownError>> {
+            Box::pin(async { Ok(()) })
+        }
+    }
+
+    #[test]
+    fn component_output_registers_typed_hooks_from_the_same_owner() {
+        let stateless = ComponentOutput::stateless(LifecycleOwner);
+        assert!(stateless.initializer().is_none());
+        assert!(stateless.activator().is_none());
+        assert!(stateless.shutdown_hook().is_none());
+        assert_eq!(Arc::strong_count(stateless.service()), 1);
+
+        let initializable = ComponentOutput::initializable(LifecycleOwner);
+        assert!(initializable.initializer().is_some());
+        assert!(initializable.activator().is_none());
+        assert!(initializable.shutdown_hook().is_some());
+        assert_eq!(Arc::strong_count(initializable.service()), 3);
+
+        let activatable = ComponentOutput::activatable(LifecycleOwner);
+        assert!(activatable.initializer().is_none());
+        assert!(activatable.activator().is_some());
+        assert!(activatable.shutdown_hook().is_some());
+        assert_eq!(Arc::strong_count(activatable.service()), 3);
+
+        let managed = ComponentOutput::managed(LifecycleOwner);
+        assert!(managed.initializer().is_some());
+        assert!(managed.activator().is_some());
+        assert!(managed.shutdown_hook().is_some());
+        assert_eq!(Arc::strong_count(managed.service()), 4);
+    }
 
     #[derive(Debug, Default)]
     struct TestRuntimeDriver {
