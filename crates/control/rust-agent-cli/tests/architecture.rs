@@ -1613,6 +1613,142 @@ fn phase_four_linux_subprocess_is_verified_anchored_and_fail_closed() {
 }
 
 #[test]
+fn phase_four_local_shell_is_a_pure_confinement_adapter() {
+    let root = workspace_root();
+    let path = root.join("crates/components/shell-local");
+    let manifest_text = fs::read_to_string(path.join("Cargo.toml")).unwrap();
+    let manifest: Value = toml::from_str(&manifest_text).unwrap();
+    let metadata = &manifest["package"]["metadata"]["rust-agent"];
+    assert_eq!(metadata["id"].as_str(), Some("shell-local"));
+    assert_eq!(metadata["scope"].as_str(), Some("agent"));
+    assert_eq!(metadata["config-source"].as_str(), Some("file"));
+    assert_eq!(metadata["support"].as_str(), Some("production"));
+    assert!(metadata["lifecycle-effects"].as_array().unwrap().is_empty());
+    assert!(
+        metadata["runtime-primitives"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    let provides = metadata["provides"].as_array().unwrap();
+    assert_eq!(provides.len(), 1);
+    assert_eq!(provides[0]["capability"].as_str(), Some("cap:shell"));
+    assert_eq!(
+        provides[0]["effects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>(),
+        ["process-exec", "read-local", "write-local"]
+    );
+    let requires = metadata["requires"].as_array().unwrap();
+    assert_eq!(requires.len(), 2);
+    assert_eq!(requires[0]["capability"].as_str(), Some("cap:subprocess"));
+    assert_eq!(requires[0]["mode"].as_str(), Some("required"));
+    assert_eq!(requires[0]["field"].as_str(), Some("subprocess"));
+    assert_eq!(requires[1]["capability"].as_str(), Some("cap:sandbox"));
+    assert_eq!(requires[1]["mode"].as_str(), Some("required"));
+    assert_eq!(requires[1]["field"].as_str(), Some("sandbox"));
+
+    let source = fs::read_to_string(path.join("src/lib.rs")).unwrap();
+    for required in [
+        "pub subprocess: SubprocessBinding",
+        "pub sandbox: SandboxBinding",
+        "ProcessSpec::checked(",
+        ".confine(process, request.policy().clone())",
+        ".spawn(confined, cancellation)",
+        "impl ShellProcessControl for LocalShellProcess",
+        "ComponentOutput::stateless",
+        "shell-local declares no runtime primitives",
+    ] {
+        assert!(
+            source.contains(required),
+            "shell-local is missing `{required}`"
+        );
+    }
+    let process = source.find("ProcessSpec::checked(").unwrap();
+    let confine = source
+        .find(".confine(process, request.policy().clone())")
+        .unwrap();
+    let spawn = source.find(".spawn(confined, cancellation)").unwrap();
+    assert!(process < confine && confine < spawn);
+    let production = source.split("#[cfg(all(test").next().unwrap();
+    for forbidden in [
+        "std::process",
+        "std::fs",
+        "unsafe",
+        "ConfinementIssuer",
+        "ConfinementVerifier",
+        "rust_agent_subprocess_local",
+        "rust_agent_sandbox_linux",
+    ] {
+        assert!(
+            !production.contains(forbidden),
+            "shell-local production source contains forbidden boundary `{forbidden}`"
+        );
+    }
+
+    let tree = Command::new("cargo")
+        .args([
+            "tree",
+            "-p",
+            "rust-agent-shell-local",
+            "--edges",
+            "normal",
+            "--no-default-features",
+        ])
+        .current_dir(&root)
+        .output()
+        .unwrap();
+    assert!(tree.status.success());
+    let tree = String::from_utf8(tree.stdout).unwrap();
+    for forbidden in [
+        "AINS",
+        "rust-agent-agent",
+        "rust-agent-subprocess-local",
+        "rust-agent-sandbox-linux",
+        "rust-agent-fs-local",
+        "rust-agent-runtime-tokio",
+        "tokio",
+        "libc",
+        "nix",
+        "rustix",
+    ] {
+        assert!(
+            !tree.contains(forbidden),
+            "shell-local resolved forbidden dependency `{forbidden}`:\n{tree}"
+        );
+    }
+
+    let invariant_map = fs::read_to_string(root.join("docs/invariant-tests.md")).unwrap();
+    let mapped = markdown_section(&invariant_map, "## Phase 4", "## Accepted ADR amendments");
+    for required in [
+        "rust_agent_shell_local::tests::resolves_exact_shell_process_and_preserves_enforcement_evidence",
+        "rust_agent_shell_local::tests::start_delegates_wait_and_tree_termination_without_process_bypass",
+        "rust_agent_shell_local::tests::cancellation_and_sandbox_rejection_stop_before_subprocess_spawn",
+        "rust_agent_shell_local::tests::process_failures_and_provider_contracts_remain_typed_and_bounded",
+        "rust_agent_shell_local::tests::factory_is_pure_closed_and_deterministic",
+        "architecture::phase_four_local_shell_is_a_pure_confinement_adapter",
+    ] {
+        assert!(
+            mapped.contains(required),
+            "unmapped Phase 4.7 evidence: {required}"
+        );
+    }
+    let ci = fs::read_to_string(root.join(".github/workflows/ci.yml")).unwrap();
+    for required in [
+        "Verify Phase 4 local shell closure",
+        "Verify Phase 4 local shell contracts",
+    ] {
+        assert!(
+            ci.contains(required),
+            "missing Phase 4.7 CI gate `{required}`"
+        );
+    }
+}
+
+#[test]
 fn rust_toolchain_version_is_pinned_and_synchronized() {
     let root = workspace_root();
     assert_eq!(env!("CARGO_PKG_RUST_VERSION"), PINNED_RUST_VERSION);

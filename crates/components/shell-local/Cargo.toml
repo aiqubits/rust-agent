@@ -1,0 +1,48 @@
+[package]
+name = "rust-agent-shell-local"
+description = "Sandboxed local shell Component"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[package.metadata.rust-agent]
+schema = 1
+id = "shell-local"
+scope = "agent"
+factory = "rust_agent_shell_local::build"
+dependencies-type = "rust_agent_shell_local::Dependencies"
+config-type = "rust_agent_shell_local::Config"
+config-key = "shell-local"
+config-source = "file"
+targets = ['cfg(target_os = "linux")']
+support = "production"
+lifecycle-effects = []
+provides = [{ capability = "cap:shell", priority = 100, effects = ["process-exec", "read-local", "write-local"] }]
+requires = [
+  { capability = "cap:subprocess", mode = "required", field = "subprocess" },
+  { capability = "cap:sandbox", mode = "required", field = "sandbox" },
+]
+conflicts = []
+security = ["process-exec", "read-local", "write-local"]
+runtime-primitives = []
+build-requirements = { executables = [], read-inputs = [], environment = [] }
+cargo-features = []
+
+[features]
+default = []
+
+[dependencies]
+rust-agent-core = { version = "0.1.0", path = "../../api/rust-agent-core", default-features = false }
+rust-agent-process = { version = "0.1.0", path = "../../api/rust-agent-process", default-features = false }
+rust-agent-runtime-api = { version = "0.1.0", path = "../../api/rust-agent-runtime-api", default-features = false }
+serde.workspace = true
+
+[dev-dependencies]
+rust-agent-fs = { version = "0.1.0", path = "../../api/rust-agent-fs", default-features = false }
+rust-agent-policy = { version = "0.1.0", path = "../../api/rust-agent-policy", default-features = false }
+rust-agent-sandbox-linux = { version = "0.1.0", path = "../sandbox-linux", default-features = false }
+
+[lints]
+workspace = true
