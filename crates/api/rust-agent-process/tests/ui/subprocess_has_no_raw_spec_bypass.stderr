@@ -1,0 +1,13 @@
+error[E0308]: mismatched types
+ --> tests/ui/subprocess_has_no_raw_spec_bypass.rs:5:27
+  |
+5 |     let _ = binding.spawn(raw, CancellationToken::new());
+  |                     ----- ^^^ expected `ConfinedProcessSpec`, found `ProcessSpec`
+  |                     |
+  |                     arguments to this method are incorrect
+  |
+note: method defined here
+ --> src/process.rs
+  |
+  |     pub fn spawn(
+  |            ^^^^^

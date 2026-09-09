@@ -1,0 +1,23 @@
+error[E0616]: field `provider` of struct `SubprocessBinding` is private
+ --> tests/ui/access_raw_providers.rs:4:22
+  |
+4 |     let _ = &binding.provider;
+  |                      ^^^^^^^^ private field
+
+error[E0616]: field `provider` of struct `SandboxBinding` is private
+ --> tests/ui/access_raw_providers.rs:8:22
+  |
+8 |     let _ = &binding.provider;
+  |                      ^^^^^^^^ private field
+
+error[E0616]: field `provider` of struct `ShellBinding` is private
+  --> tests/ui/access_raw_providers.rs:12:22
+   |
+12 |     let _ = &binding.provider;
+   |                      ^^^^^^^^ private field
+
+error[E0616]: field `provider` of struct `TerminalBinding` is private
+  --> tests/ui/access_raw_providers.rs:16:22
+   |
+16 |     let _ = &binding.provider;
+   |                      ^^^^^^^^ private field

@@ -1,0 +1,77 @@
+[package]
+name = "rust-agent-process"
+description = "Bounded process, confinement, shell, and terminal capability contracts"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[package.metadata.rust-agent.build-requirements]
+schema = 1
+executables = []
+read-inputs = []
+environment = []
+
+[[package.metadata.rust-agent.capability]]
+id = "cap:subprocess"
+api = "rust_agent_process::Subprocess"
+binding-type = "rust_agent_process::SubprocessBinding"
+binding-adapter = "rust_agent_process::SubprocessBinding::from_provider"
+binding = "singleton"
+scope = "agent"
+
+[[package.metadata.rust-agent.capability]]
+id = "cap:sandbox"
+api = "rust_agent_process::Sandbox"
+binding-type = "rust_agent_process::SandboxBinding"
+binding-adapter = "rust_agent_process::SandboxBinding::from_provider"
+binding = "singleton"
+scope = "agent"
+
+[[package.metadata.rust-agent.capability]]
+id = "cap:confinement-issuer"
+api = "rust_agent_process::ConfinementIssuer"
+binding-type = "rust_agent_process::ConfinementIssuerBinding"
+binding-adapter = "rust_agent_process::ConfinementIssuerBinding::from_generated_authority"
+binding = "singleton"
+scope = "agent"
+
+[[package.metadata.rust-agent.capability]]
+id = "cap:confinement-verifier"
+api = "rust_agent_process::ConfinementVerifier"
+binding-type = "rust_agent_process::ConfinementVerifierBinding"
+binding-adapter = "rust_agent_process::ConfinementVerifierBinding::from_generated_authority"
+binding = "singleton"
+scope = "agent"
+
+[[package.metadata.rust-agent.capability]]
+id = "cap:shell"
+api = "rust_agent_process::Shell"
+binding-type = "rust_agent_process::ShellBinding"
+binding-adapter = "rust_agent_process::ShellBinding::from_provider"
+binding = "singleton"
+scope = "agent"
+
+[[package.metadata.rust-agent.capability]]
+id = "cap:terminal"
+api = "rust_agent_process::TerminalManager"
+binding-type = "rust_agent_process::TerminalBinding"
+binding-adapter = "rust_agent_process::TerminalBinding::from_provider"
+binding = "singleton"
+scope = "agent"
+
+[features]
+default = []
+
+[dependencies]
+rust-agent-core = { version = "0.1.0", path = "../rust-agent-core", default-features = false }
+rust-agent-fs = { version = "0.1.0", path = "../rust-agent-fs", default-features = false }
+rust-agent-policy = { version = "0.1.0", path = "../rust-agent-policy", default-features = false }
+rust-agent-runtime-api = { version = "0.1.0", path = "../rust-agent-runtime-api", default-features = false }
+
+[dev-dependencies]
+trybuild.workspace = true
+
+[lints]
+workspace = true

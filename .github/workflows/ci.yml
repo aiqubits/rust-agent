@@ -122,6 +122,21 @@ jobs:
           for target in wasm32-unknown-unknown aarch64-linux-android aarch64-apple-ios x86_64-apple-darwin x86_64-pc-windows-msvc; do
             cargo check --target "$target" --all-features -p rust-agent-fs
           done
+      - name: Verify Phase 4 process API dependency closures
+        run: |
+          cargo check -p rust-agent-policy --no-default-features
+          cargo check -p rust-agent-policy --all-features
+          cargo check -p rust-agent-process --no-default-features
+          cargo check -p rust-agent-process --all-features
+          cargo tree -p rust-agent-process --edges normal --no-default-features
+      - name: Verify Phase 4 process API target matrix
+        shell: bash
+        run: |
+          for target in wasm32-unknown-unknown aarch64-linux-android aarch64-apple-ios x86_64-apple-darwin x86_64-pc-windows-msvc; do
+            cargo check --target "$target" --all-features -p rust-agent-policy -p rust-agent-process
+          done
+      - name: Verify Phase 4 process API contracts
+        run: cargo test -p rust-agent-policy -p rust-agent-process --all-targets --all-features
       - name: Verify Phase 4 resource namespace dependency closures
         run: |
           cargo check -p rust-agent-resource-namespace --no-default-features

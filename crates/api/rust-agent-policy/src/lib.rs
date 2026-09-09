@@ -1,5 +1,7 @@
 //! Effect-free permission decisions and approval capability contracts.
 
+pub mod process;
+
 use std::{fmt, future::Future, pin::Pin, sync::Arc};
 
 use rust_agent_core::{CanonicalId, Digest, MaybeSendSync, SecurityEffects};

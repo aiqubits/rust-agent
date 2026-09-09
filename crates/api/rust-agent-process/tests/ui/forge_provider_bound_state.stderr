@@ -1,0 +1,23 @@
+error[E0451]: fields `provider_key`, `binding_authority` and `request` of struct `ShellSpec` are private
+ --> tests/ui/forge_provider_bound_state.rs:6:9
+  |
+5 |     ShellSpec {
+  |     --------- in this type
+6 |         provider_key,
+  |         ^^^^^^^^^^^^ private field
+7 |         binding_authority: Some(std::sync::Arc::new(())),
+  |         ^^^^^^^^^^^^^^^^^ private field
+8 |         request,
+  |         ^^^^^^^ private field
+
+error[E0451]: fields `provider_key`, `binding_authority` and `identity` of struct `TerminalId` are private
+  --> tests/ui/forge_provider_bound_state.rs:14:9
+   |
+13 |     TerminalId {
+   |     ---------- in this type
+14 |         provider_key,
+   |         ^^^^^^^^^^^^ private field
+15 |         binding_authority: Some(std::sync::Arc::new(())),
+   |         ^^^^^^^^^^^^^^^^^ private field
+16 |         identity: std::num::NonZeroU64::MIN,
+   |         ^^^^^^^^ private field

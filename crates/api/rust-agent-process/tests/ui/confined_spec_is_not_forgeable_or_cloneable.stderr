@@ -1,0 +1,83 @@
+error: cannot construct `ConfinementProjection` with struct literal syntax due to private fields
+  --> tests/ui/confined_spec_is_not_forgeable_or_cloneable.rs:15:5
+   |
+15 |     ConfinementProjection {
+   |     ^^^^^^^^^^^^^^^^^^^^^
+16 |         effective_policy,
+   |         ---------------- private field
+17 |         policy_digest,
+   |         ------------- private field
+   |
+   = note: ...and other private field `authority` that was not provided
+
+error[E0277]: the trait bound `ConfinedProcessSpec: Clone` is not satisfied
+  --> tests/ui/confined_spec_is_not_forgeable_or_cloneable.rs:22:21
+   |
+22 |     require_clone::<ConfinedProcessSpec>();
+   |                     ^^^^^^^^^^^^^^^^^^^ the trait `Clone` is not implemented for `ConfinedProcessSpec`
+   |
+note: required by a bound in `require_clone`
+  --> tests/ui/confined_spec_is_not_forgeable_or_cloneable.rs:8:21
+   |
+ 8 | fn require_clone<T: Clone>() {}
+   |                     ^^^^^ required by this bound in `require_clone`
+
+error[E0277]: the trait bound `ConfinedProcessSpec: Default` is not satisfied
+  --> tests/ui/confined_spec_is_not_forgeable_or_cloneable.rs:23:23
+   |
+23 |     require_default::<ConfinedProcessSpec>();
+   |                       ^^^^^^^^^^^^^^^^^^^ the trait `Default` is not implemented for `ConfinedProcessSpec`
+   |
+note: required by a bound in `require_default`
+  --> tests/ui/confined_spec_is_not_forgeable_or_cloneable.rs:9:23
+   |
+ 9 | fn require_default<T: Default>() {}
+   |                       ^^^^^^^ required by this bound in `require_default`
+
+error[E0277]: the trait bound `ConfinementProjection: Clone` is not satisfied
+  --> tests/ui/confined_spec_is_not_forgeable_or_cloneable.rs:24:21
+   |
+24 |     require_clone::<ConfinementProjection>();
+   |                     ^^^^^^^^^^^^^^^^^^^^^ the trait `Clone` is not implemented for `ConfinementProjection`
+   |
+note: required by a bound in `require_clone`
+  --> tests/ui/confined_spec_is_not_forgeable_or_cloneable.rs:8:21
+   |
+ 8 | fn require_clone<T: Clone>() {}
+   |                     ^^^^^ required by this bound in `require_clone`
+
+error[E0277]: the trait bound `VerifiedProcessSpec: Clone` is not satisfied
+  --> tests/ui/confined_spec_is_not_forgeable_or_cloneable.rs:25:21
+   |
+25 |     require_clone::<VerifiedProcessSpec>();
+   |                     ^^^^^^^^^^^^^^^^^^^ the trait `Clone` is not implemented for `VerifiedProcessSpec`
+   |
+note: required by a bound in `require_clone`
+  --> tests/ui/confined_spec_is_not_forgeable_or_cloneable.rs:8:21
+   |
+ 8 | fn require_clone<T: Clone>() {}
+   |                     ^^^^^ required by this bound in `require_clone`
+
+error[E0277]: the trait bound `ConfinementIssuerBinding: Clone` is not satisfied
+  --> tests/ui/confined_spec_is_not_forgeable_or_cloneable.rs:26:21
+   |
+26 |     require_clone::<ConfinementIssuerBinding>();
+   |                     ^^^^^^^^^^^^^^^^^^^^^^^^ the trait `Clone` is not implemented for `ConfinementIssuerBinding`
+   |
+note: required by a bound in `require_clone`
+  --> tests/ui/confined_spec_is_not_forgeable_or_cloneable.rs:8:21
+   |
+ 8 | fn require_clone<T: Clone>() {}
+   |                     ^^^^^ required by this bound in `require_clone`
+
+error[E0277]: the trait bound `ConfinementVerifierBinding: Clone` is not satisfied
+  --> tests/ui/confined_spec_is_not_forgeable_or_cloneable.rs:27:21
+   |
+27 |     require_clone::<ConfinementVerifierBinding>();
+   |                     ^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `Clone` is not implemented for `ConfinementVerifierBinding`
+   |
+note: required by a bound in `require_clone`
+  --> tests/ui/confined_spec_is_not_forgeable_or_cloneable.rs:8:21
+   |
+ 8 | fn require_clone<T: Clone>() {}
+   |                     ^^^^^ required by this bound in `require_clone`

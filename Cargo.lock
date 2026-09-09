@@ -1215,6 +1215,18 @@ version = "0.1.0"
 dependencies = [
  "rust-agent-core",
  "rust-agent-runtime-api",
+ "sha2",
+ "trybuild",
+]
+
+[[package]]
+name = "rust-agent-process"
+version = "0.1.0"
+dependencies = [
+ "rust-agent-core",
+ "rust-agent-fs",
+ "rust-agent-policy",
+ "rust-agent-runtime-api",
  "trybuild",
 ]
 

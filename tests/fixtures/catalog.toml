@@ -39,6 +39,60 @@ binding = "singleton"
 scope = "app"
 
 [[capabilities]]
+id = "cap:subprocess"
+api-package = "rust-agent-process"
+rust-api = "rust_agent_process::Subprocess"
+binding-type = "rust_agent_process::SubprocessBinding"
+binding-adapter = "rust_agent_process::SubprocessBinding::from_provider"
+binding = "singleton"
+scope = "agent"
+
+[[capabilities]]
+id = "cap:sandbox"
+api-package = "rust-agent-process"
+rust-api = "rust_agent_process::Sandbox"
+binding-type = "rust_agent_process::SandboxBinding"
+binding-adapter = "rust_agent_process::SandboxBinding::from_provider"
+binding = "singleton"
+scope = "agent"
+
+[[capabilities]]
+id = "cap:confinement-issuer"
+api-package = "rust-agent-process"
+rust-api = "rust_agent_process::ConfinementIssuer"
+binding-type = "rust_agent_process::ConfinementIssuerBinding"
+binding-adapter = "rust_agent_process::ConfinementIssuerBinding::from_generated_authority"
+binding = "singleton"
+scope = "agent"
+
+[[capabilities]]
+id = "cap:confinement-verifier"
+api-package = "rust-agent-process"
+rust-api = "rust_agent_process::ConfinementVerifier"
+binding-type = "rust_agent_process::ConfinementVerifierBinding"
+binding-adapter = "rust_agent_process::ConfinementVerifierBinding::from_generated_authority"
+binding = "singleton"
+scope = "agent"
+
+[[capabilities]]
+id = "cap:shell"
+api-package = "rust-agent-process"
+rust-api = "rust_agent_process::Shell"
+binding-type = "rust_agent_process::ShellBinding"
+binding-adapter = "rust_agent_process::ShellBinding::from_provider"
+binding = "singleton"
+scope = "agent"
+
+[[capabilities]]
+id = "cap:terminal"
+api-package = "rust-agent-process"
+rust-api = "rust_agent_process::TerminalManager"
+binding-type = "rust_agent_process::TerminalBinding"
+binding-adapter = "rust_agent_process::TerminalBinding::from_provider"
+binding = "singleton"
+scope = "agent"
+
+[[capabilities]]
 id = "cap:fs-read"
 api-package = "rust-agent-fs"
 rust-api = "rust_agent_fs::FileRead"

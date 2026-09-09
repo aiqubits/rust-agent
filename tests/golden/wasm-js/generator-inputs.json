@@ -31,6 +31,24 @@
         "scope": "app"
       },
       {
+        "id": "cap:confinement-issuer",
+        "api-package": "rust-agent-process",
+        "rust-api": "rust_agent_process::ConfinementIssuer",
+        "binding-type": "rust_agent_process::ConfinementIssuerBinding",
+        "binding-adapter": "rust_agent_process::ConfinementIssuerBinding::from_generated_authority",
+        "binding": "singleton",
+        "scope": "agent"
+      },
+      {
+        "id": "cap:confinement-verifier",
+        "api-package": "rust-agent-process",
+        "rust-api": "rust_agent_process::ConfinementVerifier",
+        "binding-type": "rust_agent_process::ConfinementVerifierBinding",
+        "binding-adapter": "rust_agent_process::ConfinementVerifierBinding::from_generated_authority",
+        "binding": "singleton",
+        "scope": "agent"
+      },
+      {
         "id": "cap:conversation-compaction",
         "api-package": "rust-agent-prompt",
         "rust-api": "rust_agent_prompt::Compactor",
@@ -148,11 +166,38 @@
         "scope": "app"
       },
       {
+        "id": "cap:sandbox",
+        "api-package": "rust-agent-process",
+        "rust-api": "rust_agent_process::Sandbox",
+        "binding-type": "rust_agent_process::SandboxBinding",
+        "binding-adapter": "rust_agent_process::SandboxBinding::from_provider",
+        "binding": "singleton",
+        "scope": "agent"
+      },
+      {
+        "id": "cap:shell",
+        "api-package": "rust-agent-process",
+        "rust-api": "rust_agent_process::Shell",
+        "binding-type": "rust_agent_process::ShellBinding",
+        "binding-adapter": "rust_agent_process::ShellBinding::from_provider",
+        "binding": "singleton",
+        "scope": "agent"
+      },
+      {
         "id": "cap:spill-store",
         "api-package": "rust-agent-spill",
         "rust-api": "rust_agent_spill::SpillStore",
         "binding-type": "rust_agent_spill::SpillStoreBinding",
         "binding-adapter": "rust_agent_spill::SpillStoreBinding::from_provider",
+        "binding": "singleton",
+        "scope": "agent"
+      },
+      {
+        "id": "cap:subprocess",
+        "api-package": "rust-agent-process",
+        "rust-api": "rust_agent_process::Subprocess",
+        "binding-type": "rust_agent_process::SubprocessBinding",
+        "binding-adapter": "rust_agent_process::SubprocessBinding::from_provider",
         "binding": "singleton",
         "scope": "agent"
       },
@@ -164,6 +209,15 @@
         "binding-adapter": "rust_agent_telemetry::TelemetryBinding::from_provider",
         "binding": "ordered-multi",
         "scope": "app"
+      },
+      {
+        "id": "cap:terminal",
+        "api-package": "rust-agent-process",
+        "rust-api": "rust_agent_process::TerminalManager",
+        "binding-type": "rust_agent_process::TerminalBinding",
+        "binding-adapter": "rust_agent_process::TerminalBinding::from_provider",
+        "binding": "singleton",
+        "scope": "agent"
       },
       {
         "id": "cap:token-meter",
@@ -1351,7 +1405,7 @@
       }
     ]
   },
-  "normalized-catalog-digest": "c5f3722d2e89bce36dcc5ae2d9ca2cb4edc76281f01198d0095f49c06743e70a",
+  "normalized-catalog-digest": "2aec8275b77bd0b5776ba06ee91afac6b2d9adaea98cda4f910c79e428c4bb07",
   "catalog-trust-input": {
     "schema": 1,
     "normalized-policy": {
@@ -1658,6 +1712,11 @@
       "read-inputs": [],
       "environment": []
     },
+    "rust-agent-process": {
+      "executables": [],
+      "read-inputs": [],
+      "environment": []
+    },
     "rust-agent-prompt": {
       "executables": [],
       "read-inputs": [],
@@ -1694,5 +1753,5 @@
       "environment": []
     }
   },
-  "identity-digest": "e23cbc199d0eb619685b2fe1755eccc1e3a37f07e9e3bae7772185b581d0914e"
+  "identity-digest": "36be5b50fef8a6d29da64a815d371929fe1956955d9832f447bd95eaf552878c"
 }

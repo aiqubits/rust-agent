@@ -35,6 +35,7 @@ default = []
 [dependencies]
 rust-agent-core = { version = "0.1.0", path = "../rust-agent-core", default-features = false }
 rust-agent-runtime-api = { version = "0.1.0", path = "../rust-agent-runtime-api", default-features = false }
+sha2 = "0.10.9"
 
 [dev-dependencies]
 trybuild = "1.0.110"

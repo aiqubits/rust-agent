@@ -349,7 +349,7 @@ fn phase_three_policy_api_and_default_provider_are_dependency_isolated() {
     };
     assert_eq!(
         dependencies("crates/api/rust-agent-policy/Cargo.toml"),
-        ["rust-agent-core", "rust-agent-runtime-api"]
+        ["rust-agent-core", "rust-agent-runtime-api", "sha2"]
             .into_iter()
             .map(str::to_owned)
             .collect()
@@ -1117,6 +1117,197 @@ fn phase_four_local_filesystems_and_tool_adapter_are_capability_exact() {
         assert!(
             ci.contains(required),
             "missing Phase 4.3 CI gate `{required}`"
+        );
+    }
+}
+
+#[test]
+fn phase_four_process_confinement_api_is_closed_bounded_and_dependency_isolated() {
+    let root = workspace_root();
+    let manifest: Value = toml::from_str(
+        &fs::read_to_string(root.join("crates/api/rust-agent-process/Cargo.toml")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        manifest["dependencies"]
+            .as_table()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>(),
+        [
+            "rust-agent-core",
+            "rust-agent-fs",
+            "rust-agent-policy",
+            "rust-agent-runtime-api",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect()
+    );
+    let capabilities = manifest["package"]["metadata"]["rust-agent"]["capability"]
+        .as_array()
+        .unwrap();
+    assert_eq!(capabilities.len(), 6);
+    assert_eq!(
+        capabilities
+            .iter()
+            .map(|capability| capability["id"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        [
+            "cap:subprocess",
+            "cap:sandbox",
+            "cap:confinement-issuer",
+            "cap:confinement-verifier",
+            "cap:shell",
+            "cap:terminal",
+        ]
+    );
+    assert!(capabilities.iter().all(|capability| {
+        capability["binding"].as_str() == Some("singleton")
+            && capability["scope"].as_str() == Some("agent")
+    }));
+
+    let process_root = root.join("crates/api/rust-agent-process/src");
+    let lib = fs::read_to_string(process_root.join("lib.rs")).unwrap();
+    let confinement = fs::read_to_string(process_root.join("confinement.rs")).unwrap();
+    let process = fs::read_to_string(process_root.join("process.rs")).unwrap();
+    let spec = fs::read_to_string(process_root.join("spec.rs")).unwrap();
+    let shell = fs::read_to_string(process_root.join("shell.rs")).unwrap();
+    let terminal = fs::read_to_string(process_root.join("terminal.rs")).unwrap();
+    let policy =
+        fs::read_to_string(root.join("crates/api/rust-agent-policy/src/process.rs")).unwrap();
+    for required in [
+        "pub struct ProcessSpec",
+        "pub struct ProcessEnvironment",
+        "MAX_PROCESS_ARGUMENTS",
+        "CredentialEnvironmentDenied",
+    ] {
+        assert!(
+            spec.contains(required),
+            "process spec is missing `{required}`"
+        );
+    }
+    for required in [
+        "pub struct ConfinementAuthority",
+        "pub struct ConfinementIssuer",
+        "pub struct ConfinementVerifier",
+        "pub struct ConfinedProcessSpec",
+        "pub struct VerifiedProcessSpec",
+        "Arc::ptr_eq",
+        ".is_within(self.state.ceiling.policy())",
+        ".validate_for(&projection.effective_policy)",
+    ] {
+        assert!(
+            confinement.contains(required),
+            "confinement boundary is missing `{required}`"
+        );
+    }
+    assert!(!confinement.contains("impl Clone for ConfinedProcessSpec"));
+    assert!(
+        !confinement
+            .contains("derive(Clone, Debug, Eq, PartialEq)]\npub struct ConfinedProcessSpec")
+    );
+    let subprocess_trait = process
+        .split("pub trait Subprocess")
+        .nth(1)
+        .unwrap()
+        .split("#[derive(Clone)]")
+        .next()
+        .unwrap();
+    assert!(subprocess_trait.contains("spec: ConfinedProcessSpec"));
+    assert!(!subprocess_trait.contains("spec: ProcessSpec"));
+    assert!(process.contains("pub struct EnforcementReport"));
+    assert!(process.contains("applied_primitives().contains(required_primitives)"));
+    assert!(shell.contains("pub trait Shell"));
+    assert!(shell.contains("fn resolve(&self, request: ShellRequest) -> Result<ShellSpec"));
+    assert!(shell.contains("spec: ShellSpec"));
+    assert!(shell.contains("binding_authority: Option<Arc<()>>"));
+    assert!(shell.contains("Arc::ptr_eq(authority, &self.binding_authority)"));
+    assert!(!shell.contains("ShellSpec::for_provider"));
+    assert!(!shell.contains("ProviderShellSpec"));
+    assert!(terminal.contains("pub trait TerminalManager"));
+    assert!(terminal.contains("Result<TerminalId, TerminalError>"));
+    assert!(terminal.contains("id: TerminalId"));
+    assert!(terminal.contains("binding_authority: Option<Arc<()>>"));
+    assert!(terminal.contains("Arc::ptr_eq(authority, &self.binding_authority)"));
+    assert!(!terminal.contains("TerminalId::for_provider"));
+    assert!(!terminal.contains("ProviderTerminalId"));
+    assert!(policy.contains("pub struct SandboxPolicyCeiling"));
+    assert!(policy.contains("pub struct BackendPlan"));
+    assert!(policy.contains("BACKEND_PLAN_SCHEMA_VERSION"));
+    assert!(policy.contains("required_linux_primitives"));
+    for source in [
+        &lib,
+        &confinement,
+        &process,
+        &spec,
+        &shell,
+        &terminal,
+        &policy,
+    ] {
+        assert!(!source.contains("unsafe"));
+        assert!(!source.contains("std::process"));
+        assert!(!source.contains("std::fs"));
+    }
+
+    let tree = Command::new("cargo")
+        .args([
+            "tree",
+            "-p",
+            "rust-agent-process",
+            "--edges",
+            "normal",
+            "--no-default-features",
+        ])
+        .current_dir(&root)
+        .output()
+        .unwrap();
+    assert!(tree.status.success());
+    let tree = String::from_utf8(tree.stdout).unwrap();
+    for forbidden in [
+        "AINS",
+        "rust-agent-agent",
+        "rust-agent-fs-local",
+        "rust-agent-subprocess-local",
+        "rust-agent-sandbox-linux",
+        "rust-agent-shell-local",
+        "rust-agent-terminal-local",
+        "libc",
+        "nix",
+        "rustix",
+        "tokio",
+    ] {
+        assert!(
+            !tree.contains(forbidden),
+            "process API resolved concrete/effectful dependency `{forbidden}`:\n{tree}"
+        );
+    }
+
+    let invariant_map = fs::read_to_string(root.join("docs/invariant-tests.md")).unwrap();
+    let mapped = markdown_section(&invariant_map, "## Phase 4", "## Accepted ADR amendments");
+    for required in [
+        "rust_agent_policy::process::tests::policy_projection_is_monotonic_bounded_and_deterministic",
+        "rust_agent_process::tests::confinement_authority_is_pair_exact_and_policy_digest_bound",
+        "rust_agent_process::tests::sandbox_and_subprocess_pipeline_has_no_raw_or_cancelled_spawn_bypass",
+        "rust_agent_process::tests::subprocess_rejects_effect_and_enforcement_report_drift",
+        "privacy::confinement_process_shell_terminal_authority_remains_private",
+        "architecture::phase_four_process_confinement_api_is_closed_bounded_and_dependency_isolated",
+    ] {
+        assert!(
+            mapped.contains(required),
+            "unmapped Phase 4.4 evidence: {required}"
+        );
+    }
+    let ci = fs::read_to_string(root.join(".github/workflows/ci.yml")).unwrap();
+    for required in [
+        "Verify Phase 4 process API dependency closures",
+        "Verify Phase 4 process API target matrix",
+        "Verify Phase 4 process API contracts",
+    ] {
+        assert!(
+            ci.contains(required),
+            "missing Phase 4.4 CI gate `{required}`"
         );
     }
 }
