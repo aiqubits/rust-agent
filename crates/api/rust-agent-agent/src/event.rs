@@ -964,7 +964,24 @@ mod tests {
 
     #[test]
     fn publisher_wakes_feeds_only_after_releasing_registry_and_queue_locks() {
-        let publisher = publisher(agent(1), lifecycle(1));
+        let driver = Arc::new(CountingRuntime {
+            spawns: AtomicUsize::new(0),
+        });
+        let runtime = RuntimePrimitives::from_adapter(
+            RuntimeAdapterIdentity::checked("runtime-lock-probe").unwrap(),
+            Arc::clone(&driver),
+            driver.clone(),
+            driver.clone(),
+            driver,
+        );
+        let publisher = EventPublisher::new(
+            agent(1),
+            lifecycle(1),
+            AgentPublicStatus::Ready,
+            AgentResourceBudget::default(),
+            runtime,
+        )
+        .unwrap();
         let mut feed = publisher.open(request(None, 2, 1024)).unwrap();
         let probe = Arc::new(LockProbeWake {
             publisher: Arc::downgrade(&publisher),
