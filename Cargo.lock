@@ -1319,6 +1319,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "rust-agent-subprocess-local"
+version = "0.1.0"
+dependencies = [
+ "landlock",
+ "libc",
+ "nix",
+ "rust-agent-core",
+ "rust-agent-fs",
+ "rust-agent-policy",
+ "rust-agent-process",
+ "rust-agent-runtime-api",
+ "rust-agent-runtime-tokio",
+ "rust-agent-sandbox-linux",
+ "rustix",
+ "seccompy",
+ "serde",
+ "sha2",
+ "tempfile",
+]
+
+[[package]]
 name = "rust-agent-telemetry"
 version = "0.1.0"
 dependencies = [

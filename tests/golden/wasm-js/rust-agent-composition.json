@@ -1,7 +1,7 @@
 {
   "schema": 2,
   "algorithm": "sha256-rust-agent-composition-v2",
-  "composition-hash": "a046b6a078aa0342b817642c97975bc5d7b0bdefbc01aa8fdfb3e43042a1d591",
+  "composition-hash": "5a699be4dbe50c01120e6f5cbc4d2a730f6b6fbb8de286a4fbcb8dcc4a1b76ff",
   "build-kind": "wasm",
   "profile-name": "fixture-wasm-js",
   "normalized-profile": {
@@ -1339,6 +1339,71 @@
           "cargo-features": []
         },
         {
+          "id": "subprocess-local",
+          "package": "rust-agent-subprocess-local",
+          "package-path": "crates/components/subprocess-local",
+          "scope": "agent",
+          "factory": "rust_agent_subprocess_local::build",
+          "dependencies-type": "rust_agent_subprocess_local::Dependencies",
+          "config-type": "rust_agent_subprocess_local::Config",
+          "config-source": "file",
+          "config-key": "subprocess-local",
+          "resource-namespace-preparer": null,
+          "prepared-config-type": null,
+          "targets": "cfg(target_os = \"linux\")",
+          "target-support": [
+            {
+              "predicate": "cfg(target_os = \"linux\")",
+              "tier": "production"
+            }
+          ],
+          "lifecycle-effects": [
+            "read-local"
+          ],
+          "provides": [
+            {
+              "capability": "cap:subprocess",
+              "key": null,
+              "priority": 100,
+              "order": 0,
+              "layer": "provider",
+              "resource-namespace": {
+                "mode": "none"
+              },
+              "effects": [
+                "process-exec",
+                "read-local",
+                "write-local"
+              ]
+            }
+          ],
+          "requires": [
+            {
+              "capability": "cap:confinement-verifier",
+              "mode": "required",
+              "field": "confinement_verifier",
+              "key": null
+            }
+          ],
+          "conflicts": [],
+          "security": [
+            "process-exec",
+            "read-local",
+            "write-local"
+          ],
+          "runtime-primitives": [
+            "clock",
+            "sleeper"
+          ],
+          "build-requirements": {
+            "executables": [],
+            "read-inputs": [],
+            "environment": []
+          },
+          "app-coexistence": null,
+          "cargo-features": []
+        },
+        {
           "id": "tool-executor-guarded",
           "package": "rust-agent-tool-executor-guarded",
           "package-path": "crates/components/tool-executor-guarded",
@@ -1634,7 +1699,7 @@
         }
       ]
     },
-    "normalized-catalog-digest": "378f6d93e5a2b707ce0e2c8b1b494a5981a5d963a0351430750048506ea4461d",
+    "normalized-catalog-digest": "65cc07ea604902ff765d3e0cb2832fbcbcbb999efaa6bf96846e41c89c577eb4",
     "catalog-trust-input": {
       "schema": 1,
       "normalized-policy": {
@@ -1982,7 +2047,7 @@
         "environment": []
       }
     },
-    "identity-digest": "170ad9a9a490af01886de969bc7494cb0f2554f01718c2e4e82fa91fd3c611c9"
+    "identity-digest": "b182a007d66055e7a951e2d1ed63579a6abefab84691cb4bc261dd3a2cb06a6a"
   },
   "custom-target-spec": null,
   "selected-components": [
@@ -2239,6 +2304,13 @@
       },
       {
         "component": "sandbox-linux",
+        "conclusion": "excluded",
+        "reasons": [
+          "NotRequired"
+        ]
+      },
+      {
+        "component": "subprocess-local",
         "conclusion": "excluded",
         "reasons": [
           "NotRequired"
@@ -3473,12 +3545,12 @@
     },
     {
       "path": "generator-inputs.json",
-      "digest": "48e06649571c6f3a6558d87d546c2a4e34c59899fc5e14b25e0bca252015b8c9",
-      "bytes": 64346
+      "digest": "b7ccc502e5f33184af7f2b47665fbb8d40d51e0ede6b51029a62147637b749f8",
+      "bytes": 66185
     },
     {
       "path": "src/lib.rs",
-      "digest": "21e3dfd2c334a474beb1b36ee6a563c5a72c61b83983b567e2b2f6cae4cc0976",
+      "digest": "a220fda14ef6d1c3f0afb440e11fd299a69e94d1f627fc3e6855086d8dc1b06c",
       "bytes": 3622
     },
     {

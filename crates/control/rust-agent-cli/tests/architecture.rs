@@ -1433,6 +1433,166 @@ fn phase_four_linux_sandbox_planner_is_issuer_only_and_effect_free() {
 }
 
 #[test]
+fn phase_four_linux_subprocess_is_verified_anchored_and_fail_closed() {
+    let root = workspace_root();
+    let path = root.join("crates/components/subprocess-local");
+    let manifest_text = fs::read_to_string(path.join("Cargo.toml")).unwrap();
+    let manifest: Value = toml::from_str(&manifest_text).unwrap();
+    let metadata = &manifest["package"]["metadata"]["rust-agent"];
+    assert_eq!(metadata["id"].as_str(), Some("subprocess-local"));
+    assert_eq!(metadata["scope"].as_str(), Some("agent"));
+    assert_eq!(metadata["config-source"].as_str(), Some("file"));
+    assert_eq!(metadata["support"].as_str(), Some("production"));
+    assert_eq!(
+        metadata["lifecycle-effects"].as_array().unwrap()[0].as_str(),
+        Some("read-local")
+    );
+    assert_eq!(
+        metadata["runtime-primitives"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>(),
+        ["clock", "sleeper"]
+    );
+    let provides = metadata["provides"].as_array().unwrap();
+    assert_eq!(provides.len(), 1);
+    assert_eq!(provides[0]["capability"].as_str(), Some("cap:subprocess"));
+    assert_eq!(
+        provides[0]["effects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>(),
+        ["read-local", "write-local", "process-exec"]
+    );
+    let requires = metadata["requires"].as_array().unwrap();
+    assert_eq!(requires.len(), 1);
+    assert_eq!(
+        requires[0]["capability"].as_str(),
+        Some("cap:confinement-verifier")
+    );
+    assert_eq!(requires[0]["mode"].as_str(), Some("required"));
+    assert_eq!(requires[0]["field"].as_str(), Some("confinement_verifier"));
+
+    let source = fs::read_to_string(path.join("src/lib.rs")).unwrap();
+    let launcher = fs::read_to_string(path.join("src/launcher.rs")).unwrap();
+    assert!(
+        source
+            .find("self.confinement_verifier.verify(spec)")
+            .unwrap()
+            < source.find("let mut child = command.spawn()").unwrap(),
+        "the confinement verifier must run before every OS spawn"
+    );
+    for required in [
+        "ResolveFlags::NO_SYMLINKS | ResolveFlags::NO_MAGICLINKS",
+        "inheritable_duplicate(&self.config.workspace)",
+        "mpsc::sync_channel(1)",
+        "EnforcementReport::after_child_setup",
+        "kill_process_group(self.process_group, Signal::KILL)",
+        "ProcessError::OutputBudgetExceeded",
+        "FirstCause::Cancelled",
+        "FirstCause::Deadline",
+        "cleanup: Mutex<()>",
+    ] {
+        assert!(
+            source.contains(required),
+            "subprocess-local is missing `{required}`"
+        );
+    }
+    for required in [
+        "set_no_new_privileges()",
+        "CompatLevel::HardRequirement",
+        "RulesetStatus::FullyEnforced",
+        "apply_seccomp(request.network)",
+        "Resource::RLIMIT_NPROC",
+        "Resource::RLIMIT_AS",
+        "getpid() != getpgrp()",
+        "X32_SYSCALL_BIT",
+        "let mut target = command.spawn()",
+    ] {
+        assert!(
+            launcher.contains(required),
+            "Linux launcher is missing `{required}`"
+        );
+    }
+    assert!(
+        launcher.find("let mut target = command.spawn()").unwrap()
+            < launcher.find("let header = encode_setup_header").unwrap(),
+        "the launcher must confirm target exec before acknowledging setup"
+    );
+    for (name, production) in [("provider", &source), ("launcher", &launcher)] {
+        assert!(
+            !production.contains("unsafe"),
+            "subprocess-local {name} contains unsafe code"
+        );
+        assert!(
+            !production.contains("rust_agent_build_executor"),
+            "subprocess-local {name} imports control-plane build code"
+        );
+    }
+    assert!(!source.contains("pub fn run_linux_launcher"));
+
+    let tree = Command::new("cargo")
+        .args([
+            "tree",
+            "-p",
+            "rust-agent-subprocess-local",
+            "--edges",
+            "normal",
+            "--no-default-features",
+        ])
+        .current_dir(&root)
+        .output()
+        .unwrap();
+    assert!(tree.status.success());
+    let tree = String::from_utf8(tree.stdout).unwrap();
+    for forbidden in [
+        "AINS",
+        "rust-agent-agent",
+        "rust-agent-build-executor",
+        "rust-agent-composition",
+        "rust-agent-fs-local",
+        "rust-agent-sandbox-linux",
+        "rust-agent-runtime-tokio",
+        "tokio",
+    ] {
+        assert!(
+            !tree.contains(forbidden),
+            "subprocess-local resolved forbidden dependency `{forbidden}`:\n{tree}"
+        );
+    }
+
+    let invariant_map = fs::read_to_string(root.join("docs/invariant-tests.md")).unwrap();
+    let mapped = markdown_section(&invariant_map, "## Phase 4", "## Accepted ADR amendments");
+    for required in [
+        "rust_agent_subprocess_local::tests::config_is_bounded_canonical_and_digest_anchored",
+        "rust_agent_subprocess_local::tests::verifier_and_cancellation_reject_before_any_spawn",
+        "rust_agent_subprocess_local::tests::output_budget_is_shared_and_runtime_projection_is_exact",
+        "linux_subprocess::real_linux_subprocess_enforces_anchor_handshake_budget_and_cancellation",
+        "architecture::phase_four_linux_subprocess_is_verified_anchored_and_fail_closed",
+    ] {
+        assert!(
+            mapped.contains(required),
+            "unmapped Phase 4.6 evidence: {required}"
+        );
+    }
+    let ci = fs::read_to_string(root.join(".github/workflows/ci.yml")).unwrap();
+    for required in [
+        "Verify Phase 4 Linux subprocess closure",
+        "Verify Phase 4 Linux subprocess contracts",
+        "Verify real Phase 4 subprocess confinement and teardown",
+    ] {
+        assert!(
+            ci.contains(required),
+            "missing Phase 4.6 CI gate `{required}`"
+        );
+    }
+}
+
+#[test]
 fn rust_toolchain_version_is_pinned_and_synchronized() {
     let root = workspace_root();
     assert_eq!(env!("CARGO_PKG_RUST_VERSION"), PINNED_RUST_VERSION);
